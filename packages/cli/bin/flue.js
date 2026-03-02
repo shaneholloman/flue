@@ -1,5 +1,6 @@
 #!/usr/bin/env -S node --experimental-strip-types
 import { exec, execFile, spawn } from 'node:child_process';
+import fs from 'node:fs';
 import path from 'node:path';
 import { pathToFileURL } from 'node:url';
 import {
@@ -21,12 +22,20 @@ let proxyHandles = null;
 
 function printUsage() {
 	console.error(
-		'Usage: flue run <workflowPath> [--args <json>] [--model <provider/model>] [--sandbox <image>]',
+		'Usage:\n' +
+			'  flue run <workflowPath> [--args <json>] [--model <provider/model>] [--sandbox <image>]\n' +
+			'  flue install',
 	);
 }
 
 function parseArgs(argv) {
-	const [command, workflowPath, ...rest] = argv;
+	const [command, ...rest] = argv;
+
+	if (command === 'install') {
+		return { command: 'install' };
+	}
+
+	const [workflowPath, ...flags] = rest;
 	if (command !== 'run' || !workflowPath) {
 		printUsage();
 		process.exit(1);
@@ -36,10 +45,10 @@ function parseArgs(argv) {
 	let model;
 	let sandbox;
 
-	for (let i = 0; i < rest.length; i += 1) {
-		const arg = rest[i];
+	for (let i = 0; i < flags.length; i += 1) {
+		const arg = flags[i];
 		if (arg === '--args') {
-			argsJson = rest[i + 1];
+			argsJson = flags[i + 1];
 			if (!argsJson) {
 				console.error('Missing value for --args');
 				process.exit(1);
@@ -48,7 +57,7 @@ function parseArgs(argv) {
 			continue;
 		}
 		if (arg === '--model') {
-			model = rest[i + 1];
+			model = flags[i + 1];
 			if (!model) {
 				console.error('Missing value for --model');
 				process.exit(1);
@@ -57,7 +66,7 @@ function parseArgs(argv) {
 			continue;
 		}
 		if (arg === '--sandbox') {
-			sandbox = rest[i + 1];
+			sandbox = flags[i + 1];
 			if (!sandbox) {
 				console.error('Missing value for --sandbox');
 				process.exit(1);
@@ -70,7 +79,7 @@ function parseArgs(argv) {
 		process.exit(1);
 	}
 
-	return { workflowPath, argsJson, model, sandbox };
+	return { command: 'run', workflowPath, argsJson, model, sandbox };
 }
 
 /** Parse "provider/model" string into { providerID, modelID }. */
@@ -393,10 +402,36 @@ function createDockerShell(containerName, defaultCwd) {
 	};
 }
 
+// -- Install -----------------------------------------------------------------
+
+async function install() {
+	console.error('[flue] Installing opencode...');
+	const { exitCode, stderr } = await new Promise((resolve) => {
+		exec('curl -fsSL https://opencode.ai/install | bash', (error, stdout, stderr) => {
+			const exitCode = error ? (error.code ?? 1) : 0;
+			resolve({ stdout: stdout ?? '', stderr: stderr ?? '', exitCode });
+		});
+	});
+	if (exitCode !== 0) {
+		console.error(`[flue] Failed to install opencode (exit ${exitCode})`);
+		if (stderr) console.error(stderr);
+		process.exit(1);
+	}
+
+	// Add opencode bin to $GITHUB_PATH if running in GitHub Actions
+	const githubPath = process.env.GITHUB_PATH;
+	if (githubPath) {
+		fs.appendFileSync(githubPath, `${process.env.HOME}/.opencode/bin\n`);
+		console.error('[flue] Added ~/.opencode/bin to $GITHUB_PATH');
+	}
+
+	console.error('[flue] opencode installed successfully');
+}
+
 // -- Main --------------------------------------------------------------------
 
-async function run() {
-	const { workflowPath, argsJson, model: modelStr, sandbox } = parseArgs(process.argv.slice(2));
+async function run(parsedArgs) {
+	const { workflowPath, argsJson, model: modelStr, sandbox } = parsedArgs;
 	const workdir = process.cwd();
 	let startedOpenCode = null;
 
@@ -603,7 +638,12 @@ async function run() {
 	}
 }
 
-run();
+const parsedArgs = parseArgs(process.argv.slice(2));
+if (parsedArgs.command === 'install') {
+	install();
+} else {
+	run(parsedArgs);
+}
 
 async function preflight(workdir, modelOverride) {
 	const res = await fetch(
