@@ -38,6 +38,9 @@ importers:
       astro:
         specifier: ^5.17.1
         version: 5.17.3(@types/node@22.19.9)(jiti@2.6.1)(lightningcss@1.31.1)(rollup@4.58.0)(tsx@4.21.0)(typescript@5.9.3)
+      canvas-confetti:
+        specifier: ^1.9.4
+        version: 1.9.4
       shiki:
         specifier: ^3.22.0
         version: 3.22.0
@@ -45,6 +48,9 @@ importers:
         specifier: ^4.2.0
         version: 4.2.0
     devDependencies:
+      '@types/canvas-confetti':
+        specifier: ^1.9.0
+        version: 1.9.0
       wrangler:
         specifier: ^4.59.3
         version: 4.63.0(@cloudflare/workers-types@4.20260207.0)
@@ -74,8 +80,8 @@ importers:
   packages/cli:
     dependencies:
       '@flue/client':
-        specifier: ^0.0.27
-        version: 0.0.27(typescript@5.9.3)
+        specifier: ^0.0.30
+        version: 0.0.30(typescript@5.9.3)
       '@valibot/to-json-schema':
         specifier: ^1.0.0
         version: 1.5.0(valibot@1.2.0(typescript@5.9.3))
@@ -109,8 +115,8 @@ importers:
         specifier: ^0.7.1
         version: 0.7.1(@opencode-ai/sdk@1.1.56)
       '@flue/client':
-        specifier: ^0.0.27
-        version: 0.0.27(typescript@5.9.3)
+        specifier: ^0.0.30
+        version: 0.0.30(typescript@5.9.3)
       '@opencode-ai/sdk':
         specifier: ^1.1.56
         version: 1.1.56
@@ -780,8 +786,8 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@flue/client@0.0.27':
-    resolution: {integrity: sha512-fO+UEjHeT8Wxo9Mm5uXXGMSQKCMc91Z4xakgV77/PFiCIK/LCH6vN8u/al/YlT7wzvx/Nmvg/LvwQzUuN3XW3Q==}
+  '@flue/client@0.0.30':
+    resolution: {integrity: sha512-+eYt4qXNapss8qVu4NcKR1WMeK7Mtykosp4w9nbeo2VKhB+iTtvMBMMxQM0sFU9KWeCfeJNVBfKlZnpwnd0WQg==}
 
   '@img/colour@1.0.0':
     resolution: {integrity: sha512-A5P/LfWGFSl6nsckYtjw9da+19jB8hkJ6ACTGcDfEJ0aE+l2n2El7dsVM7UVHZQ9s2lmYMWlrS21YLy2IR1LUw==}
@@ -1298,6 +1304,9 @@ packages:
   '@tybys/wasm-util@0.10.1':
     resolution: {integrity: sha512-9tTaPJLSiejZKx+Bmog4uSubteqTvFrVrURwkmHixBo0G4seD0zUxp98E1DzUBJxLQ3NPwXrGKDiVjwx/DpPsg==}
 
+  '@types/canvas-confetti@1.9.0':
+    resolution: {integrity: sha512-aBGj/dULrimR1XDZLtG9JwxX1b4HPRF6CX9Yfwh3NvstZEm1ZL7RBnel4keCPSqs1ANRu1u2Aoz9R+VmtjYuTg==}
+
   '@types/debug@4.1.12':
     resolution: {integrity: sha512-vIChWdVG3LG1SMxEvI/AK+FWJthlrqlTu7fbrlywTkkaONwk/UAGaULXRlf8vkzFBLVm0zkMdCquhL5aOjhXPQ==}
 
@@ -1414,6 +1423,9 @@ packages:
   camelcase@8.0.0:
     resolution: {integrity: sha512-8WB3Jcas3swSvjIeA2yvCJ+Miyz5l1ZmB6HFb9R1317dt9LCQoswg/BGrmAmkWVEszSrrg4RwmO46qIm2OEnSA==}
     engines: {node: '>=16'}
+
+  canvas-confetti@1.9.4:
+    resolution: {integrity: sha512-yxQbJkAVrFXWNbTUjPqjF7G+g6pDotOUHGbkZq2NELZUMDpiJ85rIEazVb8GTaAptNW2miJAXbs1BtioA251Pw==}
 
   ccount@2.0.1:
     resolution: {integrity: sha512-eyrF0jiFpY+3drT6383f1qhkbGsLSifNAjA61IUjZjmLCWjItY6LB9ft9YhoDgwfmclB2zhu51Lc7+95b8NRAg==}
@@ -3043,7 +3055,7 @@ snapshots:
   '@esbuild/win32-x64@0.27.3':
     optional: true
 
-  '@flue/client@0.0.27(typescript@5.9.3)':
+  '@flue/client@0.0.30(typescript@5.9.3)':
     dependencies:
       '@opencode-ai/sdk': 1.1.56
       '@valibot/to-json-schema': 1.5.0(valibot@1.2.0(typescript@5.9.3))
@@ -3436,6 +3448,8 @@ snapshots:
       tslib: 2.8.1
     optional: true
 
+  '@types/canvas-confetti@1.9.0': {}
+
   '@types/debug@4.1.12':
     dependencies:
       '@types/ms': 2.1.0
@@ -3633,6 +3647,8 @@ snapshots:
   cac@6.7.14: {}
 
   camelcase@8.0.0: {}
+
+  canvas-confetti@1.9.4: {}
 
   ccount@2.0.1: {}
 
