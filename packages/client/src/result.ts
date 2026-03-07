@@ -18,6 +18,7 @@ export function extractResult<S extends v.GenericSchema>(
 	parts: Part[],
 	schema: S,
 	sessionId: string,
+	debug?: boolean,
 ): v.InferOutput<S> {
 	// Collect all text content from TextParts
 	const textParts = parts.filter((p): p is Extract<Part, { type: 'text' }> => p.type === 'text');
@@ -66,7 +67,8 @@ export function extractResult<S extends v.GenericSchema>(
 		});
 	}
 
-	console.log('[flue] extractResult: validated result:', JSON.stringify(parsedResult.output));
+	if (debug)
+		console.log('[flue] extractResult: validated result:', JSON.stringify(parsedResult.output));
 	return parsedResult.output;
 }
 

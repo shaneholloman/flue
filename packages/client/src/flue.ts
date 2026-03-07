@@ -16,6 +16,7 @@ export class FlueClient {
 	private readonly model?: { providerID: string; modelID: string };
 	private readonly client: OpencodeClient;
 	private readonly shellFn: FlueClientOptions['shell'];
+	private readonly debug: boolean;
 
 	constructor(options: FlueClientOptions) {
 		this.proxyInstructions =
@@ -23,6 +24,7 @@ export class FlueClient {
 		this.workdir = options.workdir;
 		this.model = options.model;
 		this.shellFn = options.shell;
+		this.debug = options.debug ?? false;
 		this.client = createOpencodeClient({
 			baseUrl: options.opencodeUrl ?? 'http://localhost:48765',
 			directory: this.workdir,
@@ -43,7 +45,14 @@ export class FlueClient {
 			...options,
 			model: options?.model ?? this.model,
 		};
-		return runSkill(this.client, this.workdir, name, mergedOptions, this.proxyInstructions);
+		return runSkill(
+			this.client,
+			this.workdir,
+			name,
+			mergedOptions,
+			this.proxyInstructions,
+			this.debug,
+		);
 	}
 
 	/** Run an inline prompt in a new OpenCode session. */
@@ -64,15 +73,24 @@ export class FlueClient {
 			parts.push(buildProxyInstructions(this.proxyInstructions));
 		}
 		if (schema) {
-			parts.push('When complete, you MUST output your result between these exact delimiters conforming to this schema:');
+			parts.push(
+				'When complete, you MUST output your result between these exact delimiters conforming to this schema:',
+			);
 			parts.push(buildResultInstructions(schema));
 		}
 		const fullPrompt = parts.join('\n');
 		const label = `prompt("${promptText.length > 40 ? promptText.slice(0, 40) + '…' : promptText}")`;
-		return runPrompt(this.client, this.workdir, label, fullPrompt, {
-			result: options?.result,
-			model: options?.model ?? this.model,
-		});
+		return runPrompt(
+			this.client,
+			this.workdir,
+			label,
+			fullPrompt,
+			{
+				result: options?.result,
+				model: options?.model ?? this.model,
+			},
+			this.debug,
+		);
 	}
 
 	/** Execute a shell command with scoped environment variables. */

@@ -14,6 +14,8 @@ export interface FlueClientOptions {
 	fetch: (request: Request) => Promise<Response>;
 	/** Shell implementation for executing commands in the target environment. */
 	shell: (command: string, options?: ShellOptions) => Promise<ShellResult>;
+	/** Enable verbose debug logging (default: false). */
+	debug?: boolean;
 }
 
 export interface SkillOptions<S extends v.GenericSchema | undefined = undefined> {

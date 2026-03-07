@@ -23,7 +23,7 @@ let proxyHandles = null;
 function printUsage() {
 	console.error(
 		'Usage:\n' +
-			'  flue run <workflowPath> [--args <json>] [--model <provider/model>] [--sandbox <image>]\n' +
+			'  flue run <workflowPath> [--args <json>] [--model <provider/model>] [--sandbox <image>] [--debug]\n' +
 			'  flue install',
 	);
 }
@@ -44,6 +44,7 @@ function parseArgs(argv) {
 	let argsJson;
 	let model;
 	let sandbox;
+	let debug = false;
 
 	for (let i = 0; i < flags.length; i += 1) {
 		const arg = flags[i];
@@ -74,12 +75,16 @@ function parseArgs(argv) {
 			i += 1;
 			continue;
 		}
+		if (arg === '--debug') {
+			debug = true;
+			continue;
+		}
 		console.error(`Unknown argument: ${arg}`);
 		printUsage();
 		process.exit(1);
 	}
 
-	return { command: 'run', workflowPath, argsJson, model, sandbox };
+	return { command: 'run', workflowPath, argsJson, model, sandbox, debug };
 }
 
 /** Parse "provider/model" string into { providerID, modelID }. */
@@ -103,21 +108,26 @@ function parseModel(modelStr) {
  * Connect to OpenCode's SSE /event endpoint and log events to stderr.
  * Returns an object with an abort() method to close the connection.
  */
-function startEventStream(workdir) {
+function startEventStream(workdir, debug) {
 	const controller = new AbortController();
 	const sessionNames = new Map(); // sessionId -> title
 	const textBuffers = new Map(); // sessionId -> accumulated text
 	const runningTools = new Map(); // sessionId -> "tool:input" key of last logged tool:running
 
 	// Fire-and-forget: runs in background, logs to stderr
-	_consumeEventStream(controller.signal, workdir, sessionNames, textBuffers, runningTools).catch(
-		(err) => {
-			// AbortError is expected on shutdown
-			if (err.name !== 'AbortError') {
-				console.error(`[opencode] event stream error: ${err.message}`);
-			}
-		},
-	);
+	_consumeEventStream(
+		controller.signal,
+		workdir,
+		sessionNames,
+		textBuffers,
+		runningTools,
+		debug,
+	).catch((err) => {
+		// AbortError is expected on shutdown
+		if (err.name !== 'AbortError') {
+			console.error(`[opencode] event stream error: ${err.message}`);
+		}
+	});
 
 	return {
 		abort() {
@@ -135,7 +145,14 @@ function startEventStream(workdir) {
 	};
 }
 
-async function _consumeEventStream(signal, workdir, sessionNames, textBuffers, runningTools) {
+async function _consumeEventStream(
+	signal,
+	workdir,
+	sessionNames,
+	textBuffers,
+	runningTools,
+	debug,
+) {
 	const { transformEvent } = await import('@flue/client');
 	const url = `${OPENCODE_URL}/event?directory=${encodeURIComponent(workdir)}`;
 	const res = await fetch(url, { signal });
@@ -188,7 +205,7 @@ async function _consumeEventStream(signal, workdir, sessionNames, textBuffers, r
 			if (!event) continue;
 
 			const name = sessionNames.get(event.sessionId) ?? event.sessionId.slice(0, 12);
-			logEvent(event, name, textBuffers, runningTools);
+			logEvent(event, name, textBuffers, runningTools, debug);
 		}
 	}
 }
@@ -196,12 +213,12 @@ async function _consumeEventStream(signal, workdir, sessionNames, textBuffers, r
 /**
  * Format and log a single FlueEvent to stderr.
  */
-function logEvent(event, sessionName, textBuffers, runningTools) {
+function logEvent(event, sessionName, textBuffers, runningTools, debug) {
 	const prefix = `[opencode] (${sessionName})`;
 
 	switch (event.type) {
 		case 'tool.pending':
-			console.error(`${prefix} tool:pending  ${event.tool} — ${event.input}`);
+			if (debug) console.error(`${prefix} tool:pending  ${event.tool} — ${event.input}`);
 			break;
 
 		case 'tool.running': {
@@ -218,9 +235,11 @@ function logEvent(event, sessionName, textBuffers, runningTools) {
 
 		case 'tool.complete': {
 			runningTools.delete(event.sessionId);
-			const dur = event.duration ? ` (${(event.duration / 1000).toFixed(1)}s)` : '';
-			const output = event.output ? ` → ${event.output.slice(0, 200)}` : '';
-			console.error(`${prefix} tool:complete ${event.tool}${dur} — ${event.input}${output}`);
+			if (debug) {
+				const dur = event.duration ? ` (${(event.duration / 1000).toFixed(1)}s)` : '';
+				const output = event.output ? ` → ${event.output.slice(0, 200)}` : '';
+				console.error(`${prefix} tool:complete ${event.tool}${dur} — ${event.input}${output}`);
+			}
 			break;
 		}
 
@@ -250,6 +269,7 @@ function logEvent(event, sessionName, textBuffers, runningTools) {
 		case 'status':
 			// Flush text buffer on status change (especially idle)
 			flushTextBuffer(textBuffers, event.sessionId, sessionName);
+			if (!debug) break;
 			// Suppress busy/idle — tool lifecycle (pending/running/complete) and
 			// step:start/step:finish already convey this. Only log meaningful
 			// statuses like retry or compacted.
@@ -262,13 +282,15 @@ function logEvent(event, sessionName, textBuffers, runningTools) {
 			break;
 
 		case 'step.start':
-			console.error(`${prefix} step:start`);
+			if (debug) console.error(`${prefix} step:start`);
 			break;
 
 		case 'step.finish': {
-			const tokens = `${event.tokens.input} in / ${event.tokens.output} out`;
-			const cost = event.cost > 0 ? `, $${event.cost.toFixed(4)}` : '';
-			console.error(`${prefix} step:finish — ${tokens}${cost} — ${event.reason}`);
+			if (debug) {
+				const tokens = `${event.tokens.input} in / ${event.tokens.output} out`;
+				const cost = event.cost > 0 ? `, $${event.cost.toFixed(4)}` : '';
+				console.error(`${prefix} step:finish — ${tokens}${cost} — ${event.reason}`);
+			}
 			break;
 		}
 
@@ -461,7 +483,7 @@ function addToPathCI(dir) {
 // -- Main --------------------------------------------------------------------
 
 async function run(parsedArgs) {
-	const { workflowPath, argsJson, model: modelStr, sandbox } = parsedArgs;
+	const { workflowPath, argsJson, model: modelStr, sandbox, debug } = parsedArgs;
 	const workdir = process.cwd();
 	let startedOpenCode = null;
 
@@ -625,7 +647,7 @@ async function run(parsedArgs) {
 	await preflight(workdir, modelStr);
 
 	// Start streaming events from OpenCode (background, logs to stderr)
-	const eventStream = startEventStream(workdir);
+	const eventStream = startEventStream(workdir, debug);
 	eventStreamAbort = eventStream;
 
 	const model = modelStr ? parseModel(modelStr) : undefined;
@@ -638,6 +660,7 @@ async function run(parsedArgs) {
 		model,
 		fetch: (req) => globalThis.fetch(req),
 		shell,
+		debug,
 	});
 
 	try {

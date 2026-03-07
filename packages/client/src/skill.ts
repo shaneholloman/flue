@@ -27,21 +27,21 @@ export async function runPrompt<S extends v.GenericSchema | undefined = undefine
 	label: string,
 	prompt: string,
 	options?: PromptOptions<S>,
+	debug?: boolean,
 ): Promise<S extends v.GenericSchema ? v.InferOutput<S> : void> {
 	const { result: schema, model, timeout } = options ?? {};
-
 	console.log(`[flue] ${label}: starting`);
-
 	console.log(`[flue] ${label}: creating session`);
 	const session = await client.session.create({
 		body: { title: label },
 		query: { directory: workdir },
 	});
-	console.log(`[flue] ${label}: session created`, {
-		hasData: !!session.data,
-		sessionId: session.data?.id,
-		error: session.error,
-	});
+	if (debug)
+		console.log(`[flue] ${label}: session created`, {
+			hasData: !!session.data,
+			sessionId: session.data?.id,
+			error: session.error,
+		});
 
 	if (!session.data) {
 		throw new Error(`Failed to create OpenCode session for "${label}".`);
@@ -52,7 +52,7 @@ export async function runPrompt<S extends v.GenericSchema | undefined = undefine
 	try {
 		const promptStart = Date.now();
 
-		console.log(`[flue] ${label}: sending prompt async`);
+		if (debug) console.log(`[flue] ${label}: sending prompt async`);
 		const asyncResult = await client.session.promptAsync({
 			path: { id: sessionId },
 			query: { directory: workdir },
@@ -62,11 +62,12 @@ export async function runPrompt<S extends v.GenericSchema | undefined = undefine
 			},
 		});
 
-		console.log(`[flue] ${label}: prompt sent`, {
-			hasError: !!asyncResult.error,
-			error: asyncResult.error,
-			data: asyncResult.data,
-		});
+		if (debug)
+			console.log(`[flue] ${label}: prompt sent`, {
+				hasError: !!asyncResult.error,
+				error: asyncResult.error,
+				data: asyncResult.data,
+			});
 
 		if (asyncResult.error) {
 			throw new Error(
@@ -75,31 +76,42 @@ export async function runPrompt<S extends v.GenericSchema | undefined = undefine
 		}
 
 		// Confirm the session actually started processing
-		await confirmSessionStarted(client, sessionId, workdir, label);
+		await confirmSessionStarted(client, sessionId, workdir, label, debug);
 
-		console.log(`[flue] ${label}: starting polling`);
-		const parts = await pollUntilIdle(client, sessionId, workdir, label, promptStart, timeout);
+		if (debug) console.log(`[flue] ${label}: starting polling`);
+		const parts = await pollUntilIdle(
+			client,
+			sessionId,
+			workdir,
+			label,
+			promptStart,
+			timeout,
+			debug,
+		);
 		const promptElapsed = ((Date.now() - promptStart) / 1000).toFixed(1);
 
-		console.log(`[flue] ${label}: completed (${promptElapsed}s)`);
+		if (debug) console.log(`[flue] ${label}: completed (${promptElapsed}s)`);
 
 		if (!schema) {
 			return undefined as S extends v.GenericSchema ? v.InferOutput<S> : undefined;
 		}
 
 		try {
-			return extractResult(parts, schema as v.GenericSchema, sessionId) as S extends v.GenericSchema
-				? v.InferOutput<S>
-				: undefined;
+			return extractResult(
+				parts,
+				schema as v.GenericSchema,
+				sessionId,
+				debug,
+			) as S extends v.GenericSchema ? v.InferOutput<S> : undefined;
 		} catch (error) {
 			if (!(error instanceof SkillOutputError)) throw error;
 			if (!error.message.includes('---RESULT_START---')) throw error;
 			// The LLM forgot to include the RESULT_START/RESULT_END block.
 			// Send a follow-up message in the same session to ask for the result
 			// while the format instructions are fresh in context.
-			console.log(
-				`[flue] ${label}: result extraction failed, sending follow-up prompt to request result`,
-			);
+				console.log(
+					`[flue] ${label}: result extraction failed, sending follow-up prompt to request result`,
+				);
 
 			const followUpResult = await client.session.promptAsync({
 				path: { id: sessionId },
@@ -116,19 +128,28 @@ export async function runPrompt<S extends v.GenericSchema | undefined = undefine
 			});
 
 			if (followUpResult.error) {
-				if ((followUpResult.error instanceof Error)) {
+				if (followUpResult.error instanceof Error) {
 					followUpResult.error.cause = error;
 				}
 				throw followUpResult.error;
 			}
 
-			await confirmSessionStarted(client, sessionId, workdir, label);
-			const allParts = await pollUntilIdle(client, sessionId, workdir, label, Date.now(), timeout);
+			await confirmSessionStarted(client, sessionId, workdir, label, debug);
+			const allParts = await pollUntilIdle(
+				client,
+				sessionId,
+				workdir,
+				label,
+				Date.now(),
+				timeout,
+				debug,
+			);
 
 			return extractResult(
 				allParts,
 				schema as v.GenericSchema,
 				sessionId,
+				debug,
 			) as S extends v.GenericSchema ? v.InferOutput<S> : undefined;
 		}
 	} finally {
@@ -156,6 +177,7 @@ export async function runSkill<S extends v.GenericSchema | undefined = undefined
 	name: string,
 	options?: SkillOptions<S>,
 	proxyInstructions?: string[],
+	debug?: boolean,
 ): Promise<S extends v.GenericSchema ? v.InferOutput<S> : void> {
 	const { args, result: schema, model, timeout } = options ?? {};
 	const prompt = buildSkillPrompt(
@@ -164,7 +186,14 @@ export async function runSkill<S extends v.GenericSchema | undefined = undefined
 		schema as v.GenericSchema | undefined,
 		proxyInstructions,
 	);
-	return runPrompt(client, workdir, `skill("${name}")`, prompt, { result: schema, model, timeout });
+	return runPrompt(
+		client,
+		workdir,
+		`skill("${name}")`,
+		prompt,
+		{ result: schema, model, timeout },
+		debug,
+	);
 }
 
 /**
@@ -177,6 +206,7 @@ async function confirmSessionStarted(
 	sessionId: string,
 	workdir: string,
 	label: string,
+	debug?: boolean,
 ): Promise<void> {
 	const maxAttempts = 15; // 15 * 1s = 15s
 	for (let attempt = 1; attempt <= maxAttempts; attempt++) {
@@ -186,7 +216,7 @@ async function confirmSessionStarted(
 		const statusResult = await client.session.status({ query: { directory: workdir } });
 		const sessionStatus = statusResult.data?.[sessionId];
 		if (sessionStatus?.type === 'busy') {
-			console.log(`[flue] ${label}: session confirmed running`);
+			if (debug) console.log(`[flue] ${label}: session confirmed running`);
 			return;
 		}
 
@@ -197,7 +227,7 @@ async function confirmSessionStarted(
 		});
 		const messages = messagesResult.data as Array<{ info: { role: string } }> | undefined;
 		if (messages && messages.length > 0) {
-			console.log(`[flue] ${label}: session confirmed (${messages.length} messages)`);
+			if (debug) console.log(`[flue] ${label}: session confirmed (${messages.length} messages)`);
 			return;
 		}
 	}
@@ -216,6 +246,7 @@ async function pollUntilIdle(
 	label: string,
 	startTime: number,
 	timeout?: number,
+	debug?: boolean,
 ): Promise<Part[]> {
 	const maxPollTime = timeout ?? DEFAULT_POLL_TIMEOUT;
 	let emptyPolls = 0;
