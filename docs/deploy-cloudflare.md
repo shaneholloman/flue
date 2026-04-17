@@ -215,6 +215,28 @@ export default async function ({ init, sessionId, env, payload }: FlueContext) {
 
 The `Sandbox` binding is a Durable Object that Flue configures automatically in the generated `wrangler.jsonc`. No extra setup needed — `flue build --target cloudflare` generates both the wrangler config and a default `Dockerfile` for the container.
 
+### Secure egress with outbound Workers
+
+When your agent runs in a container, it may need to call external APIs — GitHub, npm registries, internal services. The traditional approach is to inject API tokens as environment variables, but that means the agent (and the LLM) has direct access to those secrets.
+
+Cloudflare Sandboxes solve this with [outbound Workers](https://blog.cloudflare.com/sandbox-auth/) — a programmable egress proxy that intercepts outgoing HTTP/HTTPS requests from the container. Secrets are injected at the proxy layer, so the container never sees them:
+
+```typescript
+class MySandbox extends Sandbox {
+  static outboundByHost = {
+    'api.github.com': (request, env, ctx) => {
+      const headers = new Headers(request.headers);
+      headers.set('Authorization', `Bearer ${env.GITHUB_TOKEN}`);
+      return fetch(request, { headers });
+    },
+  };
+}
+```
+
+This is a zero-trust model — no token is ever granted to the untrusted sandbox. The proxy runs on the same machine as the sandbox, so latency is minimal. You can also use outbound Workers to log requests, block specific domains, or enforce dynamic policies that change over the lifetime of a session.
+
+For full details, see the [outbound Workers documentation](https://developers.cloudflare.com/containers/platform-details/outbound-traffic/).
+
 ### When to use containers
 
 | Virtual sandbox                  | Container sandbox                           |
