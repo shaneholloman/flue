@@ -4,7 +4,7 @@
 
 # Flue
 
-Flue is **The Sandbox Agent Framework.** If you know how to use Claude Code (or OpenCode, Codex, Gemini, etc)... then you already know the basics of how Flue works.
+Flue is **The Sandbox Agent Framework.** If you know how to use Claude Code (or OpenCode, Codex, Gemini, etc)... then you already know the basics of how to build agents with Flue.
 
 A [Sandbox Agent](https://developers.openai.com/api/docs/guides/agents/sandboxes) pairs an **agent harness** (like Claude Code) with a secure, isolated container workspace. Sandbox Agents can edit files, write and execute code, spin up subagents, run terminal commands, and drive themselves autonomously to solve any given task. This pattern unlocks more powerful, intelligent agents that traditional AI frameworks wouldn't otherwise let you build.
 
