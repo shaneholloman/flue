@@ -1,8 +1,15 @@
-# flue
-
 > **Experimental** — Flue is under active development. APIs may change.
+>
+> Looking for `v0.0.x`? [See here.](https://github.com/withastro/flue/tree/v0.0.x)
 
-Agent framework where agents are directories compiled into deployable server artifacts.
+# Flue 
+
+Flue is **The Sandbox Agent Framework.**  If you know how to use Claude Code (or OpenCode, Codex, Gemini, etc)... then you already know the basics of how Flue works.
+
+A [Sandbox Agent](https://developers.openai.com/api/docs/guides/agents/sandboxes) pairs an **agent harness** (like Claude Code) with a secure, isolated container workspace. Sandbox Agents can edit files, write and excute code, spin up subagents, run terminal commands, and drive themselves autonomously to solve any given task. This pattern unlocks more powerful, intelligent agents that traditional AI frameworks wouldn't otherwise let you build.
+
+Our take is that 1) any agent can be represented as a Sandbox Agent, and 2) any agent is _best_ represented as a Sandbox Agent. So we designed Flue to deliver on this vision.
+
 
 ## Packages
 
