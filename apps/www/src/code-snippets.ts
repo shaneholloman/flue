@@ -76,14 +76,26 @@ import * as v from 'valibot';
 // Triggered in CI via the CLI — no HTTP endpoint needed.
 export const triggers = {};
 
-export default async function ({ init, payload }: FlueContext) {
-  const session = await init({ sandbox: 'local' });
-  return await session.skill('triage', {
+export default async function ({ init, payload, env }: FlueContext) {
+  const session = await init();
+  // Run the 'triage' skill to triage the GitHub issue.
+  const result = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
     result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),
+    }),
+  });
+  // Post the triage result back to the GitHub issue as a comment.
+  await fetch(\`https://api.github.com/repos/\${payload.repo}/issues/\${payload.issueNumber}/comments\`, {
+    method: 'POST',
+    headers: {
+      Authorization: \`Bearer \${env.GITHUB_TOKEN}\`,
+      Accept: 'application/vnd.github+json',
+    },
+    body: JSON.stringify({
+      body: \`**Severity:** \${triage.severity}\\n**Reproducible:** \${triage.reproducible}\\n\\n\${triage.summary}\`,
     }),
   });
 }`;
@@ -100,38 +112,30 @@ export default async function ({ init, payload, env }: FlueContext) {
   // Each session gets a real container via Daytona.
   const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
   const sandbox = await client.create();
-  const session = await init({
-    sandbox: daytona(sandbox, { cleanup: true }),
-  });
-
+  const session = await init({ sandbox: daytona(sandbox) });
+  // Note: In production, you'd probably want to bake
+  // container setup into the container image itself. 
   await session.shell(\`git clone \${payload.repo} /workspace/project\`);
   await session.shell('npm install', { cwd: '/workspace/project' });
-
   return await session.prompt(payload.prompt);
 }`;
 
 export const DATA_AGENT = `// Built for: Node
 import type { FlueContext } from '@flue/sdk/client';
+import { getVirtualSandbox } from '@flue/sdk/node';
 import * as v from 'valibot';
 
 // POST /agents/data/:id
 export const triggers = { webhook: true };
 
-export default async function ({ init, payload, env }: FlueContext) {
-  const session = await init({ sandbox: 'local' });
-  const plan = await session.skill('query-planner', {
-    args: { query: payload.query },
-    result: v.object({ sql: v.string() }),
-  });
-  // Query the company's analytics API from inside the sandbox.
-  const results = await session.shell(
-    \`curl -s -X POST "\${env.ANALYTICS_API_URL}/query" \\
-       -H "Authorization: Bearer \${env.ANALYTICS_API_KEY}" \\
-       -H "Content-Type: application/json" \\
-       -d '{"sql": "\${plan.sql}"}'\`,
-  );
-  return await session.prompt(
-    \`Summarize these results for the user: \${results}\`,
-    { result: v.object({ answer: v.string(), insights: v.array(v.string()) }) },
-  );
+export default async function ({ init, payload }: FlueContext) {
+  // Mount the data analyst context to the agent session — this contains
+  // all the files (context) & skills (abilities) needed for the agent to
+  // complete its task. The agent can run \`ls\`, \`grep\`, write Python, 
+  // and make read-only queries to fetch data from your analytics service.
+  const session = await init({ sandbox: await getVirtualSandbox('./data') });
+
+  // One prompt: the agent now has everything it needs to analyze the data
+  // and problem-solve to properly answer your questions.
+  return await session.prompt(payload.query);
 }`;
