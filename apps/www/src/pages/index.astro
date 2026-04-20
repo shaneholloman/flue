@@ -277,7 +277,7 @@ const floatingSquares = [
                     desc: 'read · write · grep · glob',
                     color: '#059669',     // emerald-600 — foundational "ground"
                     textColor: '#047857', // emerald-700 (AA on tinted bg)
-                    rows: 2,
+                    rows: 3,
                   },
                   {
                     key: 'context',
@@ -293,7 +293,7 @@ const floatingSquares = [
                     desc: 'bash · security · network',
                     color: '#8b5cf6',     // violet-500 — boundary/space
                     textColor: '#6d28d9', // violet-700 (AA)
-                    rows: 4,
+                    rows: 3,
                   },
                   {
                     key: 'agent',
@@ -301,7 +301,7 @@ const floatingSquares = [
                     desc: 'intelligence · tools · memory',
                     color: '#2563eb',     // blue-600 — vivid, active orchestrator
                     textColor: '#1d4ed8', // blue-700 (AA)
-                    rows: 5,
+                    rows: 3,
                   },
                 ].map((layer, index) => {
                   // Layer number counts down from the top-visible band (01 at
@@ -369,7 +369,7 @@ const floatingSquares = [
                         <span class="font-[JetBrains_Mono,monospace] text-[11px] font-semibold tracking-[0.18em] uppercase leading-none" style={`color: ${layer.textColor};`}>
                           <span style="opacity: 0.55;">{num} /</span> {layer.label}
                         </span>
-                        <span class="font-[JetBrains_Mono,monospace] text-[10px] tracking-wide truncate leading-none" style={`color: ${layer.textColor};`}>
+                        <span class="font-[JetBrains_Mono,monospace] text-[11px] tracking-wide truncate leading-none" style={`color: ${layer.textColor};`}>
                           {layer.desc}
                         </span>
                       </div>
