@@ -54,9 +54,9 @@ import type { FlueContext } from '@flue/sdk/client';
 export const triggers = { webhook: true };
 
 export default async function ({ init, payload, env }: FlueContext) {
-  // Mount the R2 knowledge base as the agent's filesystem.
-  // The agent can grep, glob, and read articles with bash,
-  // without needing to spin up an entire container sandbox.
+  // Mount a bucket as your agent's filesystem in a virtual sandbox.
+  // The agent can grep, glob, and read from the knowledge base with 
+  // bash, without the need of a traditional, expensive container.
   const sandbox = await getVirtualSandbox(env.KNOWLEDGE_BASE);
   const session = await init({ sandbox });
 
@@ -73,7 +73,7 @@ export const ISSUE_TRIAGE = `// Built for: Node, GitHub Actions
 import type { FlueContext } from '@flue/sdk/client';
 import * as v from 'valibot';
 
-// Triggered from CI via the CLI — no HTTP endpoint needed.
+// Triggered in CI via the CLI — no HTTP endpoint needed.
 export const triggers = {};
 
 export default async function ({ init, payload }: FlueContext) {
@@ -117,16 +117,19 @@ import * as v from 'valibot';
 // POST /agents/data/:id
 export const triggers = { webhook: true };
 
-export default async function ({ init, payload }: FlueContext) {
+export default async function ({ init, payload, env }: FlueContext) {
   const session = await init({ sandbox: 'local' });
   const plan = await session.skill('query-planner', {
     args: { query: payload.query },
-    result: v.object({
-      sql: v.string(),
-      visualization: v.picklist(['table', 'chart', 'summary']),
-    }),
+    result: v.object({ sql: v.string() }),
   });
-  const results = await session.shell(\`duckdb company.db "\${plan.sql}"\`);
+  // Query the company's analytics API from inside the sandbox.
+  const results = await session.shell(
+    \`curl -s -X POST "\${env.ANALYTICS_API_URL}/query" \\
+       -H "Authorization: Bearer \${env.ANALYTICS_API_KEY}" \\
+       -H "Content-Type: application/json" \\
+       -d '{"sql": "\${plan.sql}"}'\`,
+  );
   return await session.prompt(
     \`Summarize these results for the user: \${results}\`,
     { result: v.object({ answer: v.string(), insights: v.array(v.string()) }) },
