@@ -130,7 +130,7 @@ const floatingSquares = [
                 - outer <g.hidden sm:block>: hides all squares on mobile
                 - positioning <g translate>: places the square
                 - animating <g.floating-square>: fade-in + float (transform)
-                - inner <g.floating-square-color>: color cycle via currentColor */}
+                - inner <g.floating-square-color>: sets currentColor (blue) */}
             <g class="hidden sm:block">
               {floatingSquares.map((sq) => (
                 <g transform={`translate(${sq.x}, ${sq.y})`} opacity={sq.opacity}>
@@ -166,7 +166,7 @@ const floatingSquares = [
           The Sandbox Agent Framework
         </h1>
         <p class="mt-6 max-w-2xl lg:max-w-4xl text-lg lg:text-2xl text-gray-600 text-balance">
-          Build the most powerful AI agents with Flue's programmable TypeScript harness. Write once, deploy anywhere.
+          Build powerful AI agents with Flue's programmable TypeScript agent harness. Write once, deploy anywhere.
         </p>
         <div class="mt-8 flex flex-wrap items-center gap-4">
           <!-- Copy Prompt CTA.
@@ -253,10 +253,10 @@ const floatingSquares = [
               A <a href="https://developers.openai.com/api/docs/guides/agents/sandboxes" target="_blank" rel="noopener noreferrer" class="text-gray-950 underline decoration-gray-300 underline-offset-2 hover:decoration-gray-950 transition-colors">Sandbox Agent</a> is a powerful form of AI agent that pairs an agent harness (like Claude Code or pi) with a dedicated workspace for the agent to operate in.
             </p>
             <p class="mt-6 text-lg text-gray-500 leading-relaxed">
-              <strong>We believe that every agent should have a sandbox.</strong> Traditional containers and VMs are still too slow and expensive to run in most real-world scenarios. But recent advances in microVMs and in-process virtualization have suddenly made sandboxes cheaper and more accessible than ever. It's time to embrace the shift.
+              <strong>We believe that every agent should have a sandbox.</strong> Traditional containers and VMs are still too slow and expensive to run in most real-world scenarios. But recent advances in microVMs and in-process sandbox virtualization have suddenly made sandboxes cheaper and more accessible for more use-cases than ever. It's time to embrace the shift.
             </p>
             <p class="mt-6 text-lg text-gray-500 leading-relaxed">
-              <strong>Flue is a TypeScript framework for building sandbox agents.</strong> Flue wraps your sandbox in a programmable harness &mdash; one that lets you prompt, call skills, and run CLIs safely from inside the sandbox. This gives you deterministic control over otherwise autonomous AI workflows. Flue then builds and bundles your agent into a deployable HTTP service, or a local CLI for running in CI.
+              <strong>Flue is a TypeScript framework for building sandbox agents.</strong> Flue wraps your sandbox in a programmable harness &mdash; one that lets you prompt, call skills, and run CLIs inside the sandbox. Flue allows deterministic control control over your otherwise autonomous AI agent behavior. When you're ready to ship, Flue builds and bundles your agent into a deployable HTTP service. Or a local script, perfect for running in CI.
             </p>
           </div>
 
@@ -651,7 +651,7 @@ const floatingSquares = [
             try { document.execCommand('copy'); } catch {}
             ta.remove();
           }
-          if (copyLabel) copyLabel.textContent = 'Copied to clipboard';
+          if (copyLabel) copyLabel.textContent = 'Copied to clipboard!';
           clearTimeout(resetTimer);
           resetTimer = setTimeout(() => {
             if (copyLabel) copyLabel.textContent = originalLabel;
