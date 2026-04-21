@@ -59,18 +59,18 @@ export default async function ({ init, payload, env }: FlueContext) {
   // bash, without the need of a traditional, expensive container.
   const sandbox = await getVirtualSandbox(env.KNOWLEDGE_BASE);
   const session = await init({ sandbox });
-
+  // Prompt! The agent harness includes your workspace AGENTS.md,
+  // skills, and roles (aka subagents) to complete your task as 
+  // desired. Use \`session.skill()\` to call a skill directly.
   return await session.prompt(
-    \`You are a support agent. Search the knowledge base for articles
-    relevant to this request, then write a helpful response.
-
-    Customer: \${payload.message}\`,
-    { role: 'triager' },
+    \`Respond to this customer message: \${payload.message}\`,
+    { role: 'support-agent' },
   );
 }`;
 
 export const ISSUE_TRIAGE = `// Built for: Node, GitHub Actions
 import type { FlueContext } from '@flue/sdk/client';
+import { Octokit } from '@octokit/core';
 import * as v from 'valibot';
 
 // Triggered in CI via the CLI — no HTTP endpoint needed.
@@ -79,7 +79,7 @@ export const triggers = {};
 export default async function ({ init, payload, env }: FlueContext) {
   const session = await init();
   // Run the 'triage' skill to triage the GitHub issue.
-  const result = await session.skill('triage', {
+  const triage = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
     result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
@@ -87,16 +87,14 @@ export default async function ({ init, payload, env }: FlueContext) {
       summary: v.string(),
     }),
   });
-  // Post the triage result back to the GitHub issue as a comment.
-  await fetch(\`https://api.github.com/repos/\${payload.repo}/issues/\${payload.issueNumber}/comments\`, {
-    method: 'POST',
-    headers: {
-      Authorization: \`Bearer \${env.GITHUB_TOKEN}\`,
-      Accept: 'application/vnd.github+json',
-    },
-    body: JSON.stringify({
-      body: \`**Severity:** \${triage.severity}\\n**Reproducible:** \${triage.reproducible}\\n\\n\${triage.summary}\`,
-    }),
+  // Post the triage result back to GitHub.
+  // The agent/sandbox never sees your sensitive GITHUB_TOKEN.
+  const octokit = new Octokit({ auth: env.GITHUB_TOKEN });
+  await octokit.request('POST /repos/{owner}/{repo}/issues/{num}/comments', {
+    owner: 'withastro',
+    repo: 'flue',
+    num: payload.issueNumber,
+    body: \`**Severity:** \${triage.severity}\\n**Reproducible:** \${triage.reproducible}\\n\\n\${triage.summary}\`,
   });
 }`;
 
@@ -113,8 +111,9 @@ export default async function ({ init, payload, env }: FlueContext) {
   const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
   const sandbox = await client.create();
   const session = await init({ sandbox: daytona(sandbox) });
-  // Note: In production, you'd probably want to bake
-  // container setup into the container image itself. 
+  // Setup the sandbox (for illustrative purposes only). 
+  // In production, you'd want to bake setup into the container image,
+  // or use a snapshot (if available from your sandbox provider).
   await session.shell(\`git clone \${payload.repo} /workspace/project\`);
   await session.shell('npm install', { cwd: '/workspace/project' });
   return await session.prompt(payload.prompt);
@@ -134,8 +133,11 @@ export default async function ({ init, payload }: FlueContext) {
   // complete its task. The agent can run \`ls\`, \`grep\`, write Python, 
   // and make read-only queries to fetch data from your analytics service.
   const session = await init({ sandbox: await getVirtualSandbox('./data') });
-
-  // One prompt: the agent now has everything it needs to analyze the data
-  // and problem-solve to properly answer your questions.
-  return await session.prompt(payload.query);
+  // Prompt! The agent harness includes your workspace AGENTS.md,
+  // skills, and roles (aka subagents) to analyze the data and
+  // complete your task as desired.
+  return await session.prompt(
+    \`Answer this user question: \${payload.message}\`,
+    { role: 'data-analyst' },
+  );
 }`;
