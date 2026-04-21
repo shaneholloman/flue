@@ -8,14 +8,17 @@ import { build } from '@flue/sdk';
 function printUsage() {
 	console.error(
 		'Usage:\n' +
-			'  flue run <agent> --target <node|cloudflare> --session-id <id> [--payload <json>] [--model <provider/model>] [--dir <path>] [--port <number>]\n' +
-			'  flue build --target <node|cloudflare> [--model <provider/model>] [--dir <path>]\n' +
+			'  flue run <agent> --target <node|cloudflare> --session-id <id> [--payload <json>] [--dir <path>] [--port <number>]\n' +
+			'  flue build --target <node|cloudflare> [--dir <path>]\n' +
 			'\n' +
 			'Examples:\n' +
 			'  flue run hello --target node --session-id test-1\n' +
 			'  flue run hello --target node --session-id test-1 --payload \'{"name": "World"}\'\n' +
 			'  flue build --target node --dir ./my-workspace\n' +
-			'  flue build --target cloudflare --dir ./my-workspace',
+			'  flue build --target cloudflare --dir ./my-workspace\n' +
+			'\n' +
+			'Note: set the model inside your agent via `init({ model: "provider/model-id" })` ' +
+			'or per-call `{ model: ... }` on prompt/skill/task.',
 	);
 }
 
@@ -25,7 +28,6 @@ interface RunArgs {
 	target: 'node' | 'cloudflare';
 	sessionId: string;
 	payload: string;
-	model?: string;
 	dir: string;
 	port: number;
 }
@@ -33,21 +35,18 @@ interface RunArgs {
 interface BuildArgs {
 	command: 'build';
 	target: 'node' | 'cloudflare';
-	model?: string;
 	dir: string;
 }
 
 type ParsedArgs = RunArgs | BuildArgs;
 
 function parseFlags(flags: string[]): {
-	model?: string;
 	target?: string;
 	sessionId?: string;
 	dir: string;
 	payload: string;
 	port: number;
 } {
-	let model: string | undefined;
 	let target: string | undefined;
 	let sessionId: string | undefined;
 	let dir = process.cwd();
@@ -60,12 +59,6 @@ function parseFlags(flags: string[]): {
 			payload = flags[++i] ?? '';
 			if (!payload) {
 				console.error('Missing value for --payload');
-				process.exit(1);
-			}
-		} else if (arg === '--model') {
-			model = flags[++i];
-			if (!model) {
-				console.error('Missing value for --model');
 				process.exit(1);
 			}
 		} else if (arg === '--target') {
@@ -104,7 +97,7 @@ function parseFlags(flags: string[]): {
 		}
 	}
 
-	return { model, target, sessionId, dir: path.resolve(dir), payload, port };
+	return { target, sessionId, dir: path.resolve(dir), payload, port };
 }
 
 function parseArgs(argv: string[]): ParsedArgs {
@@ -120,7 +113,6 @@ function parseArgs(argv: string[]): ParsedArgs {
 		return {
 			command: 'build',
 			target: flags.target as 'node' | 'cloudflare',
-			model: flags.model,
 			dir: flags.dir,
 		};
 	}
@@ -154,7 +146,6 @@ function parseArgs(argv: string[]): ParsedArgs {
 			target: flags.target as 'node' | 'cloudflare',
 			sessionId: flags.sessionId,
 			payload: flags.payload,
-			model: flags.model,
 			dir: flags.dir,
 			port: flags.port,
 		};
@@ -392,24 +383,11 @@ async function findPort(): Promise<number> {
 
 // ─── Main ───────────────────────────────────────────────────────────────────
 
-function parseModelConfig(model?: string): { provider: string; modelId: string } | undefined {
-	if (!model) return undefined;
-	const slashIndex = model.indexOf('/');
-	if (slashIndex === -1) {
-		console.error(
-			`Invalid --model format: "${model}". Expected "provider/model" (e.g. "anthropic/claude-haiku-4-5").`,
-		);
-		process.exit(1);
-	}
-	return { provider: model.slice(0, slashIndex), modelId: model.slice(slashIndex + 1) };
-}
-
 async function buildCommand(args: BuildArgs) {
 	try {
 		await build({
 			agentDir: args.dir,
 			target: args.target,
-			model: parseModelConfig(args.model),
 		});
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
@@ -423,7 +401,7 @@ async function run(args: RunArgs) {
 
 	// 1. Build
 	try {
-		await build({ agentDir, target: args.target, model: parseModelConfig(args.model) });
+		await build({ agentDir, target: args.target });
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
 		process.exit(1);

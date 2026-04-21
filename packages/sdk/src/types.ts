@@ -129,8 +129,13 @@ export interface AgentConfig {
 	/** Discovered at runtime from .agents/skills/ in the session's cwd. */
 	skills: Record<string, Skill>;
 	roles: Record<string, Role>;
-	model: Model<any>;
-	/** Resolve a "provider/modelId" string to a Model instance. */
+	/**
+	 * Session-wide default model. Undefined by default — the user must set it via
+	 * `init({ model: "provider/model-id" })` or pass `{ model }` at each prompt/
+	 * skill/task call site. Calls with no model resolved throw clearly at runtime.
+	 */
+	model: Model<any> | undefined;
+	/** Resolve a "provider/modelId" string to a Model instance. Throws on invalid input. */
 	resolveModel?: (modelString: string) => Model<any>;
 	compaction?: CompactionConfig;
 }
@@ -147,7 +152,7 @@ export interface FlueContext {
 	init(options?: SessionInit): Promise<FlueSession>;
 }
 
-/** Both fields are optional — omitting gives platform defaults (empty sandbox, platform store). */
+/** All fields are optional — omitting gives platform defaults (empty sandbox, platform store, build-time model). */
 export interface SessionInit {
 	/**
 	 * - `'empty'` (default): In-memory sandbox, no files, no host access.
@@ -159,6 +164,16 @@ export interface SessionInit {
 
 	/** Defaults to platform store (in-memory on Node, DO SQLite on Cloudflare). */
 	persist?: SessionStore;
+
+	/**
+	 * Override the default model for this session. Applies to all prompt(), skill(),
+	 * and task() calls unless overridden at the call site.
+	 *
+	 * Format: `'provider/modelId'` (e.g. `'anthropic/claude-opus-4-20250514'`).
+	 *
+	 * Precedence (highest wins): per-call `model` > role `model` > session `model` > build-time default.
+	 */
+	model?: string;
 }
 
 // ─── Flue Session (returned by init()) ──────────────────────────────────
@@ -334,5 +349,4 @@ export interface BuildOptions {
 	target?: 'node' | 'cloudflare';
 	/** Overrides `target` when provided. */
 	plugin?: BuildPlugin;
-	model?: { provider: string; modelId: string };
 }

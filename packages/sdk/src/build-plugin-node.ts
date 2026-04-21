@@ -5,9 +5,7 @@ export class NodePlugin implements BuildPlugin {
 	name = 'node';
 
 	generateEntryPoint(ctx: BuildContext): string {
-		const { agents, roles, options, resolveSDKImport } = ctx;
-		const modelProvider = options.model?.provider ?? 'anthropic';
-		const modelId = options.model?.modelId ?? 'claude-haiku-4-5';
+		const { agents, roles, resolveSDKImport } = ctx;
 		const rolesJson = JSON.stringify(roles);
 
 		const webhookAgents = agents.filter((a) => a.triggers.webhook);
@@ -71,14 +69,30 @@ const manifest = ${manifest};
 
 // ─── Infrastructure ─────────────────────────────────────────────────────────
 
-const model = getModel(${JSON.stringify(modelProvider)}, ${JSON.stringify(modelId)});
+// No build-time model default. The user sets model at runtime via
+// \`init({ model: "provider/model-id" })\` for a session default, or via
+// \`{ model: "provider/model-id" }\` on any individual prompt/skill/task call.
+const model = undefined;
 
 function resolveModel(modelString) {
   const slash = modelString.indexOf('/');
-  if (slash !== -1) {
-    return getModel(modelString.slice(0, slash), modelString.slice(slash + 1));
+  if (slash === -1) {
+    throw new Error(
+      '[flue] Invalid model "' + modelString + '". ' +
+      'Use the "provider/model-id" format (e.g. "anthropic/claude-haiku-4-5").'
+    );
   }
-  return getModel(${JSON.stringify(modelProvider)}, modelString);
+  const provider = modelString.slice(0, slash);
+  const modelId = modelString.slice(slash + 1);
+  const resolved = getModel(provider, modelId);
+  if (!resolved) {
+    throw new Error(
+      '[flue] Unknown model "' + modelString + '". ' +
+      'Provider "' + provider + '" / model id "' + modelId + '" ' +
+      'is not registered with @mariozechner/pi-ai.'
+    );
+  }
+  return resolved;
 }
 
 // ─── Sandbox Environments ───────────────────────────────────────────────────

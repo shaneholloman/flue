@@ -55,6 +55,41 @@ export async function readAgentsMd(env: SessionEnv, basePath: string): Promise<s
 	return parts.join('\n\n');
 }
 
+/**
+ * Load a skill directly by relative path under `.agents/skills/`.
+ *
+ * The path is taken as-is — no extension is auto-appended. Callers reference
+ * the full filename, e.g. `'triage/reproduce.md'`. Returns `null` if the file
+ * doesn't exist.
+ *
+ * Used as a fallback by `session.skill()` when the requested name doesn't match
+ * a discovered skill's frontmatter `name:` field. Lets users organise skills as
+ * a pack of sibling markdown files under one directory (orchestration SKILL.md
+ * + stage files) without forcing each stage into its own `SKILL.md` subdirectory.
+ */
+export async function loadSkillByPath(
+	env: SessionEnv,
+	basePath: string,
+	relPath: string,
+): Promise<Skill | null> {
+	const skillsDir = basePath.endsWith('/')
+		? `${basePath}.agents/skills`
+		: `${basePath}/.agents/skills`;
+	const filePath = `${skillsDir}/${relPath}`;
+	if (!(await env.exists(filePath))) return null;
+
+	const content = await env.readFile(filePath);
+	// Default name is the relative path with any .md/.markdown extension stripped,
+	// used only when the file has no explicit frontmatter `name:` field.
+	const defaultName = relPath.replace(/\.(md|markdown)$/i, '');
+	const parsed = parseFrontmatterFile(content, defaultName);
+	return {
+		name: parsed.name,
+		description: parsed.description,
+		instructions: parsed.body,
+	};
+}
+
 /** Discover skills from .agents/skills/<name>/SKILL.md under basePath. */
 export async function discoverLocalSkills(
 	env: SessionEnv,

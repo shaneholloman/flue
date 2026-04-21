@@ -69,10 +69,18 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 			const savedData = await store.load(config.sessionId);
 			const localContext = await discoverSessionContext(env);
 
+			// Session-level model override. Per-call `model` on prompt()/skill() still wins
+			// because resolveModelForCall() applies it on top of this default.
+			const sessionModel =
+				options?.model && config.agentConfig.resolveModel
+					? config.agentConfig.resolveModel(options.model)
+					: config.agentConfig.model;
+
 			const sessionConfig: AgentConfig = {
 				...config.agentConfig,
 				systemPrompt: localContext.systemPrompt,
 				skills: localContext.skills,
+				model: sessionModel,
 			};
 
 			return new Session(

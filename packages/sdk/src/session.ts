@@ -22,7 +22,7 @@ import {
 	extractResult,
 	ResultExtractionError,
 } from './result.ts';
-import { discoverSessionContext } from './context.ts';
+import { discoverSessionContext, loadSkillByPath } from './context.ts';
 import type {
 	AgentConfig,
 	Command,
@@ -174,6 +174,7 @@ export class Session implements FlueSession {
 	): Promise<v.InferOutput<S>>;
 	async prompt(text: string, options?: PromptOptions): Promise<PromptResponse>;
 	async prompt(text: string, options?: PromptOptions<v.GenericSchema | undefined>): Promise<any> {
+		this.assertRoleExists(options?.role);
 		this.resolveModelForCall(options?.model, options?.role);
 		const promptWithRole = this.injectRoleInstructions(text, options?.role);
 
@@ -209,10 +210,24 @@ export class Session implements FlueSession {
 	): Promise<v.InferOutput<S>>;
 	async skill(name: string, options?: SkillOptions): Promise<PromptResponse>;
 	async skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): Promise<any> {
-		const registeredSkill = this.config.skills[name];
+		this.assertRoleExists(options?.role);
+
+		let registeredSkill = this.config.skills[name];
+
+		// Fallback: file-path lookup under .agents/skills/. Only attempted when the
+		// name looks like a path (contains `/` or ends in `.md`/`.markdown`) so that
+		// typos of registered skill names still fail fast with a helpful error.
+		if (!registeredSkill && (name.includes('/') || /\.(md|markdown)$/i.test(name))) {
+			const loaded = await loadSkillByPath(this.env, this.env.cwd, name);
+			if (loaded) registeredSkill = loaded;
+		}
+
 		if (!registeredSkill) {
+			const available = Object.keys(this.config.skills).join(', ') || '(none)';
 			throw new Error(
-				`Skill "${name}" not registered. Available: ${Object.keys(this.config.skills).join(', ') || '(none)'}`,
+				`Skill "${name}" not registered. Available: ${available}. ` +
+					`Skills can also be referenced by relative path under .agents/skills/ ` +
+					`(e.g. "triage/reproduce.md").`,
 			);
 		}
 
@@ -267,6 +282,8 @@ export class Session implements FlueSession {
 	): Promise<v.InferOutput<S>>;
 	async task(prompt: string, options?: TaskOptions): Promise<PromptResponse>;
 	async task(prompt: string, options?: TaskOptions<v.GenericSchema | undefined>): Promise<any> {
+		this.assertRoleExists(options?.role);
+
 		if (!options?.workspace) {
 			throw new Error('[flue] task() requires a workspace option.');
 		}
@@ -300,7 +317,7 @@ export class Session implements FlueSession {
 
 		const localContext = await discoverSessionContext(taskEnv);
 
-		let taskModel = this.config.model;
+		let taskModel: Model<any> | undefined = this.config.model;
 		const taskRole = options?.role ? this.config.roles[options.role] : undefined;
 		if (taskRole?.model && this.config.resolveModel) {
 			taskModel = this.config.resolveModel(taskRole.model);
@@ -313,7 +330,7 @@ export class Session implements FlueSession {
 			systemPrompt: localContext.systemPrompt,
 			skills: localContext.skills,
 			roles: this.config.roles,
-			model: taskModel,
+			model: this.requireModel(taskModel, 'this task() call'),
 			resolveModel: this.config.resolveModel,
 			compaction: this.config.compaction,
 		};
@@ -352,7 +369,7 @@ export class Session implements FlueSession {
 
 	/** Precedence: prompt-level > role-level > agent-level default. */
 	private resolveModelForCall(promptModel?: string, roleName?: string): void {
-		let model: Model<any> = this.config.model;
+		let model: Model<any> | undefined = this.config.model;
 
 		if (roleName && this.config.roles[roleName]?.model && this.config.resolveModel) {
 			model = this.config.resolveModel(this.config.roles[roleName].model!);
@@ -362,7 +379,37 @@ export class Session implements FlueSession {
 			model = this.config.resolveModel(promptModel);
 		}
 
-		this.agent.state.model = model;
+		this.agent.state.model = this.requireModel(model, 'this prompt()/skill()/task() call');
+	}
+
+	/**
+	 * Throws a clear, actionable error when no model is configured for a call.
+	 * Use with the resolved model (post-precedence) to guarantee we never hand
+	 * `undefined` to the underlying agent.
+	 */
+	private requireModel(model: Model<any> | undefined, callSite: string): Model<any> {
+		if (model) return model;
+		throw new Error(
+			`[flue] No model configured for ${callSite}. ` +
+				`Pass \`{ model: "provider/model-id" }\` to \`init()\` for a session-wide default, ` +
+				`or to this prompt()/skill()/task() call for a one-off override.`,
+		);
+	}
+
+	/**
+	 * Throws a clear error when a caller references a role that isn't registered.
+	 * Roles are loaded from `.flue/roles/` at build time. Called eagerly at the top
+	 * of prompt()/skill()/task() so typos surface before any LLM work begins.
+	 */
+	private assertRoleExists(roleName: string | undefined): void {
+		if (!roleName) return;
+		if (this.config.roles[roleName]) return;
+		const available = Object.keys(this.config.roles);
+		const list = available.length > 0 ? available.join(', ') : '(none defined)';
+		throw new Error(
+			`[flue] Role "${roleName}" not registered. Available roles: ${list}. ` +
+				`Define roles as markdown files under \`.flue/roles/\`.`,
+		);
 	}
 
 	private injectRoleInstructions(text: string, roleName?: string): string {

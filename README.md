@@ -117,8 +117,18 @@ export default async function ({ init, payload }: FlueContext) {
   // 'local' mounts the host filesystem at /workspace — ideal for CI
   // where the repo is already checked out. Skills and AGENTS.md are
   // discovered automatically from the workspace directory.
-  const session = await init({ sandbox: 'local' });
+  //
+  // `model` sets the default model for every prompt/skill call in this
+  // session. Override per-call with `{ model: '...' }` on prompt()/skill().
+  const session = await init({
+    sandbox: 'local',
+    model: 'anthropic/claude-opus-4-20250514',
+  });
 
+  // Skills can be referenced either by their frontmatter `name:` (shown below)
+  // or by a relative path under `.agents/skills/` — e.g.
+  // `session.skill('triage/reproduce.md', ...)`. Path references are handy for
+  // skill packs that group multiple stages under one directory.
   const result = await session.skill('triage', {
     // Pass arguments to any prompt or skill.
     args: { issueNumber: payload.issueNumber },

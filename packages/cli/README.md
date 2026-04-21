@@ -1,8 +1,14 @@
-# flue
-
 > **Experimental** — Flue is under active development. APIs may change.
+>
+> Looking for `v0.0.x`? [See here.](https://github.com/withastro/flue/tree/v0.0.x)
 
-Agent framework where agents are directories compiled into deployable server artifacts.
+# Flue
+
+Flue is **The Sandbox Agent Framework.** If you know how to use Claude Code (or OpenCode, Codex, Gemini, etc)... then you already know the basics of how to build agents with Flue.
+
+A [Sandbox Agent](https://developers.openai.com/api/docs/guides/agents/sandboxes) pairs an **agent harness** (like Claude Code) with a secure, isolated container workspace. Sandbox Agents can edit files, write and execute code, spin up subagents, run terminal commands, and drive themselves autonomously to solve any given task. This pattern unlocks more powerful, intelligent agents that traditional AI frameworks wouldn't otherwise let you build.
+
+Our take is that 1) any agent can be represented as a Sandbox Agent, and 2) any agent is _best_ represented as a Sandbox Agent. So we designed Flue to deliver on this vision.
 
 ## Packages
 
@@ -17,6 +23,8 @@ Agent framework where agents are directories compiled into deployable server art
 ### Quickstart
 
 The simplest agent — no container, no tools, just a prompt and a typed result.
+
+Unless you opt-in to initializing a full container sandbox, Flue will default to a virtual sandbox for every agent, powered by [just-bash](https://github.com/vercel-labs/just-bash). A virtual sandbox is going to be dramatically faster, cheaper, and more scalable than running a full container for every agent, which makes it perfect for building high-traffic/high-scale agents.
 
 ```ts
 // .flue/agents/hello-world.ts
@@ -34,8 +42,8 @@ export default async function ({ init, payload, sessionId }: FlueContext) {
   const session = await init();
 
   // prompt() sends a message in the session, triggering action.
-  // You can pass a schema to `result` to get typed, validated JSON back.
   const result = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
+    // Pass a result schema to get typed, schema-validated data back from your agent.
     result: v.object({
       translation: v.string(),
       confidence: v.picklist(['low', 'medium', 'high']),
@@ -48,9 +56,9 @@ export default async function ({ init, payload, sessionId }: FlueContext) {
 
 ### Support Agent
 
-A support agent, also running in a virtual sandbox but now with an R2 bucket mounted as its file-system. The knowledge base is stored in R2 and mounted directly into the agent's filesystem — the agent searches it with its built-in tools (grep, glob, read).
+A support agent can also run in a virtual sandbox, but we now add a file-system using an R2 bucket. The knowledge base is stored in R2 and mounted directly into the agent's filesystem — the agent searches it with its built-in tools (grep, glob, read). Skills are also defined in the bucket that help the agent perform its task.
 
-Session message history and file-system state are automatically persisted using Durable Objects (Cloudflare only). So you can revisit this session days, weeks, or years later and pick up where you left off automatically.
+Because this agent is deployed to Cloudflare, message history and session state are automatically persisted for you. So you (or your customer) can revisit this support session days, weeks, or years later and pick up exactly where you left off.
 
 ```ts
 // .flue/agents/support.ts
@@ -72,18 +80,17 @@ export default async function ({ init, payload, env }: FlueContext) {
     relevant to this request, then write a helpful response.
 
     Customer: ${payload.message}`,
+    {
+      // Provide roles (aka subagents) to guide your agent. Defined in .flue/roles/
+      role: 'triager',
+    },
   );
 }
 ```
 
 ### Issue Triage (CI)
 
-A triage agent that runs whenever a new issue is opened (or commented on) on GitHub, running on GitHub Actions.
-
-Flue was designed to power CI workflows since day one. The `"local"` filesystem sandbox enables two things:
-
-1. Mount the current directory to your virtual file system.
-2. Connect privileged CLIs to your agent (`gh`, `glab`, `git`) without leaking sensitive keys and secrets.
+A triage agent that runs in CI whenever an issue is opened on GitHub. The `"local"` sandbox mounts the host filesystem and lets you connect privileged CLIs (`gh`, `npm`, `git`) to the agent without leaking secrets.
 
 ```ts
 // .flue/agents/triage.ts
@@ -92,6 +99,8 @@ import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import * as v from 'valibot';
 
+// Because we are running this in CI, we don't need to expose this as an HTTP endpoint.
+// The CLI can run any agent from the command line, `flue run triage ...`
 export const triggers = {};
 
 // Connect privileged CLIs to your agent without leaking sensitive keys and secrets.
@@ -108,15 +117,23 @@ export default async function ({ init, payload }: FlueContext) {
   // 'local' mounts the host filesystem at /workspace — ideal for CI
   // where the repo is already checked out. Skills and AGENTS.md are
   // discovered automatically from the workspace directory.
-  const session = await init({ sandbox: 'local' });
+  //
+  // `model` sets the default model for every prompt/skill call in this
+  // session. Override per-call with `{ model: '...' }` on prompt()/skill().
+  const session = await init({
+    sandbox: 'local',
+    model: 'anthropic/claude-opus-4-20250514',
+  });
 
+  // Skills can be referenced either by their frontmatter `name:` (shown below)
+  // or by a relative path under `.agents/skills/` — e.g.
+  // `session.skill('triage/reproduce.md', ...)`. Path references are handy for
+  // skill packs that group multiple stages under one directory.
   const result = await session.skill('triage', {
     // Pass arguments to any prompt or skill.
     args: { issueNumber: payload.issueNumber },
     // Grant access to `gh` and `npm` for the life of this skill.
     commands: [gh, npm],
-    // Provide roles (aka subagents) to guide your agent. Defined in .flue/roles/
-    role: 'triager',
     // Result schemas are great for being able to act/orchestrate
     // based on the result of your prompt or skill call.
     result: v.object({
