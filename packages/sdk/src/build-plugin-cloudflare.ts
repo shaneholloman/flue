@@ -332,7 +332,11 @@ export default {
 	esbuildOptions(_ctx: BuildContext): Record<string, any> {
 		return {
 			target: 'esnext',
-			external: ['node:*', 'cloudflare:*'],
+			// node:* and cloudflare:* are Workers runtime modules.
+			// node-liblzma and @mongodb-js/zstd are just-bash optionalDependencies
+			// wrapped in dynamic imports inside try/catch. Externalize so esbuild
+			// doesn't try to resolve them; they wouldn't run in Workers anyway.
+			external: ['node:*', 'cloudflare:*', 'node-liblzma', '@mongodb-js/zstd'],
 		};
 	}
 

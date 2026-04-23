@@ -267,6 +267,11 @@ process.on('SIGTERM', () => { server.close(); process.exit(0); });
 		return {
 			platform: 'node',
 			target: 'node22',
+			// just-bash's archive code wraps these native addons in dynamic imports
+			// inside try/catch and declares them as optionalDependencies. Externalize
+			// so esbuild doesn't try to resolve them at bundle time — the failure
+			// path is handled by just-bash at runtime with a clear error message.
+			external: ['node-liblzma', '@mongodb-js/zstd'],
 		};
 	}
 }
