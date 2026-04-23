@@ -11,9 +11,11 @@ The simplest agent — no container, no storage, just a prompt and a typed resul
 ```bash
 mkdir my-flue-worker && cd my-flue-worker
 npm init -y
-npm install @flue/sdk valibot
+npm install @flue/sdk valibot agents @cloudflare/sandbox
 npm install -D @flue/cli wrangler
 ```
+
+`agents` is Cloudflare's Agents SDK — Flue uses it to route HTTP requests to a per-agent Durable Object. `@cloudflare/sandbox` provides the container Sandbox Durable Object that Flue re-exports for agents that need a real container (see [Container agents](#container-agents) below). Both are runtime dependencies of the generated Worker bundle.
 
 ### 2. Create your first agent
 
