@@ -22,7 +22,9 @@ Please do the following:
 
 3. From the homepage, pick the deploy guide that best matches my answer to (a), follow the link, and read that guide.
 
-4. Scaffold a minimal first version of what I described. Keep it small — I'd rather iterate than start with a kitchen-sink scaffold.
+4. When you need a model identifier for the scaffolded agent (e.g. \`'anthropic/claude-sonnet-4-20250514'\`), **look it up at https://models.dev/** — don't guess from memory. Model IDs change frequently and your training data is likely out of date. Default to a current Anthropic model unless I tell you otherwise.
+
+5. Scaffold a minimal first version of what I described. Keep it small — I'd rather iterate than start with a kitchen-sink scaffold.
 `;
 
 export const HERO = `export default async function ({ init, payload, env }) {
