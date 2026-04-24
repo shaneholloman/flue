@@ -1,5 +1,12 @@
 /** Cloudflare build plugin. Produces a Worker + DO entry point with SSE/webhook/sync modes. */
 import type { BuildContext, BuildPlugin } from './types.ts';
+import {
+	readUserWranglerConfig,
+	validateUserWranglerConfig,
+	mergeFlueAdditions,
+	writeDeployRedirectIfMissing,
+	type FlueAdditions,
+} from './cloudflare-wrangler-merge.ts';
 
 export class CloudflarePlugin implements BuildPlugin {
 	name = 'cloudflare';
@@ -344,47 +351,57 @@ export default {
 		const outputs: Record<string, string> = {};
 		const webhookAgents = ctx.agents.filter((a) => a.triggers.webhook);
 
-		// Per-agent DO bindings: one per webhook agent + Sandbox
+		// Per-agent DO bindings: one per webhook agent, plus the Sandbox DO for
+		// container sandboxes. Flue always emits these; user's wrangler config
+		// contributes everything else (R2, KV, D1, vars, routes, etc.).
 		const agentBindings = webhookAgents.map((a) => ({
 			class_name: agentClassName(a.name),
 			name: agentClassName(a.name),
 		}));
-		const allBindings = [...agentBindings, { class_name: 'Sandbox', name: 'Sandbox' }];
-		const allSqliteClasses = allBindings.map((b) => b.class_name);
+		const sandboxBinding = { class_name: 'Sandbox', name: 'Sandbox' };
+		const flueBindings = [...agentBindings, sandboxBinding];
+		const flueSqliteClasses = flueBindings.map((b) => b.class_name);
 
-		// Generate wrangler.jsonc.
-		// Derive the worker name from the output dir (typically the project root)
-		// rather than the workspace dir, since the workspace may be ./.flue/ which
-		// would produce a useless ".flue" worker name.
-		const workerName = ctx.outputDir.split('/').pop() ?? 'flue-agents';
-		outputs['wrangler.jsonc'] = JSON.stringify(
-			{
-				$schema: 'https://workers.cloudflare.com/schema/wrangler.json',
-				name: workerName,
-				main: 'server.mjs',
-				compatibility_date: new Date().toISOString().split('T')[0],
-				compatibility_flags: ['nodejs_compat'],
-				containers: [
-					{
-						class_name: 'Sandbox',
-						image: './Dockerfile',
-					},
-				],
-				durable_objects: {
-					bindings: allBindings,
-				},
-				migrations: [
-					{
-						new_sqlite_classes: allSqliteClasses,
-						tag: 'v1',
-					},
-				],
+		// Flue's contributions to the wrangler config. Everything else in the
+		// user's wrangler.jsonc passes through untouched during merge.
+		// Derive the default worker name from outputDir (typically the project
+		// root) rather than workspaceDir, since workspaceDir may be ./.flue/
+		// which would produce a useless ".flue" worker name.
+		const additions: FlueAdditions = {
+			defaultName: ctx.outputDir.split('/').pop() ?? 'flue-agents',
+			main: 'server.mjs',
+			doBindings: flueBindings,
+			migration: {
+				tag: 'flue-v1',
+				new_sqlite_classes: flueSqliteClasses,
 			},
-			null,
-			2,
-		);
+			container: { class_name: 'Sandbox', image: './Dockerfile' },
+		};
 
-		// Generate a basic Dockerfile for the sandbox container
+		// Read and validate the user's wrangler config (if any), then merge
+		// Flue's additions in. User's file lives at outputDir and is never
+		// modified; the composed output is written to dist/wrangler.jsonc.
+		const { config: userConfig, path: userConfigPath } = readUserWranglerConfig(ctx.outputDir);
+		if (userConfigPath) {
+			console.log(`[flue] Merging with user wrangler config: ${userConfigPath}`);
+		}
+		validateUserWranglerConfig(userConfig);
+		const merged = mergeFlueAdditions(userConfig, additions);
+
+		// Always include the wrangler JSON schema reference if absent so the
+		// generated file gets editor validation if someone opens it directly.
+		if (typeof merged.$schema !== 'string') {
+			merged.$schema = 'https://workers.cloudflare.com/schema/wrangler.json';
+		}
+
+		outputs['wrangler.jsonc'] = JSON.stringify(merged, null, 2);
+
+		// Default Dockerfile for the Sandbox container. Users can override by
+		// committing their own Dockerfile to the project root — the wrangler
+		// `image` field points at `./Dockerfile` relative to the config, which
+		// resolves to dist/Dockerfile (this file). If they want a different one,
+		// they can set `containers[].image` in their wrangler.jsonc and it will
+		// be preserved via the merge.
 		outputs['Dockerfile'] = [
 			'FROM node:22-slim',
 			'',
@@ -400,6 +417,14 @@ export default {
 			'CMD ["sleep", "infinity"]',
 			'',
 		].join('\n');
+
+		// Side effect: write the wrangler deploy-redirect file at
+		// outputDir/.wrangler/deploy/config.json so `wrangler deploy` run from
+		// outputDir automatically picks up our generated dist/wrangler.jsonc.
+		// Only written if not already present, to respect user intent.
+		// This lives outside dist/, so it's handled here rather than through
+		// the additionalOutputs return value (which writes relative to dist/).
+		writeDeployRedirectIfMissing(ctx.outputDir);
 
 		return outputs;
 	}
