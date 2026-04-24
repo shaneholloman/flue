@@ -39,24 +39,23 @@ export interface Migration {
 	new_sqlite_classes: string[];
 }
 
-/** A containers entry Flue contributes (the Sandbox container image). */
-export interface ContainerEntry {
-	class_name: string;
-	image: string;
-}
-
-/** Everything Flue contributes to the wrangler config. */
+/**
+ * Everything Flue contributes to the wrangler config.
+ *
+ * Flue contributes only the per-agent DO bindings (one per webhook agent) and
+ * their migration entry. Everything else — user Durable Object bindings (e.g.
+ * Sandbox), container entries, migrations for user DO classes — belongs to the
+ * user's own wrangler.jsonc and is passed through untouched during merge.
+ */
 export interface FlueAdditions {
 	/** Fallback name if the user didn't set one in their wrangler config. */
 	defaultName: string;
 	/** Always written; Flue owns the bundle entrypoint. */
 	main: string;
-	/** Flue's DO bindings (agents + Sandbox). Merged into durable_objects.bindings by `name`. */
+	/** Flue's per-agent DO bindings. Merged into durable_objects.bindings by `name`. */
 	doBindings: DoBinding[];
-	/** Flue's migration entry. Appended only if no existing entry has the same tag. */
+	/** Flue's migration entry (per-agent classes). Appended only if no existing entry has the same tag. */
 	migration: Migration;
-	/** Flue's containers entry. Merged into containers[] by `class_name`. */
-	container: ContainerEntry;
 }
 
 // ─── Reading user config ────────────────────────────────────────────────────
@@ -246,23 +245,98 @@ export function mergeFlueAdditions(
 	}
 	merged.migrations = migrationsOut;
 
-	// containers: concat + de-dupe by class_name (user wins on conflict).
-	const existingContainers = Array.isArray(merged.containers)
-		? (merged.containers as unknown[])
-		: [];
-	const existingContainerClasses = new Set(
-		existingContainers
-			.filter((c): c is Record<string, unknown> => typeof c === 'object' && c !== null)
-			.map((c) => c.class_name)
-			.filter((n): n is string => typeof n === 'string'),
-	);
-	const containersOut = [...existingContainers];
-	if (!existingContainerClasses.has(additions.container.class_name)) {
-		containersOut.push(additions.container);
-	}
-	merged.containers = containersOut;
+	// containers: user owns the `containers` array entirely. Flue contributes
+	// nothing here — any entries the user declared pass through untouched via
+	// the shallow `{ ...userConfig }` clone above. Nothing to merge.
 
 	return merged;
+}
+
+// ─── Sandbox binding detection ──────────────────────────────────────────────
+
+/**
+ * Return the list of `class_name`s declared in the user's wrangler
+ * `durable_objects.bindings` that contain the literal substring `Sandbox`
+ * (case-sensitive).
+ *
+ * This is Flue's convention for wiring `@cloudflare/sandbox`: any DO binding
+ * whose class name contains `Sandbox` triggers an automatic re-export in the
+ * generated Worker entry:
+ *
+ *   export { Sandbox as <class_name> } from '@cloudflare/sandbox';
+ *
+ * The alias lets users pick arbitrary class names (e.g. `PyBoxSandbox`,
+ * `SupportSandbox`) while still pointing at the single class shipped by the
+ * `@cloudflare/sandbox` package. Each distinct `class_name` can be paired with
+ * a different container image in the user's `containers[]` config.
+ *
+ * Returns unique, sorted class names. Non-object bindings or bindings without
+ * a string `class_name` are ignored.
+ */
+export function detectSandboxBindings(userConfig: Record<string, unknown>): string[] {
+	const doObj = userConfig.durable_objects;
+	if (typeof doObj !== 'object' || doObj === null) return [];
+	const bindings = (doObj as Record<string, unknown>).bindings;
+	if (!Array.isArray(bindings)) return [];
+
+	const found = new Set<string>();
+	for (const entry of bindings) {
+		if (typeof entry !== 'object' || entry === null) continue;
+		const className = (entry as Record<string, unknown>).class_name;
+		if (typeof className !== 'string') continue;
+		if (className.includes('Sandbox')) found.add(className);
+	}
+	return Array.from(found).sort();
+}
+
+// ─── @cloudflare/sandbox install check ──────────────────────────────────────
+
+/**
+ * When the user has declared one or more `Sandbox`-named DO bindings, verify
+ * that `@cloudflare/sandbox` is declared in the nearest package.json. Surfaces
+ * a friendly, actionable error at build time rather than letting esbuild emit
+ * a confusing module-resolution failure.
+ *
+ * The check is lenient: if no package.json can be located or parsed, we skip
+ * silently and let esbuild's own error path take over. This avoids false
+ * positives in unusual project layouts.
+ */
+export function assertSandboxPackageInstalled(
+	sandboxClassNames: string[],
+	searchDirs: string[],
+): void {
+	if (sandboxClassNames.length === 0) return;
+
+	for (const dir of searchDirs) {
+		let current = dir;
+		while (current !== path.dirname(current)) {
+			const pkgPath = path.join(current, 'package.json');
+			if (fs.existsSync(pkgPath)) {
+				try {
+					const pkg = JSON.parse(fs.readFileSync(pkgPath, 'utf-8'));
+					const allDeps = {
+						...(pkg.dependencies ?? {}),
+						...(pkg.devDependencies ?? {}),
+						...(pkg.peerDependencies ?? {}),
+						...(pkg.optionalDependencies ?? {}),
+					};
+					if ('@cloudflare/sandbox' in allDeps) return;
+					// Found a package.json but no dep — keep walking in case
+					// this is a nested package and the dep is declared higher up
+					// (e.g. pnpm workspace root).
+				} catch {
+					return; // unparseable package.json — give up, let esbuild speak
+				}
+			}
+			current = path.dirname(current);
+		}
+	}
+
+	throw new Error(
+		`[flue] Your wrangler config declares DO binding(s) whose class_name contains "Sandbox" ` +
+			`(${sandboxClassNames.join(', ')}), but @cloudflare/sandbox is not in your package.json. ` +
+			`Install it: \`npm install @cloudflare/sandbox\`.`,
+	);
 }
 
 // ─── Deploy redirect file ───────────────────────────────────────────────────

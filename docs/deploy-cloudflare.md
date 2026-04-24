@@ -20,11 +20,11 @@ The simplest agent — no container, no storage, just a prompt and a typed resul
 ```bash
 mkdir my-flue-worker && cd my-flue-worker
 npm init -y
-npm install @flue/sdk valibot agents @cloudflare/sandbox
+npm install @flue/sdk valibot agents
 npm install -D @flue/cli wrangler
 ```
 
-`agents` is Cloudflare's Agents SDK — Flue uses it to route HTTP requests to a per-agent Durable Object. `@cloudflare/sandbox` provides the container Sandbox Durable Object that Flue re-exports for agents that need a real container (see [Container agents](#container-agents) below). Both are runtime dependencies of the generated Worker bundle.
+`agents` is Cloudflare's Agents SDK — Flue uses it to route HTTP requests to a per-agent Durable Object. If you also need container sandboxes, additionally install `@cloudflare/sandbox` (see [Container agents](#container-agents) below).
 
 ### 2. Create your first agent
 
@@ -212,7 +212,44 @@ done
 
 The examples above all run on virtual sandboxes — no container needed. But for agents that need a full Linux environment — git, Node.js, a browser, system packages — you want a real container.
 
-Cloudflare has native container support via [`@cloudflare/sandbox`](https://developers.cloudflare.com/containers/). Each session gets its own isolated container with a persistent filesystem, shell, and full Linux userspace. The container image is defined in a `Dockerfile` that `flue build` generates for you.
+Cloudflare has native container support via [`@cloudflare/sandbox`](https://developers.cloudflare.com/containers/). Each session gets its own isolated container with a persistent filesystem, shell, and full Linux userspace.
+
+### Setup
+
+You own the container config. That means three things:
+
+1. Install `@cloudflare/sandbox`: `npm install @cloudflare/sandbox`.
+2. Declare the Durable Object binding, migration, and container image in your `wrangler.jsonc` at the project root.
+3. Commit a `Dockerfile` at the path your `containers[].image` points to.
+
+Flue automates one piece: **any DO binding whose `class_name` contains `Sandbox` is automatically wired up as `@cloudflare/sandbox`'s `Sandbox` class in the generated Worker bundle.** Pick any name you want (`Sandbox`, `PyBoxSandbox`, `SupportSandbox`, …) and Flue handles the re-export.
+
+### Example
+
+`wrangler.jsonc` (at the project root, alongside `package.json`):
+
+```jsonc
+{
+  "$schema": "https://workers.cloudflare.com/schema/wrangler.json",
+  "name": "my-agent",
+  "compatibility_date": "2025-06-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "durable_objects": {
+    "bindings": [{ "class_name": "Sandbox", "name": "Sandbox" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["Sandbox"] }],
+  "containers": [{ "class_name": "Sandbox", "image": "./Dockerfile" }]
+}
+```
+
+`Dockerfile` (at the project root):
+
+```dockerfile
+FROM node:22-slim
+RUN apt-get update && apt-get install -y git curl && rm -rf /var/lib/apt/lists/*
+WORKDIR /workspace
+CMD ["sleep", "infinity"]
+```
 
 `.flue/agents/assistant.ts`:
 
@@ -223,9 +260,7 @@ import { getSandbox } from '@cloudflare/sandbox';
 export const triggers = { webhook: true };
 
 export default async function ({ init, sessionId, env, payload }: FlueContext) {
-  // Each session gets its own container via Cloudflare's native sandbox.
-  // The container is tied to the Durable Object — it persists across
-  // requests for the same session.
+  // The binding name you chose in wrangler.jsonc is the key on `env`.
   const sandbox = getSandbox(env.Sandbox, sessionId);
   const session = await init({ sandbox });
 
@@ -233,7 +268,29 @@ export default async function ({ init, sessionId, env, payload }: FlueContext) {
 }
 ```
 
-The `Sandbox` binding is a Durable Object that Flue adds to your wrangler config automatically during build, along with a default `Dockerfile` at `dist/Dockerfile`. No extra setup needed. If you need a custom `Dockerfile`, add a `containers[]` entry to your own `wrangler.jsonc` pointing at whatever image path you want — Flue's merge will respect it.
+### Multiple sandboxes
+
+Different agents can use different container images. Declare a separate binding for each (each `class_name` must contain `Sandbox`), and give each its own container entry:
+
+```jsonc
+{
+  "durable_objects": {
+    "bindings": [
+      { "class_name": "PyBoxSandbox", "name": "PyBox" },
+      { "class_name": "NodeSandbox", "name": "NodeBox" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["PyBoxSandbox", "NodeSandbox"] }
+  ],
+  "containers": [
+    { "class_name": "PyBoxSandbox", "image": "./docker/python.Dockerfile" },
+    { "class_name": "NodeSandbox", "image": "./docker/node.Dockerfile" }
+  ]
+}
+```
+
+Each agent grabs the sandbox it needs: `getSandbox(env.PyBox, sessionId)` or `getSandbox(env.NodeBox, sessionId)`.
 
 ### Secure egress with outbound Workers
 

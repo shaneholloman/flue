@@ -1,0 +1,33 @@
+{
+	// User-owned wrangler config for this Flue app. Flue reads this file,
+	// merges its own contributions (the `main` entry + per-agent DO bindings
+	// and migration), and writes the composed config to dist/wrangler.jsonc.
+	//
+	// The DO binding whose class_name contains "Sandbox" triggers Flue's
+	// automatic re-export of the Sandbox class from @cloudflare/sandbox in
+	// the generated Worker bundle.
+	"$schema": "https://workers.cloudflare.com/schema/wrangler.json",
+	"name": "assistant",
+	"compatibility_date": "2026-04-17",
+	"compatibility_flags": ["nodejs_compat"],
+	"durable_objects": {
+		"bindings": [
+			{
+				"class_name": "Sandbox",
+				"name": "Sandbox"
+			}
+		]
+	},
+	"migrations": [
+		{
+			"tag": "v1",
+			"new_sqlite_classes": ["Sandbox"]
+		}
+	],
+	"containers": [
+		{
+			"class_name": "Sandbox",
+			"image": "./Dockerfile"
+		}
+	]
+}

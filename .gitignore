@@ -34,6 +34,9 @@ pnpm-debug.log*
 # wrangler generated types
 worker-configuration.d.ts
 
+# wrangler local state (miniflare sqlite, caches, deploy redirect, etc.)
+.wrangler/
+
 # job data (local development)
 data/
 
