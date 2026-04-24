@@ -170,13 +170,12 @@ export default async function ({ init, payload, env }: FlueContext) {
 
 ### Adding the R2 binding
 
-Add the R2 bucket to your `wrangler.jsonc`:
+Add the R2 bucket to your project's `wrangler.jsonc` (at the root of your project, alongside `package.json`):
 
 ```jsonc
 {
   "name": "my-support-agent",
-  "main": "dist/index.js",
-  "compatibility_date": "2025-01-01",
+  "compatibility_date": "2025-06-01",
   "compatibility_flags": ["nodejs_compat"],
   "r2_buckets": [
     {
@@ -186,6 +185,8 @@ Add the R2 bucket to your `wrangler.jsonc`:
   ],
 }
 ```
+
+When you run `flue build --target cloudflare`, Flue merges its own Durable Object bindings into this file and writes the composed config to `dist/wrangler.jsonc`. `wrangler deploy` picks that up automatically via a redirect at `.wrangler/deploy/config.json` — so you can keep editing only your root `wrangler.jsonc` and bindings like this R2 binding will flow through to deploy. You don't need to set `main` yourself; Flue owns the bundle entrypoint.
 
 Upload your knowledge base to R2 using Wrangler:
 
@@ -232,7 +233,7 @@ export default async function ({ init, sessionId, env, payload }: FlueContext) {
 }
 ```
 
-The `Sandbox` binding is a Durable Object that Flue configures automatically in the generated `wrangler.jsonc`. No extra setup needed — `flue build --target cloudflare` generates both the wrangler config and a default `Dockerfile` for the container.
+The `Sandbox` binding is a Durable Object that Flue adds to your wrangler config automatically during build, along with a default `Dockerfile` at `dist/Dockerfile`. No extra setup needed. If you need a custom `Dockerfile`, add a `containers[]` entry to your own `wrangler.jsonc` pointing at whatever image path you want — Flue's merge will respect it.
 
 ### Secure egress with outbound Workers
 
