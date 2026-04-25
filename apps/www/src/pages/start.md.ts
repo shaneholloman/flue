@@ -26,7 +26,7 @@ const START_INSTRUCTIONS = `# Skill: Create a New Flue Agent
 
 You are helping the user create a new Flue agent.
 
-## Step 1: Context
+## Step 1: Gather Context
 
 First, fetch and read the Flue README:
 
@@ -70,7 +70,8 @@ ${await getDeployGuideList()}
   - Instead: Fetch https://flueframework.com/models.json and choose an exact model ID from that array.
 - Important: Never invent API keys or secrets.
   - Instead: You can scaffold out obvious placeholders, but always ask the user to provide the API secrets/keys/tokens themselves. You can still help the user by showing them the command to run to set the secret, based on their local dev setup and chosen host.
-
+- Important: Flue doesn't have a concept of dev yet, so don't add a "dev" package.json script.
+  - Instead: Create only "build" ("flue build") and "run" ("flue run") script aliases to flue.
 `;
 
 export const GET: APIRoute = () => {
