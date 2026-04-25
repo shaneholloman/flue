@@ -182,6 +182,37 @@ export default async function ({ init, payload, env }: FlueContext) {
 }
 ```
 
+## Sessions
+
+Every agent invocation runs inside a session. For HTTP agents, the session ID is the last path segment:
+
+```txt
+POST /agents/<agent-name>/<session-id>
+```
+
+Reuse the same session ID to continue the same conversation. Use a new session ID to start fresh.
+
+```bash
+# Start a conversation
+curl http://localhost:8787/agents/hello/session-abc \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice"}'
+
+# Continue that conversation
+curl http://localhost:8787/agents/hello/session-abc \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice"}'
+
+# Start a separate conversation
+curl http://localhost:8787/agents/hello/session-xyz \
+  -H "Content-Type: application/json" \
+  -d '{"name": "Alice"}'
+```
+
+Sessions persist message history, agent state, and sandbox state such as files written during the session. On Cloudflare, sessions are backed by Durable Objects and survive across requests. On Node.js, sessions are stored in memory by default unless you provide a custom store.
+
+In production, generate a stable session ID for each user conversation. Good choices include UUIDs, authenticated user IDs, or thread IDs from your database.
+
 ## Running Agents
 
 ### Trigger From the CLI
