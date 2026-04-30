@@ -293,6 +293,47 @@ export function mergeFlueAdditions(
 	return merged;
 }
 
+/**
+ * Strip wrangler-normalizer defaults that cause spurious warnings when wrangler
+ * re-parses our generated dist/wrangler.jsonc.
+ *
+ * Background: `unstable_readConfig` returns a fully-normalized `Unstable_Config`
+ * with every section populated to a default — including `unsafe: {}`. Wrangler's
+ * own validator then emits a `"unsafe" fields are experimental` warning whenever
+ * the field is *present*, regardless of whether it's empty. So our merged file,
+ * which inherits the empty default, would trip the warning at every dev start
+ * and every deploy.
+ *
+ * We delete `unsafe` only when it's an empty object (the exact shape wrangler's
+ * normalizer produces). If a user has actually written `unsafe: {...}` in their
+ * own wrangler.jsonc, the value will be non-empty and we leave it alone — the
+ * warning in that case is wrangler's intended diagnostic, not noise.
+ *
+ * Other normalizer-defaulted-empty fields (`vars: {}`, `kv_namespaces: []`,
+ * `python_modules: { exclude: ['**\/*.pyc'] }`, etc.) are left in place. They're
+ * harmless: wrangler doesn't warn about them, dist/wrangler.jsonc is an
+ * internal build artifact, and stripping them only saves bytes. Only `unsafe`
+ * has a user-visible side effect we need to fix.
+ *
+ * If wrangler adds another field to its `experimental()` warning list in a
+ * future version (today there are only two: `unsafe` and `secrets`), this
+ * function is the place to extend.
+ *
+ * Mutates `merged` in place to match the shallow-clone pattern in
+ * `mergeFlueAdditions`.
+ */
+export function stripNoisyWranglerDefaults(merged: Record<string, unknown>): void {
+	if (
+		'unsafe' in merged &&
+		typeof merged.unsafe === 'object' &&
+		merged.unsafe !== null &&
+		!Array.isArray(merged.unsafe) &&
+		Object.keys(merged.unsafe as Record<string, unknown>).length === 0
+	) {
+		delete merged.unsafe;
+	}
+}
+
 // ─── Sandbox binding detection ──────────────────────────────────────────────
 
 /**

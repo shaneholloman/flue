@@ -5,6 +5,7 @@ import {
 	readUserWranglerConfig,
 	validateUserWranglerConfig,
 	mergeFlueAdditions,
+	stripNoisyWranglerDefaults,
 	writeDeployRedirectIfMissing,
 	detectSandboxBindings,
 	assertSandboxPackageInstalled,
@@ -491,6 +492,11 @@ export default {
 		}
 
 		const merged = mergeFlueAdditions(userConfig, additions);
+
+		// Strip wrangler-normalizer defaults that cause spurious warnings when
+		// wrangler re-parses the file (notably `unsafe: {}`). See the function
+		// doc for the full rationale. Mutates `merged` in place.
+		stripNoisyWranglerDefaults(merged);
 
 		// Always include the wrangler JSON schema reference if absent so the
 		// generated file gets editor validation if someone opens it directly.
