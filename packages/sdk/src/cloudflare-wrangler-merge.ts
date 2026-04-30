@@ -158,6 +158,14 @@ export async function readUserWranglerConfig(outputDir: string): Promise<UserCon
  * the failure modes when these are wrong (missing nodejs_compat, old
  * compat_date) produce confusing runtime errors, and surfacing the problem at
  * build time is much friendlier.
+ *
+ * Together with `mergeFlueAdditions`, this enforces two invariants on every
+ * Flue worker:
+ *   1. `nodejs_compat` is in `compatibility_flags` (added if missing).
+ *   2. `compatibility_date >= MIN_COMPATIBILITY_DATE` (defaulted if missing).
+ *
+ * Those invariants are what let `dev.ts` hardcode `nodejsCompatMode: 'v2'`
+ * without re-deriving it from the config on every reload.
  */
 export function validateUserWranglerConfig(config: Record<string, unknown>): void {
 	// compatibility_flags must include nodejs_compat if user set the field.
@@ -215,10 +223,17 @@ export function mergeFlueAdditions(
 		merged.name = additions.defaultName;
 	}
 
-	// compatibility_date: user wins if set; fall back to today. (validateUserWranglerConfig
-	// already ensured any user-set value meets Flue's minimum.)
+	// compatibility_date: user wins if set; fall back to Flue's known-good
+	// minimum. (validateUserWranglerConfig already ensured any user-set value
+	// meets Flue's minimum.)
+	//
+	// We deliberately do NOT default to "today's date". A user running an
+	// older Flue install gets a workerd version that's pinned via wrangler;
+	// "today" can be ahead of that workerd's supported compat range and
+	// produce a confusing "compatibility_date is in the future" error. The
+	// floor is conservative but correct for any Flue release.
 	if (typeof merged.compatibility_date !== 'string') {
-		merged.compatibility_date = new Date().toISOString().split('T')[0]!;
+		merged.compatibility_date = MIN_COMPATIBILITY_DATE;
 	}
 
 	// compatibility_flags: union with nodejs_compat. (validateUserWranglerConfig

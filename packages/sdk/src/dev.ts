@@ -124,7 +124,7 @@ export async function dev(options: DevOptions): Promise<void> {
 
 	if (reloader.url) {
 		console.error(`[flue] Server: ${reloader.url}`);
-		const exampleAgent = pickExampleAgentName(workspaceDir);
+		const exampleAgent = pickExampleAgentName(outputDir, workspaceDir);
 		if (exampleAgent) {
 			console.error(`[flue] Try: curl -X POST ${reloader.url}/agents/${exampleAgent}/test-1 \\`);
 			console.error(`         -H 'Content-Type: application/json' -d '{}'`);
@@ -301,7 +301,11 @@ function createWatcher(options: WatcherOptions): WatcherHandle {
 	}
 
 	if (target === 'cloudflare') {
-		for (const cfgName of ['wrangler.jsonc', 'wrangler.json']) {
+		// Watch all three formats wrangler accepts. We only set up watchers
+		// for files that exist today — if a user adds a wrangler.* file later
+		// they'll need to restart the dev server. That trade-off keeps the
+		// watcher logic simple and avoids polling for non-existent files.
+		for (const cfgName of ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml']) {
 			const cfgPath = path.join(outputDir, cfgName);
 			if (!fs.existsSync(cfgPath)) continue;
 			try {
@@ -469,21 +473,16 @@ class NodeReloader implements DevReloader {
 // ─── Cloudflare reloader ────────────────────────────────────────────────────
 
 /**
- * Lazy-import wrangler + miniflare so users targeting only Node don't need
- * them installed. If the import fails, surface a friendly message pointing
- * at the peer-dep.
+ * Lazy-import wrangler so users targeting only Node don't need it installed.
+ * If the import fails, surface a friendly message pointing at the peer-dep.
  */
 async function createCloudflareReloader(opts: {
 	outputDir: string;
 	port: number;
 }): Promise<DevReloader> {
 	let wrangler: typeof import('wrangler');
-	let miniflare: typeof import('miniflare');
 	try {
 		wrangler = (await import('wrangler')) as typeof import('wrangler');
-		// miniflare ships as a transitive dep of wrangler, so installing
-		// wrangler also makes this resolvable.
-		miniflare = (await import('miniflare')) as typeof import('miniflare');
 	} catch (err) {
 		throw new Error(
 			`[flue] Cloudflare dev requires the "wrangler" package as a peer dependency.\n` +
@@ -493,14 +492,13 @@ async function createCloudflareReloader(opts: {
 		);
 	}
 
-	return new CloudflareReloader(wrangler, miniflare, opts);
+	return new CloudflareReloader(wrangler, opts);
 }
 
 class CloudflareReloader implements DevReloader {
 	private worker: Awaited<ReturnType<typeof import('wrangler').unstable_startWorker>> | null =
 		null;
 	private readonly wrangler: typeof import('wrangler');
-	private readonly miniflare: typeof import('miniflare');
 	private readonly outputDir: string;
 	private readonly port: number;
 	private readonly configPath: string;
@@ -508,11 +506,9 @@ class CloudflareReloader implements DevReloader {
 
 	constructor(
 		wrangler: typeof import('wrangler'),
-		miniflare: typeof import('miniflare'),
 		opts: { outputDir: string; port: number },
 	) {
 		this.wrangler = wrangler;
-		this.miniflare = miniflare;
 		this.outputDir = opts.outputDir;
 		this.port = opts.port;
 		this.configPath = path.join(this.outputDir, 'dist', 'wrangler.jsonc');
@@ -544,7 +540,13 @@ class CloudflareReloader implements DevReloader {
 	 */
 	shouldRebuildOn(relPath: string): boolean {
 		const normalized = relPath.replace(/\\/g, '/');
-		if (normalized === 'wrangler.jsonc' || normalized === 'wrangler.json') return true;
+		if (
+			normalized === 'wrangler.jsonc' ||
+			normalized === 'wrangler.json' ||
+			normalized === 'wrangler.toml'
+		) {
+			return true;
+		}
 		if (normalized.startsWith('agents/')) return true;
 		if (normalized.startsWith('roles/')) return true;
 		return false;
@@ -590,34 +592,26 @@ class CloudflareReloader implements DevReloader {
 			);
 		}
 
-		// `unstable_startWorker` reads the config file but does NOT derive
-		// `build.nodejsCompatMode` from `compatibility_flags` — that field is
-		// only computed when set via the input options (or by the wrangler
-		// CLI's own pre-processing). Without it, wrangler's bundler treats
-		// `nodejs_compat`-flagged Workers as if no Node compatibility is
-		// requested, fails to resolve `fs`/`zlib`/`path`/`assert` in deps
-		// like `tar`, and the worker never finishes booting.
+		// `unstable_startWorker` requires `build.nodejsCompatMode` to be set
+		// explicitly — it doesn't derive it from `compatibility_flags` in the
+		// config (that's the caller's job; wrangler's own CLI passes a hook).
 		//
-		// We compute the mode ourselves from the merged config and pass it
-		// through `build.nodejsCompatMode`. This is the same call the CLI
-		// makes internally — see `validateNodeCompatMode` in wrangler-dist.
+		// We hardcode `'v2'` because Flue's invariants make it the only
+		// correct value for any Flue worker:
+		//   - `validateUserWranglerConfig` rejects configs whose
+		//     `compatibility_flags` is set without `nodejs_compat`.
+		//   - `mergeFlueAdditions` adds `nodejs_compat` when missing.
+		//   - `compatibility_date` is floored at `MIN_COMPATIBILITY_DATE`
+		//     (2026-04-01), well past the v1→v2 cutover (2024-09-23).
 		//
-		// We use `experimental_readRawConfig` (raw, not normalized) here
-		// rather than `unstable_readConfig` because we only need two fields
-		// and want to avoid re-running validation on every reload.
-		const { compatibilityDate, compatibilityFlags } = readConfigCompatFields(
-			this.wrangler,
-			this.configPath,
-		);
-		const { mode: nodejsCompatMode } = this.miniflare.getNodeCompat(
-			compatibilityDate,
-			compatibilityFlags,
-		);
-
+		// So at the point this runs, the merged dist/wrangler.jsonc is
+		// guaranteed to have `nodejs_compat` set with a compat date that
+		// resolves to v2 mode. Reading the config to compute it would just
+		// re-derive the constant on every reload.
 		this.worker = await this.wrangler.unstable_startWorker({
 			config: this.configPath,
 			build: {
-				nodejsCompatMode,
+				nodejsCompatMode: 'v2',
 			},
 			dev: {
 				server: {
@@ -674,49 +668,35 @@ async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolea
 }
 
 /**
- * Read `compatibility_date` and `compatibility_flags` from a wrangler config.
- * Both feed into miniflare's `getNodeCompat` to determine whether the bundler
- * should apply Node.js polyfills.
+ * Pick a webhook agent name to print in the friendly curl example. Falls back
+ * to any agent if none have webhook triggers (the example would 404 on the
+ * dev server in that case, but it's still a hint at the URL shape). Reads the
+ * manifest written by the build, with a directory-scan fallback in case the
+ * manifest is somehow missing.
  *
- * Uses wrangler's `experimental_readRawConfig` so we get jsonc + TOML support
- * for free without re-implementing parsing. The "raw" reader skips
- * normalization/validation, which is the right choice here because:
- *   - We only need two top-level fields.
- *   - This runs on every dev reload, and we don't want validation overhead
- *     (or the chance of validation throwing on something we'd otherwise
- *     accept) to interrupt a hot iteration loop.
+ * Best-effort — silently returns null if anything goes wrong.
  */
-function readConfigCompatFields(
-	wrangler: typeof import('wrangler'),
-	configPath: string,
-): { compatibilityDate: string | undefined; compatibilityFlags: string[] } {
+function pickExampleAgentName(outputDir: string, workspaceDir: string): string | null {
+	type ManifestEntry = { name: string; triggers?: { webhook?: boolean; cron?: string } };
 	try {
-		const { rawConfig } = wrangler.experimental_readRawConfig({ config: configPath });
-		const compatibilityDate =
-			typeof rawConfig.compatibility_date === 'string'
-				? rawConfig.compatibility_date
-				: undefined;
-		const compatibilityFlags = Array.isArray(rawConfig.compatibility_flags)
-			? (rawConfig.compatibility_flags as unknown[]).filter(
-					(f): f is string => typeof f === 'string',
-				)
-			: [];
-		return { compatibilityDate, compatibilityFlags };
+		const manifestPath = path.join(outputDir, 'dist', 'manifest.json');
+		if (fs.existsSync(manifestPath)) {
+			const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
+				agents?: ManifestEntry[];
+			};
+			const agents = manifest.agents ?? [];
+			const webhook = agents.find((a) => a.triggers?.webhook);
+			if (webhook) return webhook.name;
+			if (agents[0]) return agents[0].name;
+		}
 	} catch {
-		return { compatibilityDate: undefined, compatibilityFlags: [] };
+		// Fall through to filesystem scan.
 	}
-}
 
-/**
- * Pick any agent file name from the workspace, just to print a friendly curl
- * example. Best-effort — silently returns null if anything goes wrong.
- */
-function pickExampleAgentName(workspaceDir: string): string | null {
 	try {
 		const agentsDir = path.join(workspaceDir, 'agents');
 		if (!fs.existsSync(agentsDir)) return null;
-		const entries = fs.readdirSync(agentsDir);
-		for (const e of entries) {
+		for (const e of fs.readdirSync(agentsDir)) {
 			const m = e.match(/^([a-zA-Z0-9_-]+)\.(ts|js|mts|mjs)$/);
 			if (m && m[1]) return m[1];
 		}
