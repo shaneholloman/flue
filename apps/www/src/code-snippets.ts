@@ -2,25 +2,30 @@
 export const COPY_PROMPT = `fetch https://flueframework.com/start.md to create a new agent`;
 
 export const HERO = `export default async function ({ init, payload, env }) {
-  // Initialize an agent with a default model.
-  // By default, Flue spins up a lightweight virtual sandbox + filesystem.
+  // Initialize a new agent. 
+  // Provide a hosted sandbox, or use Flue's built-in virtual sandbox.
   const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
   const session = await agent.session();
 
-  // Leverage agent skills as typed, reusable LLM calls with structured output:
+  // Call skills as reusable workflows with structured output:
   const triage = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    result: v.object({ summary: v.string(), fixApplied: v.boolean() }),
+    result: v.object({ fixApplied: v.boolean() }),
   });
 
-  // Keep absolute, deterministic control over the most critical decisions:
+  // Keep track of work in the session, just like Claude Code or Codex:
+  const comment = await session.prompt('Write a GitHub comment summarizing the triage.');
+
+  // Keep absolute control over the agent's most critical decisions:
   if (triage.fixApplied) {
     await session.shell('git add -A && git commit --file -', { stdin: \`fix: \${triage.summary}\` });
   }
 
-  // Run any CLI tool in the agent's sandbox (git, gh, curl, ...):
-  const comment = await session.prompt('Write a GitHub comment summarizing the triage.');
-  await session.shell(\`gh issue comment \${Number(payload.issueNumber)} --body-file -\`, { stdin: comment });
+  // Protect your sensitive tokens and API keys with fine-grained control:
+  await session.shell(\`gh issue comment \${Number(payload.issueNumber)} --body-file -\`, { 
+    stdin: comment,
+    env: { GITHUB_TOKEN: env.GITHUB_TOKEN },
+  });
 }`;
 
 export const SUPPORT_AGENT = `// Built for: Cloudflare

@@ -1,4 +1,5 @@
 import type { FlueContext } from '@flue/sdk';
+import { Bash, InMemoryFs } from 'just-bash';
 
 export const triggers = { webhook: true };
 
@@ -12,10 +13,14 @@ export const triggers = { webhook: true };
  * - Shell can create files (non-LLM path)
  */
 export default async function ({ init }: FlueContext) {
-	const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
+	const fs = new InMemoryFs();
+	const sandbox = () => new Bash({ fs });
+	const agent = await init({ sandbox, model: 'anthropic/claude-sonnet-4-6' });
 	const session = await agent.session();
 
 	const results: Record<string, boolean> = {};
+
+	await session.shell('echo "Seeded workspace instructions" > AGENTS.md');
 
 	// 1. Read a workspace file via shell
 	const cat = await session.shell('cat AGENTS.md');

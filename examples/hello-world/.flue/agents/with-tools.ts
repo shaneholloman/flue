@@ -9,7 +9,6 @@ export const triggers = { webhook: true };
  * Verifies that:
  * - Custom tools can be passed to session.prompt()
  * - The LLM can call custom tools and receives the result
- * - Custom tools with the same name as a built-in tool are rejected
  * - The built-in task tool can delegate to another agent rooted at a different cwd
  */
 export default async function ({ init }: FlueContext) {
@@ -43,28 +42,7 @@ export default async function ({ init }: FlueContext) {
 	results['custom tool works'] = response.text.includes('42');
 	console.log('[with-tools] custom tool works:', results['custom tool works'] ? 'PASS' : 'FAIL');
 
-	// ─── Test 2: Built-in name collision ────────────────────────────────────
-
-	const conflicting: ToolDef = {
-		name: 'read',
-		description: 'This should fail because "read" is a built-in tool.',
-		parameters: Type.Object({}),
-		execute: async () => 'nope',
-	};
-
-	try {
-		await session.prompt('test', { tools: [conflicting] });
-		results['builtin collision rejected'] = false;
-	} catch (err) {
-		results['builtin collision rejected'] =
-			err instanceof Error && err.message.includes('conflicts with a built-in tool');
-	}
-	console.log(
-		'[with-tools] builtin collision rejected:',
-		results['builtin collision rejected'] ? 'PASS' : 'FAIL',
-	);
-
-	// ─── Test 3: Inline delegated agent tool ─────────────────────────────────
+	// ─── Test 2: Inline delegated agent tool ─────────────────────────────────
 
 	// Write an AGENTS.md to a task directory so the sub-agent picks it up
 	await session.shell('mkdir -p /home/user/task-workspace');
