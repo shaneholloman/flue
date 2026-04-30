@@ -35,7 +35,6 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { parse as parseJsonc } from 'jsonc-parser';
 import { build } from './build.ts';
 import type { BuildOptions } from './types.ts';
 
@@ -602,7 +601,14 @@ class CloudflareReloader implements DevReloader {
 		// We compute the mode ourselves from the merged config and pass it
 		// through `build.nodejsCompatMode`. This is the same call the CLI
 		// makes internally — see `validateNodeCompatMode` in wrangler-dist.
-		const { compatibilityDate, compatibilityFlags } = readConfigCompatFields(this.configPath);
+		//
+		// We use `experimental_readRawConfig` (raw, not normalized) here
+		// rather than `unstable_readConfig` because we only need two fields
+		// and want to avoid re-running validation on every reload.
+		const { compatibilityDate, compatibilityFlags } = readConfigCompatFields(
+			this.wrangler,
+			this.configPath,
+		);
 		const { mode: nodejsCompatMode } = this.miniflare.getNodeCompat(
 			compatibilityDate,
 			compatibilityFlags,
@@ -671,18 +677,27 @@ async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolea
  * Read `compatibility_date` and `compatibility_flags` from a wrangler config.
  * Both feed into miniflare's `getNodeCompat` to determine whether the bundler
  * should apply Node.js polyfills.
+ *
+ * Uses wrangler's `experimental_readRawConfig` so we get jsonc + TOML support
+ * for free without re-implementing parsing. The "raw" reader skips
+ * normalization/validation, which is the right choice here because:
+ *   - We only need two top-level fields.
+ *   - This runs on every dev reload, and we don't want validation overhead
+ *     (or the chance of validation throwing on something we'd otherwise
+ *     accept) to interrupt a hot iteration loop.
  */
-function readConfigCompatFields(configPath: string): {
-	compatibilityDate: string | undefined;
-	compatibilityFlags: string[];
-} {
+function readConfigCompatFields(
+	wrangler: typeof import('wrangler'),
+	configPath: string,
+): { compatibilityDate: string | undefined; compatibilityFlags: string[] } {
 	try {
-		const raw = fs.readFileSync(configPath, 'utf-8');
-		const parsed = parseJsonc(raw) as Record<string, unknown> | null;
+		const { rawConfig } = wrangler.experimental_readRawConfig({ config: configPath });
 		const compatibilityDate =
-			typeof parsed?.compatibility_date === 'string' ? parsed.compatibility_date : undefined;
-		const compatibilityFlags = Array.isArray(parsed?.compatibility_flags)
-			? (parsed.compatibility_flags as unknown[]).filter(
+			typeof rawConfig.compatibility_date === 'string'
+				? rawConfig.compatibility_date
+				: undefined;
+		const compatibilityFlags = Array.isArray(rawConfig.compatibility_flags)
+			? (rawConfig.compatibility_flags as unknown[]).filter(
 					(f): f is string => typeof f === 'string',
 				)
 			: [];

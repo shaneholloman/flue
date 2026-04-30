@@ -48,7 +48,6 @@
 		"@valibot/to-json-schema": "^1.0.0",
 		"esbuild": "^0.25.0",
 		"hono": "^4.7.0",
-		"jsonc-parser": "^3.3.1",
 		"just-bash": "^2.14.2",
 		"package-up": "^5.0.0",
 		"valibot": "^1.0.0"

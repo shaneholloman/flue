@@ -21,7 +21,7 @@ export class CloudflarePlugin implements BuildPlugin {
 	bundle = 'none' as const;
 	entryFilename = '_entry.ts';
 
-	generateEntryPoint(ctx: BuildContext): string {
+	async generateEntryPoint(ctx: BuildContext): Promise<string> {
 		const { agents, roles } = ctx;
 		const rolesJson = JSON.stringify(roles);
 
@@ -74,7 +74,7 @@ export class CloudflarePlugin implements BuildPlugin {
 		// bindings. For each, emit an aliased re-export from `@cloudflare/sandbox`
 		// so the bundle surfaces the class at the top level under the user's
 		// chosen class_name. See `detectSandboxBindings` for the convention.
-		const { config: userConfig } = readUserWranglerConfig(ctx.outputDir);
+		const { config: userConfig } = await readUserWranglerConfig(ctx.outputDir);
 		const sandboxClassNames = detectSandboxBindings(userConfig);
 		const sandboxReExports = sandboxClassNames
 			.map((name) => `export { Sandbox as ${name} } from '@cloudflare/sandbox';`)
@@ -410,7 +410,7 @@ export default {
 `;
 	}
 
-	additionalOutputs(ctx: BuildContext): Record<string, string> {
+	async additionalOutputs(ctx: BuildContext): Promise<Record<string, string>> {
 		const outputs: Record<string, string> = {};
 		const webhookAgents = ctx.agents.filter((a) => a.triggers.webhook);
 
@@ -446,7 +446,12 @@ export default {
 		// Read and validate the user's wrangler config (if any), then merge
 		// Flue's additions in. User's file lives at outputDir and is never
 		// modified; the composed output is written to dist/wrangler.jsonc.
-		const { config: userConfig, path: userConfigPath } = readUserWranglerConfig(ctx.outputDir);
+		// Wrangler's reader normalizes relative paths (e.g. containers[].image)
+		// to absolute paths against the user's config dir, so the merged file
+		// stays correct after we write it to dist/.
+		const { config: userConfig, path: userConfigPath } = await readUserWranglerConfig(
+			ctx.outputDir,
+		);
 		if (userConfigPath) {
 			console.log(`[flue] Merging with user wrangler config: ${userConfigPath}`);
 		}

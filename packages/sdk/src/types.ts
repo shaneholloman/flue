@@ -436,8 +436,12 @@ export interface BuildContext {
  */
 export interface BuildPlugin {
 	name: string;
-	/** The source of the entry point (TS or JS). */
-	generateEntryPoint(ctx: BuildContext): string;
+	/**
+	 * The source of the entry point (TS or JS). May be async — the Cloudflare
+	 * plugin reads the user's wrangler config (via wrangler's reader) which is
+	 * a sync call but lives behind a lazy `await import('wrangler')`.
+	 */
+	generateEntryPoint(ctx: BuildContext): string | Promise<string>;
 	/**
 	 * Bundling strategy:
 	 *   - `'esbuild'` (default): run the SDK's esbuild pass to produce a
@@ -456,8 +460,8 @@ export interface BuildPlugin {
 	entryFilename?: string;
 	/** esbuild options. Only consulted when `bundle === 'esbuild'`. */
 	esbuildOptions?(ctx: BuildContext): Record<string, any>;
-	/** Additional files to write to dist/ (e.g., wrangler.jsonc, Dockerfile). */
-	additionalOutputs?(ctx: BuildContext): Record<string, string>;
+	/** Additional files to write to dist/ (e.g., wrangler.jsonc, Dockerfile). May be async. */
+	additionalOutputs?(ctx: BuildContext): Record<string, string> | Promise<Record<string, string>>;
 }
 
 export interface BuildOptions {

@@ -97,7 +97,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 		options,
 	};
 
-	const serverCode = plugin.generateEntryPoint(ctx);
+	const serverCode = await plugin.generateEntryPoint(ctx);
 	const bundleStrategy = plugin.bundle ?? 'esbuild';
 	let anyChanged = false;
 
@@ -169,7 +169,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 	}
 
 	if (plugin.additionalOutputs) {
-		const outputs = plugin.additionalOutputs(ctx);
+		const outputs = await plugin.additionalOutputs(ctx);
 		for (const [filename, content] of Object.entries(outputs)) {
 			const filePath = path.join(distDir, filename);
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });

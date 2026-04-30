@@ -1,21 +1,31 @@
 /**
  * Merge Flue's Cloudflare additions into the user's wrangler config.
  *
- * Philosophy: the user's wrangler.jsonc is the source of truth. Flue contributes
+ * Philosophy: the user's wrangler config is the source of truth. Flue contributes
  * the pieces it owns (the Worker entrypoint, its per-agent Durable Object
  * bindings, the Sandbox DO, the migration tag) and leaves everything else
  * untouched. The merged result is written to `dist/wrangler.jsonc` so the
  * deployed Worker sees both.
  *
- * We use `jsonc-parser` (the same library wrangler uses internally) for
- * reading. TOML is intentionally unsupported — Cloudflare itself recommends
- * wrangler.jsonc for new projects, and supporting both formats here would
- * double the surface area for no real benefit. Users with wrangler.toml get a
- * clear error directing them to convert.
+ * We delegate parsing and normalization to wrangler's own `unstable_readConfig`
+ * (lazy-imported so Node-only Flue users don't pay for it). This gets us:
+ *   - Both jsonc and TOML support for free.
+ *   - Wrangler's own validation diagnostics (clearer errors than ours).
+ *   - Path normalization: relative paths in fields like `containers[].image`
+ *     are resolved to absolute paths against the user's config dir before
+ *     we merge. This is critical because we write the merged config to
+ *     `dist/wrangler.jsonc` — wrangler resolves relative paths against the
+ *     config file's own directory, so without normalization a user's
+ *     `containers[].image: "./Dockerfile"` would resolve to `dist/Dockerfile`
+ *     after the move and fail to deploy.
+ *
+ * Flue still owns merge semantics (DO binding de-dup by `name`, migration
+ * append-if-tag-absent) and Flue-specific validation (compat date floor,
+ * required compat flags) — wrangler doesn't know about those.
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { parse as parseJsonc, type ParseError } from 'jsonc-parser';
+import type { Unstable_Config } from 'wrangler';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -61,65 +71,81 @@ export interface FlueAdditions {
 // ─── Reading user config ────────────────────────────────────────────────────
 
 interface UserConfigRead {
-	/** Parsed config object, or an empty object if no user file was found. */
+	/**
+	 * Normalized config from wrangler's reader, or an empty object if no user
+	 * file was found. Treated as `Record<string, unknown>` at our merge layer
+	 * because we touch only a handful of well-known fields and pass everything
+	 * else through unchanged. Typed loosely so we can survive shape drift in
+	 * wrangler's `Unstable_Config` between minor versions.
+	 */
 	config: Record<string, unknown>;
 	/** Absolute path of the user config file that was read, or null if none existed. */
 	path: string | null;
 }
 
 /**
- * Read the user's wrangler config from `outputDir` if present.
+ * Read and normalize the user's wrangler config from `outputDir`.
  *
- * Looks for `wrangler.jsonc` then `wrangler.json` (in that order — jsonc is the
- * recommended format). If a `wrangler.toml` is present instead, throws with a
- * clear conversion hint. Returns an empty config if no file is present.
+ * Looks for `wrangler.jsonc`, `wrangler.json`, then `wrangler.toml` (jsonc is
+ * Cloudflare's recommended format for new projects, but all three work).
+ * Returns an empty config if no file is present.
+ *
+ * Delegates parsing + normalization to wrangler via `unstable_readConfig`. This
+ * is async only because wrangler is a lazy import (it's a peer dep — Flue users
+ * who only target Node should not pay for resolving it). The wrangler call
+ * itself is synchronous under the hood.
+ *
+ * The returned config has been through wrangler's `normalizeAndValidateConfig`,
+ * which:
+ *   - Resolves relative paths to absolute (notably `containers[].image`).
+ *   - Fills in defaults (`compatibility_date` if absent, etc.).
+ *   - Merges `env.*` per-environment overrides.
+ *   - Throws on validation errors via wrangler's own `UserError`.
+ *
+ * The verbose / defaulted output is intentional — the cost is a slightly bigger
+ * `dist/wrangler.jsonc` and the benefit is correctness without us reimplementing
+ * wrangler's path-resolution logic.
  */
-export function readUserWranglerConfig(outputDir: string): UserConfigRead {
-	const jsoncPath = path.join(outputDir, 'wrangler.jsonc');
-	const jsonPath = path.join(outputDir, 'wrangler.json');
-	const tomlPath = path.join(outputDir, 'wrangler.toml');
-
-	const foundPath = fs.existsSync(jsoncPath)
-		? jsoncPath
-		: fs.existsSync(jsonPath)
-			? jsonPath
-			: null;
+export async function readUserWranglerConfig(outputDir: string): Promise<UserConfigRead> {
+	const candidates = ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml'];
+	let foundPath: string | null = null;
+	for (const name of candidates) {
+		const candidate = path.join(outputDir, name);
+		if (fs.existsSync(candidate)) {
+			foundPath = candidate;
+			break;
+		}
+	}
 
 	if (!foundPath) {
-		if (fs.existsSync(tomlPath)) {
-			throw new Error(
-				`[flue] Found wrangler.toml at ${tomlPath}. Flue only supports wrangler.jsonc ` +
-					`(the format Cloudflare recommends for new projects). Convert your config to ` +
-					`wrangler.jsonc — you can use any online TOML-to-JSON converter, or copy the ` +
-					`fields over by hand.`,
-			);
-		}
 		return { config: {}, path: null };
 	}
 
-	const source = fs.readFileSync(foundPath, 'utf-8');
-	const errors: ParseError[] = [];
-	const parsed = parseJsonc(source, errors, { allowTrailingComma: true });
-
-	if (errors.length > 0) {
-		const summary = errors
-			.slice(0, 3)
-			.map((e) => `offset ${e.offset}: error code ${e.error}`)
-			.join('; ');
+	let wrangler: typeof import('wrangler');
+	try {
+		wrangler = (await import('wrangler')) as typeof import('wrangler');
+	} catch (err) {
 		throw new Error(
-			`[flue] Failed to parse ${foundPath}: ${summary}. ` +
-				`Please fix syntax errors in your wrangler config before building.`,
+			`[flue] Reading the Cloudflare wrangler config requires the "wrangler" package as a peer dependency.\n` +
+				`Install it in your project:\n\n` +
+				`  npm install --save-dev wrangler\n\n` +
+				`Underlying error: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 
-	if (parsed === undefined || parsed === null || typeof parsed !== 'object' || Array.isArray(parsed)) {
+	let parsed: Unstable_Config;
+	try {
+		parsed = wrangler.unstable_readConfig({ config: foundPath }, { hideWarnings: true });
+	} catch (err) {
+		// Wrangler throws `UserError` for validation/parse failures with an
+		// already-formatted message. Re-prefix for friendliness so the user
+		// can tell who's complaining.
 		throw new Error(
-			`[flue] ${foundPath} did not contain a JSON object at the top level. ` +
-				`A wrangler config must be an object.`,
+			`[flue] Failed to read ${foundPath}: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 
-	return { config: parsed as Record<string, unknown>, path: foundPath };
+	return { config: parsed as unknown as Record<string, unknown>, path: foundPath };
 }
 
 // ─── Validation ─────────────────────────────────────────────────────────────
