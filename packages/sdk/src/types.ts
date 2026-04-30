@@ -424,11 +424,38 @@ export interface BuildContext {
 	options: BuildOptions;
 }
 
-/** Controls the build output format for a target platform. */
+/**
+ * Controls the build output format for a target platform.
+ *
+ * A plugin can either ship a fully-bundled JavaScript artifact (Node target)
+ * or hand over a TypeScript/ESM entry source that some downstream tool will
+ * bundle (Cloudflare target — wrangler does the bundling). Pre-bundling on
+ * top of a tool that bundles for itself causes subtle resolution conflicts
+ * (we hit this with `tar`/`fs`/etc. via `nodejs_compat`), so the Cloudflare
+ * path explicitly opts out.
+ */
 export interface BuildPlugin {
 	name: string;
+	/** The source of the entry point (TS or JS). */
 	generateEntryPoint(ctx: BuildContext): string;
-	esbuildOptions(ctx: BuildContext): Record<string, any>;
+	/**
+	 * Bundling strategy:
+	 *   - `'esbuild'` (default): run the SDK's esbuild pass to produce a
+	 *     bundled `dist/server.mjs`. Use when the deploy target is "just run
+	 *     this file" with no further bundling step.
+	 *   - `'none'`: skip esbuild. The entry is written as-is to `dist/` and
+	 *     becomes the input for whatever tool will deploy it (e.g. wrangler).
+	 *     The plugin must also implement `entryFilename` to set the file name.
+	 */
+	bundle?: 'esbuild' | 'none';
+	/**
+	 * The filename to use for the entry, written under `dist/`. Required when
+	 * `bundle === 'none'`. For `bundle === 'esbuild'` the output is always
+	 * `server.mjs` and this field is ignored.
+	 */
+	entryFilename?: string;
+	/** esbuild options. Only consulted when `bundle === 'esbuild'`. */
+	esbuildOptions?(ctx: BuildContext): Record<string, any>;
 	/** Additional files to write to dist/ (e.g., wrangler.jsonc, Dockerfile). */
 	additionalOutputs?(ctx: BuildContext): Record<string, string>;
 }

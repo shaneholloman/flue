@@ -12,4 +12,8 @@ export default defineConfig({
 	format: ['esm'],
 	dts: true,
 	clean: true,
+	// `wrangler` and `miniflare` are heavy peer/optional deps that the dev
+	// server lazy-imports at runtime. Keep them external so the SDK bundle
+	// stays small (saves ~5 MB).
+	external: ['wrangler', 'miniflare'],
 });

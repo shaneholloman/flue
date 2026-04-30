@@ -1,0 +1,712 @@
+/**
+ * Flue dev server.
+ *
+ * Watches the user's workspace, rebuilds on file changes, and reloads the
+ * underlying server. Distinct from `flue run`: dev is the long-running,
+ * edit-and-iterate command, while `flue run` is the one-shot
+ * production-style invoker (build → run → exit).
+ *
+ * # Two very different reload models
+ *
+ * Node and Cloudflare use fundamentally different rebuild strategies, because
+ * what they each provide downstream is fundamentally different:
+ *
+ * - **Node** has no host bundler. Our esbuild pass produces the final
+ *   `dist/server.mjs`. On any change in the workspace we rebuild and respawn
+ *   the child Node process. Sub-second restart is fine.
+ *
+ * - **Cloudflare** uses Wrangler's bundler (the same one `wrangler dev` and
+ *   `wrangler deploy` use). Wrangler watches the entry's transitive import
+ *   graph itself and reloads workerd on source edits. So we *don't* need to
+ *   rebuild for body edits — wrangler handles it. We only need to act when:
+ *     1. The set of agents changes (added / removed / triggers changed) →
+ *        regenerate `dist/_entry.ts`. Wrangler picks up the new entry
+ *        automatically because it's already watching it.
+ *     2. The user's `wrangler.jsonc` changes → re-merge our additions and
+ *        restart the worker (config changes don't hot-apply).
+ *   Pure body edits to agent files: wrangler reloads workerd; we do nothing.
+ *
+ * # Watching
+ *
+ * Watching uses `node:fs.watch` recursive (Node 20+). Debounced 150ms. The
+ * Node path treats every non-ignored change as a rebuild trigger; the
+ * Cloudflare path filters to "structural" changes only.
+ */
+import { spawn, type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { parse as parseJsonc } from 'jsonc-parser';
+import { build } from './build.ts';
+import type { BuildOptions } from './types.ts';
+
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+export interface DevOptions {
+	workspaceDir: string;
+	outputDir: string;
+	target: 'node' | 'cloudflare';
+	/** Defaults to 3583 ("FLUE" on a phone keypad). */
+	port?: number;
+}
+
+/** Default port for `flue dev`. F=3, L=5, U=8, E=3 on a phone keypad. */
+export const DEFAULT_DEV_PORT = 3583;
+
+/**
+ * The dev server delegates "what to do with a built artifact" to a
+ * target-specific reloader. The reloaders also signal whether a given file
+ * change requires action (Node: always; Cloudflare: only structural changes).
+ */
+interface DevReloader {
+	/** Bring the server up for the first time. Throws on failure. */
+	start(): Promise<void>;
+	/**
+	 * Decide whether a workspace file change should trigger a rebuild.
+	 * `relPath` is workspace-relative.
+	 */
+	shouldRebuildOn(relPath: string): boolean;
+	/**
+	 * Run after a rebuild. `buildChanged` is true if the build wrote any new
+	 * content to dist/. The reloader may use this to skip an unnecessary
+	 * worker restart when nothing changed (Cloudflare body edits).
+	 */
+	reload(buildChanged: boolean): Promise<void>;
+	/** Tear the server down. Idempotent. */
+	stop(): Promise<void>;
+	/**
+	 * Synchronous best-effort cleanup. Called from `process.on('exit')` as a
+	 * safety net so we don't leak child processes if the parent exits without
+	 * going through `stop()`. Must not throw, must not block.
+	 */
+	killSync?(): void;
+	/** Human-readable URL to print in logs. May be undefined before `start()`. */
+	readonly url?: string;
+}
+
+// ─── Public entry point ─────────────────────────────────────────────────────
+
+/**
+ * Start a Flue dev server. Resolves only when the server is shut down (e.g.
+ * via SIGINT). Errors during the initial build/start are thrown synchronously;
+ * errors during subsequent rebuilds are logged but do NOT exit the dev server
+ * — the user is editing code, after all, and we want to recover when they fix it.
+ */
+export async function dev(options: DevOptions): Promise<void> {
+	const workspaceDir = path.resolve(options.workspaceDir);
+	const outputDir = path.resolve(options.outputDir);
+	const port = options.port ?? DEFAULT_DEV_PORT;
+
+	const buildOptions: BuildOptions = {
+		workspaceDir,
+		outputDir,
+		target: options.target,
+	};
+
+	console.error(`[flue] Starting dev server (target: ${options.target})`);
+	console.error(`[flue] Watching: ${workspaceDir}`);
+	console.error(`[flue] Building...`);
+
+	const initialStart = Date.now();
+	try {
+		await build(buildOptions);
+	} catch (err) {
+		throw new Error(
+			`[flue] Initial build failed: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+	console.error(`[flue] Built in ${Date.now() - initialStart}ms`);
+
+	const reloader: DevReloader =
+		options.target === 'node'
+			? new NodeReloader({ outputDir, port })
+			: await createCloudflareReloader({ outputDir, port });
+
+	await reloader.start();
+
+	if (reloader.url) {
+		console.error(`[flue] Server: ${reloader.url}`);
+		const exampleAgent = pickExampleAgentName(workspaceDir);
+		if (exampleAgent) {
+			console.error(`[flue] Try: curl -X POST ${reloader.url}/agents/${exampleAgent}/test-1 \\`);
+			console.error(`         -H 'Content-Type: application/json' -d '{}'`);
+		}
+	}
+	console.error(`[flue] Press Ctrl+C to stop\n`);
+
+	// ─── Watch loop ──────────────────────────────────────────────────────────
+
+	const rebuilder = createRebuilder(buildOptions, reloader);
+	const watcher = createWatcher({
+		workspaceDir,
+		outputDir,
+		target: options.target,
+		onChange: (relPath) => {
+			if (!reloader.shouldRebuildOn(relPath)) return;
+			console.error(`[flue] Change detected: ${relPath}`);
+			rebuilder.schedule();
+		},
+	});
+
+	// ─── Lifecycle ───────────────────────────────────────────────────────────
+
+	let shuttingDown = false;
+	const shutdown = async (signal: string, exitCode: number) => {
+		if (shuttingDown) return;
+		shuttingDown = true;
+		console.error(`\n[flue] Received ${signal}, shutting down...`);
+		watcher.close();
+		try {
+			await reloader.stop();
+		} catch (err) {
+			console.error(
+				`[flue] Error during shutdown: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+		console.error(`[flue] Stopped.`);
+		process.exit(exitCode);
+	};
+
+	process.on('SIGINT', () => void shutdown('SIGINT', 130));
+	process.on('SIGTERM', () => void shutdown('SIGTERM', 143));
+
+	// Last-resort safety net: if the parent exits for any reason (uncaught
+	// exception, hard kill from a wrapping process manager, etc.), make a
+	// best-effort synchronous attempt to kill any child process the reloader
+	// is holding. `process.on('exit')` handlers can't await, so this is sync.
+	process.on('exit', () => {
+		try {
+			reloader.killSync?.();
+		} catch {
+			/* ignore */
+		}
+	});
+
+	// Block forever until a signal handler exits the process.
+	await new Promise<void>(() => {});
+}
+
+// ─── Rebuilder ──────────────────────────────────────────────────────────────
+
+interface Rebuilder {
+	/**
+	 * Schedule a rebuild. If a rebuild is already running, queues exactly one
+	 * follow-up. Multiple calls during the in-flight or queued window are
+	 * coalesced.
+	 */
+	schedule(): void;
+}
+
+function createRebuilder(buildOptions: BuildOptions, reloader: DevReloader): Rebuilder {
+	let running = false;
+	let queued = false;
+	let debounceTimer: NodeJS.Timeout | null = null;
+
+	const runOnce = async () => {
+		running = true;
+		const start = Date.now();
+		console.error(`[flue] Rebuilding...`);
+		try {
+			const { changed } = await build(buildOptions);
+			await reloader.reload(changed);
+			console.error(`[flue] Reloaded in ${Date.now() - start}ms\n`);
+		} catch (err) {
+			// Don't exit the dev loop on a rebuild error — the user is editing
+			// code, they'll fix it and trigger another rebuild.
+			console.error(
+				`[flue] Rebuild failed: ${err instanceof Error ? err.message : String(err)}\n`,
+			);
+		} finally {
+			running = false;
+			if (queued) {
+				queued = false;
+				void runOnce();
+			}
+		}
+	};
+
+	return {
+		schedule() {
+			if (debounceTimer) clearTimeout(debounceTimer);
+			debounceTimer = setTimeout(() => {
+				debounceTimer = null;
+				if (running) {
+					queued = true;
+				} else {
+					void runOnce();
+				}
+			}, 150);
+		},
+	};
+}
+
+// ─── Watcher ────────────────────────────────────────────────────────────────
+
+interface WatcherOptions {
+	workspaceDir: string;
+	outputDir: string;
+	target: 'node' | 'cloudflare';
+	onChange: (relPath: string) => void;
+}
+
+interface WatcherHandle {
+	close(): void;
+}
+
+/**
+ * Watch the workspace for changes. Uses `fs.watch` recursive (Node 20+).
+ *
+ * Watched roots:
+ *   - `<workspaceDir>` — agents/, roles/, AGENTS.md, .agents/skills/.
+ *   - For Cloudflare: also `<outputDir>/wrangler.jsonc` (and `.json`),
+ *     since changes there require a worker restart.
+ *
+ * Ignored:
+ *   - `dist/`, `node_modules/`, `.git/`, `.turbo/`
+ *   - dotfiles other than the ones we explicitly care about (AGENTS.md is
+ *     not a dotfile, so it's fine)
+ *   - editor backup/swap suffixes
+ */
+function createWatcher(options: WatcherOptions): WatcherHandle {
+	const { workspaceDir, outputDir, target, onChange } = options;
+	const watchers: fs.FSWatcher[] = [];
+
+	const isIgnoredPath = (relPath: string): boolean => {
+		const normalized = relPath.replace(/\\/g, '/');
+		const parts = normalized.split('/');
+		for (const part of parts) {
+			if (part === 'node_modules') return true;
+			if (part === 'dist') return true;
+			if (part === '.git') return true;
+			if (part === '.turbo') return true;
+		}
+		const base = parts[parts.length - 1] ?? '';
+		if (!base) return true;
+		if (base.startsWith('.') && base !== '.flueignore') return true;
+		if (base.endsWith('~') || base.endsWith('.swp') || base.endsWith('.swx')) return true;
+		if (base === '.DS_Store') return true;
+		return false;
+	};
+
+	try {
+		const w = fs.watch(workspaceDir, { recursive: true }, (_event, filename) => {
+			if (!filename) return;
+			const rel = filename.toString();
+			if (isIgnoredPath(rel)) return;
+			onChange(rel);
+		});
+		watchers.push(w);
+	} catch (err) {
+		console.error(
+			`[flue] Failed to watch ${workspaceDir}: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	if (target === 'cloudflare') {
+		for (const cfgName of ['wrangler.jsonc', 'wrangler.json']) {
+			const cfgPath = path.join(outputDir, cfgName);
+			if (!fs.existsSync(cfgPath)) continue;
+			try {
+				const w = fs.watch(cfgPath, () => onChange(cfgName));
+				watchers.push(w);
+			} catch {
+				// Best-effort; continue without this watch.
+			}
+		}
+	}
+
+	return {
+		close() {
+			for (const w of watchers) {
+				try {
+					w.close();
+				} catch {
+					// ignore
+				}
+			}
+		},
+	};
+}
+
+// ─── Node reloader ──────────────────────────────────────────────────────────
+
+class NodeReloader implements DevReloader {
+	private child: ChildProcess | null = null;
+	private readonly serverPath: string;
+	private readonly outputDir: string;
+	private readonly port: number;
+	url: string;
+
+	constructor(opts: { outputDir: string; port: number }) {
+		this.outputDir = opts.outputDir;
+		this.port = opts.port;
+		this.serverPath = path.join(this.outputDir, 'dist', 'server.mjs');
+		this.url = `http://localhost:${this.port}`;
+	}
+
+	async start(): Promise<void> {
+		await this.spawnAndWait();
+	}
+
+	// Node has no downstream watcher — every workspace change requires a
+	// rebuild + child respawn. The watcher's ignore list already filters
+	// dist/, node_modules/, etc.
+	shouldRebuildOn(_relPath: string): boolean {
+		return true;
+	}
+
+	async reload(_buildChanged: boolean): Promise<void> {
+		// On Node we always restart the child. The bundled `server.mjs` is
+		// re-emitted by esbuild on every build (we don't dedupe there), so
+		// `buildChanged` is effectively always true. Even if it weren't, the
+		// child has the old code loaded in memory — to pick up new code it
+		// must restart.
+		await this.killChild();
+		await this.spawnAndWait();
+	}
+
+	async stop(): Promise<void> {
+		await this.killChild();
+	}
+
+	killSync(): void {
+		const child = this.child;
+		if (!child || child.killed) return;
+		try {
+			child.kill('SIGKILL');
+		} catch {
+			/* ignore */
+		}
+	}
+
+	// ── Internals ──
+
+	private async spawnAndWait(): Promise<void> {
+		const child = spawn('node', [this.serverPath], {
+			stdio: ['ignore', 'pipe', 'pipe'],
+			cwd: this.outputDir,
+			// FLUE_MODE=local lets the dev server invoke trigger-less agents over
+			// HTTP (useful when iterating on CI-only agents locally). Mirrors
+			// the behavior of `flue run`.
+			env: {
+				...process.env,
+				PORT: String(this.port),
+				FLUE_MODE: 'local',
+			},
+		});
+		this.child = child;
+
+		const pipe = (data: Buffer) => {
+			const text = data.toString().trimEnd();
+			for (const line of text.split('\n')) {
+				if (!line.trim()) continue;
+				if (
+					line.includes('[flue] Server listening') ||
+					line.includes('[flue] Available agents:') ||
+					line.includes('[flue] Mode: local')
+				) {
+					continue;
+				}
+				console.error(line);
+			}
+		};
+		child.stdout?.on('data', pipe);
+		child.stderr?.on('data', pipe);
+
+		child.on('exit', (code, signal) => {
+			if (this.child === child) {
+				this.child = null;
+				if (code !== 0 && code !== null) {
+					console.error(
+						`[flue] Node server exited unexpectedly (code=${code}, signal=${signal ?? 'none'})`,
+					);
+				}
+			}
+		});
+
+		const ready = await waitForHealth(this.url, 15_000);
+		if (!ready) {
+			await this.killChild();
+			throw new Error('Node server did not become ready within 15s');
+		}
+	}
+
+	private async killChild(): Promise<void> {
+		const child = this.child;
+		if (!child || child.killed) {
+			this.child = null;
+			return;
+		}
+		this.child = null;
+		await new Promise<void>((resolve) => {
+			let resolved = false;
+			const done = () => {
+				if (!resolved) {
+					resolved = true;
+					resolve();
+				}
+			};
+			child.once('exit', done);
+			try {
+				child.kill('SIGTERM');
+			} catch {
+				done();
+				return;
+			}
+			// Tight 1s SIGKILL fallback: if a parent process manager imposes
+			// its own timeout when stopping us, we want to return before it
+			// gives up and SIGKILLs us (which would orphan our child).
+			setTimeout(() => {
+				try {
+					if (!child.killed) child.kill('SIGKILL');
+				} catch {
+					/* ignore */
+				}
+				done();
+			}, 1_000);
+		});
+	}
+}
+
+// ─── Cloudflare reloader ────────────────────────────────────────────────────
+
+/**
+ * Lazy-import wrangler + miniflare so users targeting only Node don't need
+ * them installed. If the import fails, surface a friendly message pointing
+ * at the peer-dep.
+ */
+async function createCloudflareReloader(opts: {
+	outputDir: string;
+	port: number;
+}): Promise<DevReloader> {
+	let wrangler: typeof import('wrangler');
+	let miniflare: typeof import('miniflare');
+	try {
+		wrangler = (await import('wrangler')) as typeof import('wrangler');
+		// miniflare ships as a transitive dep of wrangler, so installing
+		// wrangler also makes this resolvable.
+		miniflare = (await import('miniflare')) as typeof import('miniflare');
+	} catch (err) {
+		throw new Error(
+			`[flue] Cloudflare dev requires the "wrangler" package as a peer dependency.\n` +
+				`Install it in your project:\n\n` +
+				`  npm install --save-dev wrangler\n\n` +
+				`Underlying error: ${err instanceof Error ? err.message : String(err)}`,
+		);
+	}
+
+	return new CloudflareReloader(wrangler, miniflare, opts);
+}
+
+class CloudflareReloader implements DevReloader {
+	private worker: Awaited<ReturnType<typeof import('wrangler').unstable_startWorker>> | null =
+		null;
+	private readonly wrangler: typeof import('wrangler');
+	private readonly miniflare: typeof import('miniflare');
+	private readonly outputDir: string;
+	private readonly port: number;
+	private readonly configPath: string;
+	url?: string;
+
+	constructor(
+		wrangler: typeof import('wrangler'),
+		miniflare: typeof import('miniflare'),
+		opts: { outputDir: string; port: number },
+	) {
+		this.wrangler = wrangler;
+		this.miniflare = miniflare;
+		this.outputDir = opts.outputDir;
+		this.port = opts.port;
+		this.configPath = path.join(this.outputDir, 'dist', 'wrangler.jsonc');
+	}
+
+	async start(): Promise<void> {
+		await this.startWorker();
+	}
+
+	/**
+	 * On Cloudflare, wrangler watches the entry's transitive imports itself
+	 * and hot-reloads workerd when an agent file body changes. We only need
+	 * to act when something *structural* changes — i.e. something that
+	 * affects what `_entry.ts` or `wrangler.jsonc` look like.
+	 *
+	 * Concretely, we trigger a Flue-side rebuild for:
+	 *   - File adds/removes in `agents/` (the agent set determines DO classes
+	 *     and binding declarations).
+	 *   - Changes to `agents/*.ts` — these MAY change the exported `triggers`,
+	 *     so we have to re-parse them. (Plain body edits redo a tiny amount
+	 *     of work but the rebuild is cheap and idempotent.)
+	 *   - Changes to `roles/*.md` — roles are baked into the entry as JSON.
+	 *   - Changes to the user's `wrangler.jsonc` — affects the merged config.
+	 *
+	 * Notes we explicitly DO ignore for rebuild purposes (wrangler handles
+	 * them): edits to imported source files outside of `agents/`/`roles/`,
+	 * AGENTS.md, and `.agents/skills/` (those are runtime-discovered, not
+	 * baked into the entry).
+	 */
+	shouldRebuildOn(relPath: string): boolean {
+		const normalized = relPath.replace(/\\/g, '/');
+		if (normalized === 'wrangler.jsonc' || normalized === 'wrangler.json') return true;
+		if (normalized.startsWith('agents/')) return true;
+		if (normalized.startsWith('roles/')) return true;
+		return false;
+	}
+
+	async reload(buildChanged: boolean): Promise<void> {
+		// The whole point of the Cloudflare path: most edits hit `agents/`
+		// bodies, and wrangler's bundler reloads workerd on its own when an
+		// imported source file changes. So if the build itself wrote nothing
+		// new (entry + wrangler.jsonc both byte-identical), there's nothing
+		// for us to do — wrangler is already on it.
+		//
+		// We only restart the worker when the build actually changed
+		// something — that signals a structural change (new agent, removed
+		// agent, triggers changed, user edited wrangler.jsonc) that
+		// wrangler's source watcher can't apply hot.
+		if (!buildChanged) {
+			console.error(`[flue] No structural change — wrangler will hot-reload\n`);
+			return;
+		}
+		await this.disposeWorker();
+		await this.startWorker();
+	}
+
+	async stop(): Promise<void> {
+		await this.disposeWorker();
+	}
+
+	killSync(): void {
+		// `unstable_startWorker` runs `workerd` as a child process, but we
+		// have no synchronous handle to it from this layer. The parent's
+		// exit cascades to workerd via shared process group on macOS/Linux.
+		this.worker = null;
+	}
+
+	// ── Internals ──
+
+	private async startWorker(): Promise<void> {
+		if (!fs.existsSync(this.configPath)) {
+			throw new Error(
+				`[flue] Expected ${this.configPath} after build, but it doesn't exist. ` +
+					`Did the Cloudflare build succeed?`,
+			);
+		}
+
+		// `unstable_startWorker` reads the config file but does NOT derive
+		// `build.nodejsCompatMode` from `compatibility_flags` — that field is
+		// only computed when set via the input options (or by the wrangler
+		// CLI's own pre-processing). Without it, wrangler's bundler treats
+		// `nodejs_compat`-flagged Workers as if no Node compatibility is
+		// requested, fails to resolve `fs`/`zlib`/`path`/`assert` in deps
+		// like `tar`, and the worker never finishes booting.
+		//
+		// We compute the mode ourselves from the merged config and pass it
+		// through `build.nodejsCompatMode`. This is the same call the CLI
+		// makes internally — see `validateNodeCompatMode` in wrangler-dist.
+		const { compatibilityDate, compatibilityFlags } = readConfigCompatFields(this.configPath);
+		const { mode: nodejsCompatMode } = this.miniflare.getNodeCompat(
+			compatibilityDate,
+			compatibilityFlags,
+		);
+
+		this.worker = await this.wrangler.unstable_startWorker({
+			config: this.configPath,
+			build: {
+				nodejsCompatMode,
+			},
+			dev: {
+				server: {
+					hostname: 'localhost',
+					port: this.port,
+				},
+				// We drive structural reloads via our own watcher. wrangler's
+				// own source-graph watcher remains active inside the worker
+				// (it's what gives us hot-reload on agent body edits).
+				watch: false,
+				logLevel: 'info',
+			},
+		});
+
+		try {
+			const url = await this.worker.url;
+			this.url = url.toString().replace(/\/$/, '');
+		} catch {
+			this.url = `http://127.0.0.1:${this.port}`;
+		}
+	}
+
+	private async disposeWorker(): Promise<void> {
+		const worker = this.worker;
+		this.worker = null;
+		if (!worker) return;
+		try {
+			await worker.dispose();
+		} catch (err) {
+			console.error(
+				`[flue] Error disposing Cloudflare worker: ${err instanceof Error ? err.message : String(err)}`,
+			);
+		}
+	}
+}
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
+
+async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolean> {
+	const start = Date.now();
+	while (Date.now() - start < timeoutMs) {
+		try {
+			const controller = new AbortController();
+			const timeout = setTimeout(() => controller.abort(), 1_000);
+			const res = await fetch(`${baseUrl}/health`, { signal: controller.signal });
+			clearTimeout(timeout);
+			if (res.ok) return true;
+		} catch {
+			// Not ready yet.
+		}
+		await new Promise((r) => setTimeout(r, 200));
+	}
+	return false;
+}
+
+/**
+ * Read `compatibility_date` and `compatibility_flags` from a wrangler config.
+ * Both feed into miniflare's `getNodeCompat` to determine whether the bundler
+ * should apply Node.js polyfills.
+ */
+function readConfigCompatFields(configPath: string): {
+	compatibilityDate: string | undefined;
+	compatibilityFlags: string[];
+} {
+	try {
+		const raw = fs.readFileSync(configPath, 'utf-8');
+		const parsed = parseJsonc(raw) as Record<string, unknown> | null;
+		const compatibilityDate =
+			typeof parsed?.compatibility_date === 'string' ? parsed.compatibility_date : undefined;
+		const compatibilityFlags = Array.isArray(parsed?.compatibility_flags)
+			? (parsed.compatibility_flags as unknown[]).filter(
+					(f): f is string => typeof f === 'string',
+				)
+			: [];
+		return { compatibilityDate, compatibilityFlags };
+	} catch {
+		return { compatibilityDate: undefined, compatibilityFlags: [] };
+	}
+}
+
+/**
+ * Pick any agent file name from the workspace, just to print a friendly curl
+ * example. Best-effort — silently returns null if anything goes wrong.
+ */
+function pickExampleAgentName(workspaceDir: string): string | null {
+	try {
+		const agentsDir = path.join(workspaceDir, 'agents');
+		if (!fs.existsSync(agentsDir)) return null;
+		const entries = fs.readdirSync(agentsDir);
+		for (const e of entries) {
+			const m = e.match(/^([a-zA-Z0-9_-]+)\.(ts|js|mts|mjs)$/);
+			if (m && m[1]) return m[1];
+		}
+		return null;
+	} catch {
+		return null;
+	}
+}

@@ -3,6 +3,9 @@ import type { BuildContext, BuildPlugin } from './types.ts';
 
 export class NodePlugin implements BuildPlugin {
 	name = 'node';
+	// Node has no platform-provided bundler — esbuild is our final-output
+	// step here, producing a single self-contained `dist/server.mjs`.
+	bundle = 'esbuild' as const;
 
 	generateEntryPoint(ctx: BuildContext): string {
 		const { agents, roles } = ctx;
@@ -48,8 +51,12 @@ import { Hono } from 'hono';
 import { streamSSE } from 'hono/streaming';
 import { serve } from '@hono/node-server';
 import { Bash, InMemoryFs, MountableFs, ReadWriteFs } from 'just-bash';
-import { getModel } from '@mariozechner/pi-ai';
-import { createFlueContext, InMemorySessionStore, bashFactoryToSessionEnv } from '@flue/sdk/internal';
+import {
+  createFlueContext,
+  InMemorySessionStore,
+  bashFactoryToSessionEnv,
+  resolveModel,
+} from '@flue/sdk/internal';
 import { randomUUID } from 'node:crypto';
 
 ${agentImports}
@@ -81,27 +88,6 @@ const manifest = ${manifest};
 // \`init({ model: "provider/model-id" })\` for an agent default, or via
 // \`{ model: "provider/model-id" }\` on any individual prompt/skill/task call.
 const model = undefined;
-
-function resolveModel(modelString) {
-  const slash = modelString.indexOf('/');
-  if (slash === -1) {
-    throw new Error(
-      '[flue] Invalid model "' + modelString + '". ' +
-      'Use the "provider/model-id" format (e.g. "anthropic/claude-haiku-4-5").'
-    );
-  }
-  const provider = modelString.slice(0, slash);
-  const modelId = modelString.slice(slash + 1);
-  const resolved = getModel(provider, modelId);
-  if (!resolved) {
-    throw new Error(
-      '[flue] Unknown model "' + modelString + '". ' +
-      'Provider "' + provider + '" / model id "' + modelId + '" ' +
-      'is not registered with @mariozechner/pi-ai.'
-    );
-  }
-  return resolved;
-}
 
 // ─── Sandbox Environments ───────────────────────────────────────────────────
 

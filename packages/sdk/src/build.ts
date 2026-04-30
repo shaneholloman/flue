@@ -8,6 +8,15 @@ import { NodePlugin } from './build-plugin-node.ts';
 import type { AgentInfo, BuildContext, BuildOptions, BuildPlugin, Role } from './types.ts';
 
 /**
+ * Result returned by {@link build}. `changed` indicates whether any file in
+ * `dist/` was actually modified. Callers (notably the dev server) use this to
+ * skip restarting downstream processes for no-op rebuilds on agent body edits.
+ */
+export interface BuildResult {
+	changed: boolean;
+}
+
+/**
  * Build a workspace into a deployable artifact.
  *
  * `options.workspaceDir` is treated as an explicit workspace root — the directory
@@ -17,7 +26,7 @@ import type { AgentInfo, BuildContext, BuildOptions, BuildPlugin, Role } from '.
  *
  * AGENTS.md and .agents/skills/ are NOT bundled — discovered at runtime from session cwd.
  */
-export async function build(options: BuildOptions): Promise<void> {
+export async function build(options: BuildOptions): Promise<BuildResult> {
 	const workspaceDir = path.resolve(options.workspaceDir);
 	const outputDir = path.resolve(options.outputDir);
 
@@ -89,39 +98,74 @@ export async function build(options: BuildOptions): Promise<void> {
 	};
 
 	const serverCode = plugin.generateEntryPoint(ctx);
+	const bundleStrategy = plugin.bundle ?? 'esbuild';
+	let anyChanged = false;
 
-	const entryPath = path.join(distDir, '_entry_server.ts');
-	const outPath = path.join(distDir, 'server.mjs');
+	if (bundleStrategy === 'esbuild') {
+		// Single-bundle mode: the plugin produces a TS entry, esbuild
+		// inlines/externalizes deps, output is dist/server.mjs.
+		const entryPath = path.join(distDir, '_entry_server.ts');
+		const outPath = path.join(distDir, 'server.mjs');
 
-	fs.writeFileSync(entryPath, serverCode, 'utf-8');
+		fs.writeFileSync(entryPath, serverCode, 'utf-8');
 
-	try {
-		const nodePathsSet = collectNodePaths(workspaceDir);
-		const { external: pluginExternal = [], ...pluginEsbuildOpts } = plugin.esbuildOptions(ctx);
-
-		// User's direct deps are externalized (resolved at runtime); Flue infra gets bundled
-		const userExternals = getUserExternals(workspaceDir);
-
-		await esbuild.build({
-			entryPoints: [entryPath],
-			bundle: true,
-			outfile: outPath,
-			format: 'esm',
-			external: [...pluginExternal, ...userExternals],
-			nodePaths: [...nodePathsSet],
-			logLevel: 'warning',
-			loader: { '.ts': 'ts', '.node': 'empty' },
-			treeShaking: true,
-			sourcemap: true,
-			...pluginEsbuildOpts,
-		});
-		console.log(`[flue] Built: ${outPath}`);
-	} finally {
 		try {
-			fs.unlinkSync(entryPath);
-		} catch {
-			/* ignore */
+			const nodePathsSet = collectNodePaths(workspaceDir);
+			const { external: pluginExternal = [], ...pluginEsbuildOpts } = plugin.esbuildOptions
+				? plugin.esbuildOptions(ctx)
+				: {};
+
+			// User's direct deps are externalized (resolved at runtime); Flue infra gets bundled
+			const userExternals = getUserExternals(workspaceDir);
+
+			await esbuild.build({
+				entryPoints: [entryPath],
+				bundle: true,
+				outfile: outPath,
+				format: 'esm',
+				external: [...pluginExternal, ...userExternals],
+				nodePaths: [...nodePathsSet],
+				logLevel: 'warning',
+				loader: { '.ts': 'ts', '.node': 'empty' },
+				treeShaking: true,
+				sourcemap: true,
+				...pluginEsbuildOpts,
+			});
+			console.log(`[flue] Built: ${outPath}`);
+			// esbuild always writes; we treat this path as "changed" without
+			// trying to compute byte-equality across reloads.
+			anyChanged = true;
+		} finally {
+			try {
+				fs.unlinkSync(entryPath);
+			} catch {
+				/* ignore */
+			}
 		}
+	} else if (bundleStrategy === 'none') {
+		// Pass-through mode: write the entry as-is. A downstream tool (e.g.
+		// wrangler) handles bundling. We don't even glance at `esbuildOptions`.
+		if (!plugin.entryFilename) {
+			throw new Error(
+				`[flue] Plugin "${plugin.name}" set bundle: 'none' but did not provide entryFilename.`,
+			);
+		}
+		const outPath = path.join(distDir, plugin.entryFilename);
+		// Skip the write if content is byte-identical to what's already on
+		// disk. This matters for `flue dev`, where downstream watchers (like
+		// wrangler's bundler) may key on file mtime and would otherwise reload
+		// the worker for a no-op rebuild on agent body edits.
+		const writeIfChanged =
+			!fs.existsSync(outPath) || fs.readFileSync(outPath, 'utf-8') !== serverCode;
+		if (writeIfChanged) {
+			fs.writeFileSync(outPath, serverCode, 'utf-8');
+			console.log(`[flue] Wrote entry: ${outPath} (no bundle — downstream tool handles it)`);
+			anyChanged = true;
+		} else {
+			console.log(`[flue] Entry unchanged: ${outPath}`);
+		}
+	} else {
+		throw new Error(`[flue] Unknown bundle strategy: ${bundleStrategy}`);
 	}
 
 	if (plugin.additionalOutputs) {
@@ -129,12 +173,21 @@ export async function build(options: BuildOptions): Promise<void> {
 		for (const [filename, content] of Object.entries(outputs)) {
 			const filePath = path.join(distDir, filename);
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
-			fs.writeFileSync(filePath, content, 'utf-8');
-			console.log(`[flue] Generated: ${filePath}`);
+			// As with the entry above: avoid touching the file if content is
+			// unchanged so downstream watchers (e.g. wrangler) don't see
+			// spurious mtime updates and reload for no reason.
+			const changed =
+				!fs.existsSync(filePath) || fs.readFileSync(filePath, 'utf-8') !== content;
+			if (changed) {
+				fs.writeFileSync(filePath, content, 'utf-8');
+				console.log(`[flue] Generated: ${filePath}`);
+				anyChanged = true;
+			}
 		}
 	}
 
 	console.log(`[flue] Build complete. Output: ${distDir}`);
+	return { changed: anyChanged };
 }
 
 function resolvePlugin(options: BuildOptions): BuildPlugin {

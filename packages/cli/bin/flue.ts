@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
-import { build, resolveWorkspaceFromCwd } from '@flue/sdk';
+import { build, dev, DEFAULT_DEV_PORT, resolveWorkspaceFromCwd } from '@flue/sdk';
 
 /**
  * Resolve the workspace directory for a CLI command.
@@ -45,14 +45,23 @@ function resolveOutputDir(explicitOutput: string | undefined): string {
 function printUsage() {
 	console.error(
 		'Usage:\n' +
-			'  flue run <agent> --target node --id <id> [--payload <json>] [--workspace <path>] [--output <path>] [--port <number>]\n' +
+			'  flue dev   --target <node|cloudflare> [--workspace <path>] [--output <path>] [--port <number>]\n' +
+			'  flue run   <agent> --target node --id <id> [--payload <json>] [--workspace <path>] [--output <path>] [--port <number>]\n' +
 			'  flue build --target <node|cloudflare> [--workspace <path>] [--output <path>]\n' +
+			'\n' +
+			'Commands:\n' +
+			'  dev    Long-running watch-mode dev server. Rebuilds and reloads on file changes.\n' +
+			'  run    One-shot build + invoke an agent (production-style; use for CI / scripted runs).\n' +
+			'  build  Build a deployable artifact to ./dist (production deploys).\n' +
 			'\n' +
 			'Flags:\n' +
 			'  --workspace <path>   Workspace root (containing agents/ and roles/). Default: ./.flue/ if it exists, else ./\n' +
 			'  --output <path>      Where dist/ is written. Default: current working directory\n' +
+			`  --port <number>      Port for the dev server. Default: ${DEFAULT_DEV_PORT}\n` +
 			'\n' +
 			'Examples:\n' +
+			'  flue dev --target node\n' +
+			'  flue dev --target cloudflare --port 8787\n' +
 			'  flue run hello --target node --id test-1\n' +
 			'  flue run hello --target node --id test-1 --payload \'{"name": "World"}\'\n' +
 			'  flue build --target node\n' +
@@ -85,7 +94,18 @@ interface BuildArgs {
 	explicitOutput: string | undefined;
 }
 
-type ParsedArgs = RunArgs | BuildArgs;
+interface DevArgs {
+	command: 'dev';
+	target: 'node' | 'cloudflare';
+	/** Explicit --workspace value, or undefined to apply the cwd waterfall. */
+	explicitWorkspace: string | undefined;
+	/** Explicit --output value, or undefined to default to cwd. */
+	explicitOutput: string | undefined;
+	/** 0 = use the SDK default (DEFAULT_DEV_PORT). */
+	port: number;
+}
+
+type ParsedArgs = RunArgs | BuildArgs | DevArgs;
 
 function parseFlags(flags: string[]): {
 	target?: 'node' | 'cloudflare';
@@ -170,12 +190,11 @@ function shellQuote(value: string): string {
 function printCloudflareRunUnsupported(agent: string, id: string, payload: string): never {
 	console.error(
 		'[flue] `flue run --target cloudflare` is not supported.\n\n' +
-			'`flue run` starts the generated server with Node.js, but Cloudflare builds use Worker-only runtime modules that Node cannot load.\n\n' +
-			'To test a Cloudflare target locally, build the Worker and run it with Wrangler:\n\n' +
-			'  npx flue build --target cloudflare\n' +
-			'  npx wrangler dev\n\n' +
-			'Then invoke the agent endpoint in another terminal:\n\n' +
-			`  curl http://localhost:8787/agents/${agent}/${id} \\\n` +
+			'`flue run` is a one-shot Node.js invoker; Cloudflare builds need a Workers runtime.\n\n' +
+			'For local development of a Cloudflare target, use `flue dev`:\n\n' +
+			`  flue dev --target cloudflare\n\n` +
+			`Then in another terminal:\n\n` +
+			`  curl http://localhost:${DEFAULT_DEV_PORT}/agents/${agent}/${id} \\\n` +
 			'    -H "Content-Type: application/json" \\\n' +
 			`    -d ${shellQuote(payload)}`,
 	);
@@ -197,6 +216,22 @@ function parseArgs(argv: string[]): ParsedArgs {
 			target: flags.target as 'node' | 'cloudflare',
 			explicitWorkspace: flags.explicitWorkspace,
 			explicitOutput: flags.explicitOutput,
+		};
+	}
+
+	if (command === 'dev') {
+		const flags = parseFlags(rest);
+		if (!flags.target) {
+			console.error('Missing required --target flag. Supported targets: node, cloudflare');
+			printUsage();
+			process.exit(1);
+		}
+		return {
+			command: 'dev',
+			target: flags.target as 'node' | 'cloudflare',
+			explicitWorkspace: flags.explicitWorkspace,
+			explicitOutput: flags.explicitOutput,
+			port: flags.port,
 		};
 	}
 
@@ -491,6 +526,24 @@ async function buildCommand(args: BuildArgs) {
 	}
 }
 
+async function devCommand(args: DevArgs) {
+	const workspaceDir = resolveWorkspaceDir(args.explicitWorkspace);
+	const outputDir = resolveOutputDir(args.explicitOutput);
+	try {
+		// dev() blocks until SIGINT/SIGTERM exits the process. We don't expect
+		// it to return; if it ever does, just exit cleanly.
+		await dev({
+			workspaceDir,
+			outputDir,
+			target: args.target,
+			port: args.port || undefined,
+		});
+	} catch (err) {
+		console.error(`[flue] Dev server failed:`, err instanceof Error ? err.message : String(err));
+		process.exit(1);
+	}
+}
+
 async function run(args: RunArgs) {
 	const workspaceDir = resolveWorkspaceDir(args.explicitWorkspace);
 	const outputDir = resolveOutputDir(args.explicitOutput);
@@ -601,6 +654,8 @@ process.on('SIGTERM', () => {
 
 if (args.command === 'build') {
 	buildCommand(args);
+} else if (args.command === 'dev') {
+	devCommand(args);
 } else {
 	run(args);
 }

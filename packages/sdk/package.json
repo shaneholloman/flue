@@ -55,6 +55,16 @@
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^4.20250410.0",
-		"tsdown": "^0.20.3"
+		"miniflare": "^4.0.0",
+		"tsdown": "^0.20.3",
+		"wrangler": "^4.83.0"
+	},
+	"peerDependencies": {
+		"wrangler": "^4.0.0"
+	},
+	"peerDependenciesMeta": {
+		"wrangler": {
+			"optional": true
+		}
 	}
 }
