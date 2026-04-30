@@ -111,7 +111,7 @@ In your final response, include a short checklist with the project directory, in
 - Important: Flue doesn't have a standalone \`flue dev\` command.
   - Instead: Use scripts from the selected deploy guide. If writing scripts manually, include the explicit target, such as \`flue build --target node\` or \`flue build --target cloudflare\`.
 - Important: \`flue run --target cloudflare\` is not supported.
-  - Instead: For Cloudflare users, use \`flue build --target cloudflare && wrangler dev\` to start the local dev server, then \`curl\` to hit the expected endpoint. Put this in a README or AGENTS.md if it is too long for a simple script.
+  - Instead: For Cloudflare users, do not combine \`flue build --target cloudflare && wrangler dev\` into a single "dev" script, it's confusing. Instead, document the "build" and then in the README document how you can use \`wrangler dev\` and \`curl\` to hit the expected endpoint.
 `;
 
 export const GET: APIRoute = () => {
