@@ -215,12 +215,20 @@ function runWithInstanceContext(doInstance, fn) {
   );
 }
 
+function assertAgentsDurabilityApi(doInstance, method) {
+  if (typeof doInstance[method] !== 'function') {
+		throw new Error(
+			'[flue] The installed "agents" package does not provide the required Cloudflare Agents SDK method "' +
+				method +
+				'". Install or upgrade the "agents" package in your project.',
+		);
+	}
+}
+
 function runHandlerWithKeepAlive(doInstance, ctx, handler) {
   return runWithInstanceContext(doInstance, () => {
-    if (typeof doInstance.keepAliveWhile === 'function') {
-      return doInstance.keepAliveWhile(() => handler(ctx));
-    }
-    return handler(ctx);
+    assertAgentsDurabilityApi(doInstance, 'keepAliveWhile');
+    return doInstance.keepAliveWhile(() => handler(ctx));
   });
 }
 
@@ -246,11 +254,8 @@ function startWebhookFiber(doInstance, requestId, agentName, id, payload, handle
     });
   };
 
-  if (typeof doInstance.runFiber === 'function') {
-    return doInstance.runFiber('flue:webhook:' + requestId, run);
-  }
-
-  return run(undefined);
+  assertAgentsDurabilityApi(doInstance, 'runFiber');
+  return doInstance.runFiber('flue:webhook:' + requestId, run);
 }
 
 async function handleFlueFiberRecovered(ctx, _doInstance, agentName) {

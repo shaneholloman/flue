@@ -19,18 +19,13 @@ export interface CloudflareContext {
 }
 
 const contextStorage = new AsyncLocalStorage<CloudflareContext>();
-let fallbackContext: CloudflareContext | null = null;
 
 export function runWithCloudflareContext<T>(ctx: CloudflareContext, fn: () => T): T {
 	return contextStorage.run(ctx, fn);
 }
 
-export function setCloudflareContext(ctx: CloudflareContext): void {
-	fallbackContext = ctx;
-}
-
 export function getCloudflareContext(): CloudflareContext {
-	const ctx = contextStorage.getStore() ?? fallbackContext;
+	const ctx = contextStorage.getStore();
 	if (!ctx) {
 		throw new Error(
 			'[flue:cloudflare] Not running in a Cloudflare context. ' +
@@ -38,8 +33,4 @@ export function getCloudflareContext(): CloudflareContext {
 		);
 	}
 	return ctx;
-}
-
-export function clearCloudflareContext(): void {
-	fallbackContext = null;
 }
