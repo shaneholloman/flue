@@ -1,6 +1,6 @@
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import { Type } from '@mariozechner/pi-ai';
-import type { SessionEnv } from './types.ts';
+import type { Role, SessionEnv } from './types.ts';
 
 const MAX_READ_LINES = 2000;
 const MAX_READ_BYTES = 50 * 1024;
@@ -8,10 +8,41 @@ const MAX_GREP_MATCHES = 100;
 const MAX_GREP_LINE_LENGTH = 500;
 const MAX_GLOB_RESULTS = 1000;
 
-export const BUILTIN_TOOL_NAMES = new Set(['read', 'write', 'edit', 'bash', 'grep', 'glob']);
+export const BUILTIN_TOOL_NAMES = new Set([
+	'read',
+	'write',
+	'edit',
+	'bash',
+	'grep',
+	'glob',
+	'task',
+]);
 
-export function createTools(env: SessionEnv): AgentTool<any>[] {
-	return [
+export interface TaskToolParams {
+	prompt: string;
+	description?: string;
+	role?: string;
+	cwd?: string;
+}
+
+export interface TaskToolResultDetails {
+	taskId: string;
+	sessionId: string;
+	messageId?: string;
+	role?: string;
+	cwd?: string;
+}
+
+export interface CreateToolsOptions {
+	task?: (
+		params: TaskToolParams,
+		signal?: AbortSignal,
+	) => Promise<AgentToolResult<TaskToolResultDetails>>;
+	roles?: Record<string, Role>;
+}
+
+export function createTools(env: SessionEnv, options?: CreateToolsOptions): AgentTool<any>[] {
+	const tools = [
 		createReadTool(env),
 		createWriteTool(env),
 		createEditTool(env),
@@ -19,6 +50,8 @@ export function createTools(env: SessionEnv): AgentTool<any>[] {
 		createGrepTool(env),
 		createGlobTool(env),
 	];
+	if (options?.task) tools.push(createTaskTool(options.task, options.roles ?? {}));
+	return tools;
 }
 
 function createReadTool(env: SessionEnv): AgentTool<any> {
@@ -182,6 +215,47 @@ function createBashTool(env: SessionEnv): AgentTool<any> {
 			// TODO: wire timeout through SessionEnv.exec
 			const result = await env.exec(params.command);
 			return formatBashResult(result, params.command);
+		},
+	};
+}
+
+function createTaskTool(
+	runTask: (
+		params: TaskToolParams,
+		signal?: AbortSignal,
+	) => Promise<AgentToolResult<TaskToolResultDetails>>,
+	roles: Record<string, Role>,
+): AgentTool<any> {
+	const roleNames = Object.keys(roles);
+	const roleDescription =
+		roleNames.length > 0
+			? ` Available roles: ${roleNames.join(', ')}.`
+			: ' No roles are currently defined.';
+
+	return {
+		name: 'task',
+		label: 'Run Task',
+		description:
+			'Delegate a focused task to a detached child agent with its own context. ' +
+			'Use this for independent research, file exploration, or parallel work. ' +
+			'The task returns only its final answer to this conversation.' +
+			roleDescription,
+		parameters: Type.Object({
+			description: Type.Optional(
+				Type.String({ description: 'Short human-readable label for the delegated work' }),
+			),
+			prompt: Type.String({ description: 'Focused instructions for the child agent' }),
+			role: Type.Optional(Type.String({ description: 'Role to use for the child agent' })),
+			cwd: Type.Optional(
+				Type.String({
+					description:
+						'Working directory for the child agent. AGENTS.md and skills are discovered from here.',
+				}),
+			),
+		}),
+		async execute(_toolCallId, params: TaskToolParams, signal?) {
+			throwIfAborted(signal);
+			return runTask(params, signal);
 		},
 	};
 }

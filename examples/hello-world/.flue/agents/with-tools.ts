@@ -10,7 +10,7 @@ export const triggers = { webhook: true };
  * - Custom tools can be passed to session.prompt()
  * - The LLM can call custom tools and receives the result
  * - Custom tools with the same name as a built-in tool are rejected
- * - An inline tool can delegate to another agent rooted at a different cwd
+ * - The built-in task tool can delegate to another agent rooted at a different cwd
  */
 export default async function ({ init }: FlueContext) {
 	const fs = new InMemoryFs();
@@ -72,42 +72,11 @@ export default async function ({ init }: FlueContext) {
 		'echo "You are a math helper. Always respond with just the numeric answer, nothing else." > /home/user/task-workspace/AGENTS.md',
 	);
 
-	const delegateTool: ToolDef = {
-		name: 'delegate',
-		description:
-			'Delegate a task to a focused agent working in a specific directory. ' +
-			'The agent automatically discovers and follows any AGENTS.md instructions ' +
-			'and skills found in that directory.',
-		parameters: Type.Object({
-			workspace: Type.String({
-				description:
-					'The directory the agent should work in (AGENTS.md and skills are auto-discovered)',
-			}),
-			prompt: Type.String({ description: 'The task or instructions for the agent' }),
-		}),
-		execute: async (args) => {
-			const childAgent = await init({
-				id: `delegate-${Date.now()}`,
-				sandbox,
-				cwd: args.workspace,
-				model: 'anthropic/claude-sonnet-4-6',
-			});
-			try {
-				const childSession = await childAgent.session();
-				const result = await childSession.prompt(args.prompt);
-				return result.text;
-			} finally {
-				await childAgent.destroy();
-			}
-		},
-	};
-
 	const taskResponse = await session.prompt(
-		'Use the delegate tool to ask the agent at /home/user/task-workspace: "What is 100 + 23?"',
-		{ tools: [delegateTool] },
+		'Use the task tool with cwd /home/user/task-workspace to ask: "What is 100 + 23?"',
 	);
-	results['delegate tool works'] = taskResponse.text.includes('123');
-	console.log('[with-tools] delegate tool works:', results['delegate tool works'] ? 'PASS' : 'FAIL');
+	results['task tool works'] = taskResponse.text.includes('123');
+	console.log('[with-tools] task tool works:', results['task tool works'] ? 'PASS' : 'FAIL');
 
 	// ─── Summary ────────────────────────────────────────────────────────────
 

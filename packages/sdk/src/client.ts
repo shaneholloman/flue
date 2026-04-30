@@ -59,6 +59,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 			initializedAgentIds.add(id);
 
 			try {
+				assertRoleExists(options?.role, config.agentConfig.roles);
 				const sandbox = options?.sandbox;
 				const baseEnv = await resolveSessionEnv(id, sandbox, config, options?.cwd);
 				const env = options?.cwd ? createCwdSessionEnv(baseEnv, options.cwd) : baseEnv;
@@ -77,6 +78,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					systemPrompt: localContext.systemPrompt,
 					skills: localContext.skills,
 					model: agentModel,
+					role: options?.role ?? config.agentConfig.role,
 				};
 
 				return new AgentClient(
@@ -102,6 +104,17 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
+
+function assertRoleExists(roleName: string | undefined, roles: AgentConfig['roles']): void {
+	if (!roleName) return;
+	if (roles[roleName]) return;
+	const available = Object.keys(roles);
+	const list = available.length > 0 ? available.join(', ') : '(none defined)';
+	throw new Error(
+		`[flue] Role "${roleName}" not registered. Available roles: ${list}. ` +
+			`Define roles as markdown files under \`.flue/roles/\`.`,
+	);
+}
 
 /** Duck-type detection for just-bash Bash instances. */
 function isBashLike(value: unknown): value is BashLike {
@@ -182,9 +195,11 @@ export type {
 	BashFactory,
 	BashLike,
 	SessionEnv,
+	SessionOptions,
 	PromptOptions,
 	PromptResponse,
 	SkillOptions,
+	TaskOptions,
 	ShellOptions,
 	ShellResult,
 	ToolDef,

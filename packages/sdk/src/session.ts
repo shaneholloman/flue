@@ -1,9 +1,14 @@
 /** Internal session implementation. Not exported publicly — wrapped by FlueSession. */
 import { Agent } from '@mariozechner/pi-agent-core';
-import type { AgentMessage, AgentTool } from '@mariozechner/pi-agent-core';
+import type { AgentMessage, AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import type { AssistantMessage, Model } from '@mariozechner/pi-ai';
 import type * as v from 'valibot';
-import { BUILTIN_TOOL_NAMES, createTools } from './agent.ts';
+import {
+	BUILTIN_TOOL_NAMES,
+	createTools,
+	type TaskToolParams,
+	type TaskToolResultDetails,
+} from './agent.ts';
 import {
 	calculateContextTokens,
 	compact,
@@ -37,10 +42,46 @@ import type {
 	ShellOptions,
 	ShellResult,
 	SkillOptions,
+	TaskOptions,
 	ToolDef,
 } from './types.ts';
 
 const MAX_SHELL_HISTORY_CHARS = 50 * 1024;
+const MAX_TASK_DEPTH = 4;
+
+export interface CreateTaskSessionOptions {
+	parentSessionId: string;
+	taskId: string;
+	parentEnv: SessionEnv;
+	cwd?: string;
+	role?: string;
+	commands: Command[];
+	depth: number;
+}
+
+export type CreateTaskSession = (options: CreateTaskSessionOptions) => Promise<Session>;
+
+interface RuntimeScopeOptions {
+	commands: Command[];
+	tools: ToolDef[];
+	role?: string;
+	model?: string;
+	callSite: string;
+}
+
+interface InternalTaskResult<T> {
+	output: T;
+	text: string;
+	taskId: string;
+	sessionId: string;
+	messageId?: string;
+	role?: string;
+	cwd?: string;
+}
+
+interface InternalTaskOptions<S extends v.GenericSchema | undefined> extends TaskOptions<S> {
+	inheritedModel?: string;
+}
 
 /** In-memory session store. Sessions persist for the lifetime of the process. */
 export class InMemorySessionStore implements SessionStore {
@@ -62,6 +103,9 @@ export class InMemorySessionStore implements SessionStore {
 export class Session implements FlueSession {
 	readonly id: string;
 	metadata: Record<string, any>;
+	get role(): string | undefined {
+		return this.sessionRole;
+	}
 
 	private harness: Agent;
 	private config: AgentConfig;
@@ -76,6 +120,7 @@ export class Session implements FlueSession {
 	private agentCommands: Command[];
 	private deleted = false;
 	private activeOperation: string | undefined;
+	private activeTasks = new Set<Session>();
 
 	constructor(
 		id: string,
@@ -86,6 +131,9 @@ export class Session implements FlueSession {
 		existingData: SessionData | null,
 		onAgentEvent?: FlueEventCallback,
 		agentCommands?: Command[],
+		private sessionRole?: string,
+		private taskDepth = 0,
+		private createTaskSession?: CreateTaskSession,
 		private onDelete?: () => void,
 	) {
 		this.id = id;
@@ -108,7 +156,10 @@ export class Session implements FlueSession {
 
 		const systemPrompt = config.systemPrompt;
 
-		const tools = createTools(env);
+		this.assertRoleExists(this.config.role);
+		this.assertRoleExists(this.sessionRole);
+
+		const tools = this.createBuiltinTools(env, this.agentCommands, []);
 
 		const previousMessages = this.history.buildContext();
 
@@ -168,28 +219,34 @@ export class Session implements FlueSession {
 	async prompt(text: string, options?: PromptOptions): Promise<PromptResponse>;
 	async prompt(text: string, options?: PromptOptions<v.GenericSchema | undefined>): Promise<any> {
 		return this.runOperation('prompt', async () => {
-			this.assertRoleExists(options?.role);
-			this.resolveModelForCall(options?.model, options?.role);
-			const promptWithRole = this.injectRoleInstructions(text, options?.role);
+			const role = this.resolveEffectiveRole(options?.role);
 
 			const schema = options?.result as v.GenericSchema | undefined;
-			const fullPrompt = buildPromptText(promptWithRole, schema);
+			const fullPrompt = buildPromptText(text, schema);
 
 			const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-			const customTools = this.createCustomTools(options?.tools ?? []);
-			return this.withScopedTools(effectiveCommands, customTools, async () => {
-				const beforeLength = this.harness.state.messages.length;
-				await this.harness.prompt(fullPrompt);
-				await this.harness.waitForIdle();
-				await this.syncHarnessMessagesSince(beforeLength, 'prompt');
-				await this.checkLatestAssistantForCompaction();
-				this.throwIfError('prompt');
+			return this.withScopedRuntime(
+				{
+					commands: effectiveCommands,
+					tools: options?.tools ?? [],
+					role,
+					model: options?.model,
+					callSite: 'this prompt() call',
+				},
+				async () => {
+					const beforeLength = this.harness.state.messages.length;
+					await this.harness.prompt(fullPrompt);
+					await this.harness.waitForIdle();
+					await this.syncHarnessMessagesSince(beforeLength, 'prompt');
+					await this.checkLatestAssistantForCompaction();
+					this.throwIfError('prompt');
 
-				if (schema) {
-					return this.extractResultWithRetry(schema);
-				}
-				return { text: this.getAssistantText() };
-			});
+					if (schema) {
+						return this.extractResultWithRetry(schema);
+					}
+					return { text: this.getAssistantText() };
+				},
+			);
 		});
 	}
 
@@ -200,7 +257,7 @@ export class Session implements FlueSession {
 	async skill(name: string, options?: SkillOptions): Promise<PromptResponse>;
 	async skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): Promise<any> {
 		return this.runOperation('skill', async () => {
-			this.assertRoleExists(options?.role);
+			const role = this.resolveEffectiveRole(options?.role);
 
 			let registeredSkill = this.config.skills[name];
 
@@ -221,28 +278,43 @@ export class Session implements FlueSession {
 				);
 			}
 
-			this.resolveModelForCall(options?.model, options?.role);
-
 			const schema = options?.result as v.GenericSchema | undefined;
 			const skillPrompt = buildSkillPrompt(registeredSkill.instructions, options?.args, schema);
-			const promptWithRole = this.injectRoleInstructions(skillPrompt, options?.role);
 
 			const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-			const customTools = this.createCustomTools(options?.tools ?? []);
-			return this.withScopedTools(effectiveCommands, customTools, async () => {
-				const beforeLength = this.harness.state.messages.length;
-				await this.harness.prompt(promptWithRole);
-				await this.harness.waitForIdle();
-				await this.syncHarnessMessagesSince(beforeLength, 'skill');
-				await this.checkLatestAssistantForCompaction();
-				this.throwIfError(`skill("${name}")`);
+			return this.withScopedRuntime(
+				{
+					commands: effectiveCommands,
+					tools: options?.tools ?? [],
+					role,
+					model: options?.model,
+					callSite: `this skill("${name}") call`,
+				},
+				async () => {
+					const beforeLength = this.harness.state.messages.length;
+					await this.harness.prompt(skillPrompt);
+					await this.harness.waitForIdle();
+					await this.syncHarnessMessagesSince(beforeLength, 'skill');
+					await this.checkLatestAssistantForCompaction();
+					this.throwIfError(`skill("${name}")`);
 
-				if (schema) {
-					return this.extractResultWithRetry(schema);
-				}
-				return { text: this.getAssistantText() };
-			});
+					if (schema) {
+						return this.extractResultWithRetry(schema);
+					}
+					return { text: this.getAssistantText() };
+				},
+			);
 		});
+	}
+
+	async task<S extends v.GenericSchema>(
+		text: string,
+		options: TaskOptions<S> & { result: S },
+	): Promise<v.InferOutput<S>>;
+	async task(text: string, options?: TaskOptions): Promise<PromptResponse>;
+	async task(text: string, options?: TaskOptions<v.GenericSchema | undefined>): Promise<any> {
+		const result = await this.runTask(text, options, undefined);
+		return result.output;
 	}
 
 	async shell(command: string, options?: ShellOptions): Promise<ShellResult> {
@@ -253,7 +325,11 @@ export class Session implements FlueSession {
 				env: options?.env,
 				cwd: options?.cwd,
 			});
-			const shellResult = { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+			const shellResult = {
+				stdout: result.stdout,
+				stderr: result.stderr,
+				exitCode: result.exitCode,
+			};
 			const message = this.createShellMessage(command, shellResult, options);
 			this.history.appendMessage(message, 'shell');
 			this.harness.state.messages = this.history.buildContext();
@@ -265,6 +341,7 @@ export class Session implements FlueSession {
 	abort(): void {
 		this.harness.abort();
 		this.compactionAbortController?.abort();
+		for (const task of this.activeTasks) task.abort();
 	}
 
 	close(): void {
@@ -278,12 +355,22 @@ export class Session implements FlueSession {
 		if (this.deleted) return;
 		this.deleted = true;
 		this.abort();
-		await this.store.delete(this.storageKey);
+		await deleteSessionTree(this.store, this.storageKey);
 		this.onDelete?.();
 	}
 
-	/** Precedence: prompt-level > role-level > agent-level default. */
-	private resolveModelForCall(promptModel?: string, roleName?: string): void {
+	private resolveEffectiveRole(callRole?: string): string | undefined {
+		const role = callRole ?? this.sessionRole ?? this.config.role;
+		this.assertRoleExists(role);
+		return role;
+	}
+
+	/** Precedence: call-level > role-level > agent-level default. */
+	private resolveModelForCall(
+		promptModel: string | undefined,
+		roleName: string | undefined,
+		callSite: string,
+	): Model<any> {
 		let model: Model<any> | undefined = this.config.model;
 
 		if (roleName && this.config.roles[roleName]?.model && this.config.resolveModel) {
@@ -294,7 +381,7 @@ export class Session implements FlueSession {
 			model = this.config.resolveModel(promptModel);
 		}
 
-		this.harness.state.model = this.requireModel(model, 'this prompt()/skill() call');
+		return this.requireModel(model, callSite);
 	}
 
 	/**
@@ -327,11 +414,13 @@ export class Session implements FlueSession {
 		);
 	}
 
-	private injectRoleInstructions(text: string, roleName?: string): string {
-		if (!roleName) return text;
+	private buildSystemPrompt(roleName?: string): string {
+		const parts = [this.config.systemPrompt];
+		if (!roleName) return parts.join('\n\n');
 		const role = this.config.roles[roleName];
-		if (!role) return text;
-		return `<role>\n${role.instructions}\n</role>\n\n${text}`;
+		if (!role) return parts.join('\n\n');
+		parts.push(`<role name="${role.name}">\n${role.instructions}\n</role>`);
+		return parts.filter(Boolean).join('\n\n');
 	}
 
 	// ─── Custom Tools ───────────────────────────────────────────────────────
@@ -370,18 +459,180 @@ export class Session implements FlueSession {
 		}));
 	}
 
-	private async withScopedTools<T>(
+	private createBuiltinTools(
+		env: SessionEnv,
 		commands: Command[],
-		customTools: AgentTool<any>[],
+		tools: ToolDef[],
+		role?: string,
+		model?: string,
+	): AgentTool<any>[] {
+		return createTools(env, {
+			roles: this.config.roles,
+			task: (params, signal) => this.runTaskForTool(params, commands, tools, role, model, signal),
+		});
+	}
+
+	private async withScopedRuntime<T>(
+		options: RuntimeScopeOptions,
 		fn: () => Promise<T>,
 	): Promise<T> {
-		const scopedEnv = await scopeSessionEnv(this.env, commands);
+		const customTools = this.createCustomTools(options.tools);
+		const scopedEnv = await scopeSessionEnv(this.env, options.commands);
 		const previousTools = this.harness.state.tools;
-		this.harness.state.tools = [...createTools(scopedEnv), ...customTools];
+		const previousModel = this.harness.state.model;
+		const previousSystemPrompt = this.harness.state.systemPrompt;
+
+		this.harness.state.model = this.resolveModelForCall(
+			options.model,
+			options.role,
+			options.callSite,
+		);
+		this.harness.state.systemPrompt = this.buildSystemPrompt(options.role);
+		this.harness.state.tools = [
+			...this.createBuiltinTools(
+				scopedEnv,
+				options.commands,
+				options.tools,
+				options.role,
+				options.model,
+			),
+			...customTools,
+		];
 		try {
 			return await fn();
 		} finally {
 			this.harness.state.tools = previousTools;
+			this.harness.state.model = previousModel;
+			this.harness.state.systemPrompt = previousSystemPrompt;
+		}
+	}
+
+	// ─── Tasks ────────────────────────────────────────────────────────────────
+
+	private async runTaskForTool(
+		params: TaskToolParams,
+		commands: Command[],
+		tools: ToolDef[],
+		inheritedRole: string | undefined,
+		inheritedModel: string | undefined,
+		signal?: AbortSignal,
+	): Promise<AgentToolResult<TaskToolResultDetails>> {
+		const result = await this.runTask(
+			params.prompt,
+			{
+				role: params.role ?? inheritedRole,
+				inheritedModel,
+				cwd: params.cwd,
+				commands,
+				tools,
+			},
+			signal,
+		);
+
+		return {
+			content: [{ type: 'text', text: result.text || '(task completed with no text)' }],
+			details: {
+				taskId: result.taskId,
+				sessionId: result.sessionId,
+				messageId: result.messageId,
+				role: result.role,
+				cwd: result.cwd,
+			},
+		};
+	}
+
+	private async runTask<S extends v.GenericSchema | undefined>(
+		text: string,
+		options: InternalTaskOptions<S> | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<InternalTaskResult<S extends v.GenericSchema ? v.InferOutput<S> : PromptResponse>> {
+		this.assertActive();
+		if (!this.createTaskSession) {
+			throw new Error('[flue] This session cannot create task sessions.');
+		}
+		if (this.taskDepth >= MAX_TASK_DEPTH) {
+			throw new Error(`[flue] Maximum task depth (${MAX_TASK_DEPTH}) exceeded.`);
+		}
+		if (signal?.aborted) throw new Error('Operation aborted');
+
+		const taskId = crypto.randomUUID();
+		const requestedRole = options?.role ?? this.sessionRole ?? this.config.role;
+		let child: Session | undefined;
+		let abortListener: (() => void) | undefined;
+
+		this.emit({
+			type: 'task_start',
+			taskId,
+			prompt: text,
+			role: requestedRole,
+			cwd: options?.cwd,
+			parentSessionId: this.id,
+		});
+
+		try {
+			const role = this.resolveEffectiveRole(options?.role);
+			const commands = mergeCommands(this.agentCommands, options?.commands);
+
+			child = await this.createTaskSession({
+				parentSessionId: this.id,
+				taskId,
+				parentEnv: this.env,
+				cwd: options?.cwd,
+				role,
+				commands,
+				depth: this.taskDepth + 1,
+			});
+			await this.recordTaskSession(child.id, child.storageKey, taskId);
+			this.activeTasks.add(child);
+
+			if (signal) {
+				abortListener = () => child?.abort();
+				signal.addEventListener('abort', abortListener, { once: true });
+				if (signal.aborted) throw new Error('Operation aborted');
+			}
+
+			const schema = options?.result as v.GenericSchema | undefined;
+			const roleModel = role ? this.config.roles[role]?.model : undefined;
+			const childOptions: PromptOptions<v.GenericSchema | undefined> = {
+				model: options?.model ?? (roleModel ? undefined : options?.inheritedModel),
+				tools: options?.tools,
+			};
+			if (schema) childOptions.result = schema;
+
+			const output: any = await child.prompt(text, childOptions as any);
+			const taskResult: InternalTaskResult<any> = {
+				output,
+				text: typeof output?.text === 'string' ? output.text : child.getAssistantText(),
+				taskId,
+				sessionId: child.id,
+				messageId: child.getLatestAssistantMessageId(),
+				role,
+				cwd: options?.cwd,
+			};
+			this.emit({
+				type: 'task_end',
+				taskId,
+				isError: false,
+				result: taskResult.text,
+				parentSessionId: this.id,
+			});
+			return taskResult;
+		} catch (error) {
+			this.emit({
+				type: 'task_end',
+				taskId,
+				isError: true,
+				result: getErrorMessage(error),
+				parentSessionId: this.id,
+			});
+			this.emit({ type: 'error', error: getErrorMessage(error) });
+			throw error;
+		} finally {
+			if (signal && abortListener) signal.removeEventListener('abort', abortListener);
+			if (child) {
+				this.activeTasks.delete(child);
+				child.close();
+			}
 		}
 	}
 
@@ -426,13 +677,13 @@ export class Session implements FlueSession {
 		}
 	}
 
-	private createShellMessage(command: string, result: ShellResult, options?: ShellOptions): AgentMessage {
+	private createShellMessage(
+		command: string,
+		result: ShellResult,
+		options?: ShellOptions,
+	): AgentMessage {
 		const cwdLine = options?.cwd ? `\ncwd: ${options.cwd}` : '';
-		const envLine = options?.env
-			? `\nenv: ${Object.keys(options.env)
-					.sort()
-					.join(', ')}`
-			: '';
+		const envLine = options?.env ? `\nenv: ${Object.keys(options.env).sort().join(', ')}` : '';
 		const output = formatShellHistory(command, result, cwdLine, envLine);
 		return {
 			role: 'user',
@@ -453,6 +704,21 @@ export class Session implements FlueSession {
 		const data = this.history.toData(this.metadata, this.createdAt ?? now, now);
 		if (!this.createdAt) this.createdAt = now;
 		await this.store.save(this.storageKey, data);
+	}
+
+	private async recordTaskSession(
+		sessionId: string,
+		storageKey: string,
+		taskId: string,
+	): Promise<void> {
+		const taskSessions = Array.isArray(this.metadata.taskSessions)
+			? this.metadata.taskSessions
+			: [];
+		if (!taskSessions.some((task) => task?.sessionId === sessionId)) {
+			taskSessions.push({ sessionId, taskId, storageKey });
+			this.metadata.taskSessions = taskSessions;
+			await this.save();
+		}
 	}
 
 	// ─── Compaction ───────────────────────────────────────────────────────────
@@ -618,6 +884,17 @@ export class Session implements FlueSession {
 		return '';
 	}
 
+	private getLatestAssistantMessageId(): string | undefined {
+		const path = this.history.getActivePath();
+		for (let i = path.length - 1; i >= 0; i--) {
+			const entry = path[i]!;
+			if (entry.type === 'message' && entry.message.role === 'assistant') {
+				return entry.id;
+			}
+		}
+		return undefined;
+	}
+
 	private async extractResultWithRetry<S extends v.GenericSchema>(
 		schema: S,
 	): Promise<v.InferOutput<S>> {
@@ -655,6 +932,25 @@ export function normalizePath(p: string): string {
 		}
 	}
 	return '/' + result.join('/');
+}
+
+export async function deleteSessionTree(
+	store: SessionStore,
+	storageKey: string,
+	seen = new Set<string>(),
+): Promise<void> {
+	if (seen.has(storageKey)) return;
+	seen.add(storageKey);
+	const data = await store.load(storageKey);
+	const taskSessions = Array.isArray(data?.metadata?.taskSessions)
+		? data.metadata.taskSessions
+		: [];
+	for (const task of taskSessions) {
+		if (typeof task?.storageKey === 'string') {
+			await deleteSessionTree(store, task.storageKey, seen);
+		}
+	}
+	await store.delete(storageKey);
 }
 
 function formatShellHistory(

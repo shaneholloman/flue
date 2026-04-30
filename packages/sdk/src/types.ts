@@ -127,6 +127,8 @@ export interface AgentConfig {
 	 * skill/task call site. Calls with no model resolved throw clearly at runtime.
 	 */
 	model: Model<any> | undefined;
+	/** Agent-wide default role. Per-session and per-call roles override this. */
+	role?: string;
 	/** Resolve a "provider/modelId" string to a Model instance. Throws on invalid input. */
 	resolveModel?: (modelString: string) => Model<any>;
 	compaction?: CompactionConfig;
@@ -173,6 +175,9 @@ export interface AgentInit {
 	 */
 	model?: string;
 
+	/** Agent-wide default role. Overridden by session-level or per-call roles. */
+	role?: string;
+
 	/**
 	 * Agent-wide commands. Every prompt(), skill(), and shell() call inherits
 	 * this list. Per-call `commands` are merged on top — if a per-call command
@@ -188,7 +193,7 @@ export interface FlueAgent {
 	readonly id: string;
 
 	/** Get or create a session in this agent. Defaults to the "default" session. */
-	session(id?: string): Promise<FlueSession>;
+	session(id?: string, options?: SessionOptions): Promise<FlueSession>;
 
 	/** Explicit session management helpers. */
 	readonly sessions: FlueSessions;
@@ -202,16 +207,23 @@ export interface FlueAgent {
 
 export interface FlueSessions {
 	/** Load an existing session. Throws if it does not exist. */
-	get(id?: string): Promise<FlueSession>;
+	get(id?: string, options?: SessionOptions): Promise<FlueSession>;
 	/** Create a new session. Throws if it already exists. */
-	create(id?: string): Promise<FlueSession>;
+	create(id?: string, options?: SessionOptions): Promise<FlueSession>;
 	/** Delete a session's stored conversation state. No-op when missing. */
 	delete(id?: string): Promise<void>;
+}
+
+export interface SessionOptions {
+	/** Session-wide default role. Per-call roles override this. */
+	role?: string;
 }
 
 // ─── Flue Session ───────────────────────────────────────────────────────────
 
 export interface FlueSession {
+	readonly id: string;
+
 	prompt<S extends v.GenericSchema>(
 		text: string,
 		options: PromptOptions<S> & { result: S },
@@ -225,6 +237,12 @@ export interface FlueSession {
 		options: SkillOptions<S> & { result: S },
 	): Promise<v.InferOutput<S>>;
 	skill(name: string, options?: SkillOptions): Promise<PromptResponse>;
+
+	task<S extends v.GenericSchema>(
+		text: string,
+		options: TaskOptions<S> & { result: S },
+	): Promise<v.InferOutput<S>>;
+	task(text: string, options?: TaskOptions): Promise<PromptResponse>;
 
 	delete(): Promise<void>;
 }
@@ -303,6 +321,16 @@ export interface SkillOptions<S extends v.GenericSchema | undefined = undefined>
 	model?: string;
 }
 
+export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> {
+	result?: S;
+	commands?: Command[];
+	tools?: ToolDef[];
+	role?: string;
+	model?: string;
+	/** Working directory for the detached task session. Defaults to the parent session cwd. */
+	cwd?: string;
+}
+
 export interface ShellOptions {
 	env?: Record<string, string>;
 	cwd?: string;
@@ -358,11 +386,13 @@ export type FlueEvent = (
 	| { type: 'turn_end' }
 	| { type: 'command_start'; command: string; args: string[] }
 	| { type: 'command_end'; command: string; exitCode: number }
+	| { type: 'task_start'; taskId: string; prompt: string; role?: string; cwd?: string }
+	| { type: 'task_end'; taskId: string; isError: boolean; result?: any }
 	| { type: 'compaction_start'; reason: 'threshold' | 'overflow'; estimatedTokens: number }
 	| { type: 'compaction_end'; messagesBefore: number; messagesAfter: number }
 	| { type: 'idle' }
 	| { type: 'error'; error: string }
-) & { sessionId?: string };
+) & { sessionId?: string; parentSessionId?: string; taskId?: string };
 
 export type FlueEventCallback = (event: FlueEvent) => void;
 

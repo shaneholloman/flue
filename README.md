@@ -227,6 +227,33 @@ Agents own sandbox state such as files written during a run. Sessions persist me
 
 In production, generate a stable agent ID for the sandbox/runtime scope you want to preserve. Use `agent.session(threadId)` when you need multiple conversations inside the same agent.
 
+### Tasks
+
+Use `session.task()` to run a focused, one-shot child agent in a detached session. Tasks share the same sandbox/filesystem, but get their own message history and discover `AGENTS.md` plus `.agents/skills/` from their working directory. The same `task` tool is also available to the LLM during `prompt()` and `skill()` calls, so the agent can delegate parallel research or exploration work itself.
+
+```ts
+const session = await agent.session();
+
+const research = await session.task('Research the auth flow and summarize the key files.', {
+  cwd: '/workspace/project',
+  role: 'researcher',
+});
+
+const answer = await session.prompt(
+  `Use this research to draft the implementation plan:\n\n${research.text}`,
+);
+```
+
+Roles can be set at the agent, session, or call level. Precedence is `call role > session role > agent role`. Role instructions are applied as call-scoped system prompt overlays, not injected into the persisted user message history.
+
+```ts
+const agent = await init({ model: 'anthropic/claude-sonnet-4-6', role: 'coder' });
+const session = await agent.session('review-thread', { role: 'reviewer' });
+
+await session.prompt('Review the latest changes.'); // uses reviewer
+await session.task('Research related issues.', { role: 'researcher' }); // uses researcher
+```
+
 ### Custom Virtual Sandboxes
 
 For most agents, use the built-in virtual sandbox or `sandbox: 'local'`. If you need to customize just-bash directly, pass a Bash factory. The factory must return a fresh Bash-like runtime each time; share the filesystem object in the closure to persist files across sessions and prompts.

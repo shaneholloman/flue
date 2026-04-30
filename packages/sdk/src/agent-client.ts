@@ -1,4 +1,6 @@
-import { Session } from './session.ts';
+import { discoverSessionContext } from './context.ts';
+import { createCwdSessionEnv } from './sandbox.ts';
+import { deleteSessionTree, Session, type CreateTaskSessionOptions } from './session.ts';
 import { createScopedEnv, mergeCommands } from './env-utils.ts';
 import type {
 	AgentConfig,
@@ -9,6 +11,7 @@ import type {
 	FlueEventCallback,
 	SessionData,
 	SessionEnv,
+	SessionOptions,
 	SessionStore,
 	ShellOptions,
 	ShellResult,
@@ -20,8 +23,8 @@ type OpenMode = 'get-or-create' | 'get' | 'create';
 
 export class AgentClient implements FlueAgent {
 	readonly sessions: FlueSessions = {
-		get: (id?: string) => this.openSession(id, 'get'),
-		create: (id?: string) => this.openSession(id, 'create'),
+		get: (id?: string, options?: SessionOptions) => this.openSession(id, 'get', options),
+		create: (id?: string, options?: SessionOptions) => this.openSession(id, 'create', options),
 		delete: (id?: string) => this.deleteSession(id),
 	};
 
@@ -37,8 +40,8 @@ export class AgentClient implements FlueAgent {
 		private agentCommands: Command[] = [],
 	) {}
 
-	async session(id?: string): Promise<FlueSession> {
-		return this.openSession(id, 'get-or-create');
+	async session(id?: string, options?: SessionOptions): Promise<FlueSession> {
+		return this.openSession(id, 'get-or-create', options);
 	}
 
 	async shell(command: string, options?: ShellOptions): Promise<ShellResult> {
@@ -62,13 +65,24 @@ export class AgentClient implements FlueAgent {
 		await this.env.cleanup();
 	}
 
-	private async openSession(id: string | undefined, mode: OpenMode): Promise<FlueSession> {
+	private async openSession(
+		id: string | undefined,
+		mode: OpenMode,
+		options?: SessionOptions,
+	): Promise<FlueSession> {
 		this.assertActive();
+		this.assertRoleExists(options?.role);
 		const sessionId = normalizeSessionId(id);
 		const open = this.openSessions.get(sessionId);
 		if (open) {
 			if (mode === 'create') {
 				throw new Error(`[flue] Session "${sessionId}" already exists for agent "${this.id}".`);
+			}
+			if (options?.role !== undefined && options.role !== open.role) {
+				throw new Error(
+					`[flue] Session "${sessionId}" is already open with ` +
+						`role ${JSON.stringify(open.role ?? null)}; cannot reopen with role ${JSON.stringify(options.role)}.`,
+				);
 			}
 			return open;
 		}
@@ -97,6 +111,9 @@ export class AgentClient implements FlueAgent {
 			data,
 			this.eventCallback,
 			this.agentCommands,
+			options?.role,
+			0,
+			(options) => this.createTaskSession(options),
 			() => this.openSessions.delete(sessionId),
 		);
 		this.openSessions.set(sessionId, session);
@@ -111,7 +128,57 @@ export class AgentClient implements FlueAgent {
 			await open.delete();
 			return;
 		}
-		await this.store.delete(createSessionStorageKey(this.id, sessionId));
+		await deleteSessionTree(this.store, createSessionStorageKey(this.id, sessionId));
+	}
+
+	private async createTaskSession(options: CreateTaskSessionOptions): Promise<Session> {
+		this.assertActive();
+		this.assertRoleExists(options.role);
+
+		const sessionId = `task:${options.parentSessionId}:${options.taskId}`;
+		const taskEnv = options.cwd
+			? createCwdSessionEnv(options.parentEnv, options.parentEnv.resolvePath(options.cwd))
+			: options.parentEnv;
+		const localContext = await discoverSessionContext(taskEnv);
+		const taskConfig: AgentConfig = {
+			...this.config,
+			systemPrompt: localContext.systemPrompt,
+			skills: localContext.skills,
+		};
+		const storageKey = createSessionStorageKey(this.id, sessionId);
+		const data = createEmptySessionData();
+		data.metadata = {
+			parentSessionId: options.parentSessionId,
+			taskId: options.taskId,
+			cwd: taskEnv.cwd,
+			role: options.role,
+			depth: options.depth,
+		};
+		await this.store.save(storageKey, data);
+
+		const eventCallback: FlueEventCallback | undefined = this.eventCallback
+			? (event) => {
+					this.eventCallback?.({
+						...event,
+						parentSessionId: event.parentSessionId ?? options.parentSessionId,
+						taskId: event.taskId ?? options.taskId,
+					});
+				}
+			: undefined;
+
+		return new Session(
+			sessionId,
+			storageKey,
+			taskConfig,
+			taskEnv,
+			this.store,
+			data,
+			eventCallback,
+			options.commands,
+			options.role,
+			options.depth,
+			(childOptions) => this.createTaskSession(childOptions),
+		);
 	}
 
 	private assertActive(): void {
@@ -120,6 +187,16 @@ export class AgentClient implements FlueAgent {
 		}
 	}
 
+	private assertRoleExists(roleName: string | undefined): void {
+		if (!roleName) return;
+		if (this.config.roles[roleName]) return;
+		const available = Object.keys(this.config.roles);
+		const list = available.length > 0 ? available.join(', ') : '(none defined)';
+		throw new Error(
+			`[flue] Role "${roleName}" not registered. Available roles: ${list}. ` +
+				`Define roles as markdown files under \`.flue/roles/\`.`,
+		);
+	}
 }
 
 function normalizeSessionId(id: string | undefined): string {
