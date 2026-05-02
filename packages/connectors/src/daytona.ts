@@ -102,7 +102,7 @@ class DaytonaSandboxApi implements SandboxApi {
 			command,
 			options?.cwd,
 			options?.env,
-			options?.timeout ?? 120,
+			options?.timeout,
 		);
 		return {
 			stdout: response.result ?? '',
