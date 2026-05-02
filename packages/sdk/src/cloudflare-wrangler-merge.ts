@@ -459,11 +459,11 @@ export function stripNoisyWranglerDefaults(merged: Record<string, unknown>): voi
 
 /**
  * Return the list of `class_name`s declared in the user's wrangler
- * `durable_objects.bindings` that contain the literal substring `Sandbox`
+ * `durable_objects.bindings` that end with the literal suffix `Sandbox`
  * (case-sensitive).
  *
  * This is Flue's convention for wiring `@cloudflare/sandbox`: any DO binding
- * whose class name contains `Sandbox` triggers an automatic re-export in the
+ * whose class name ends with `Sandbox` triggers an automatic re-export in the
  * generated Worker entry:
  *
  *   export { Sandbox as <class_name> } from '@cloudflare/sandbox';
@@ -472,6 +472,13 @@ export function stripNoisyWranglerDefaults(merged: Record<string, unknown>): voi
  * `SupportSandbox`) while still pointing at the single class shipped by the
  * `@cloudflare/sandbox` package. Each distinct `class_name` can be paired with
  * a different container image in the user's `containers[]` config.
+ *
+ * The match is intentionally a suffix (not substring) so that user-defined
+ * classes whose names merely contain "Sandbox" mid-word — e.g. `MySandboxV2`,
+ * `MySandboxedAgent`, `LegacySandboxedThing` — are not silently overridden
+ * by the `@cloudflare/sandbox` re-export. Note that classes whose names
+ * still end in `Sandbox` (e.g. `MockSandbox`, `NotASandbox`) will match;
+ * to opt out, rename the class to not end in `Sandbox`.
  *
  * Returns unique, sorted class names. Non-object bindings or bindings without
  * a string `class_name` are ignored.
@@ -487,7 +494,7 @@ export function detectSandboxBindings(userConfig: Record<string, unknown>): stri
 		if (typeof entry !== 'object' || entry === null) continue;
 		const className = (entry as Record<string, unknown>).class_name;
 		if (typeof className !== 'string') continue;
-		if (className.includes('Sandbox')) found.add(className);
+		if (className.endsWith('Sandbox')) found.add(className);
 	}
 	return Array.from(found).sort();
 }
@@ -536,7 +543,7 @@ export function assertSandboxPackageInstalled(
 	}
 
 	throw new Error(
-		`[flue] Your wrangler config declares DO binding(s) whose class_name contains "Sandbox" ` +
+		`[flue] Your wrangler config declares DO binding(s) whose class_name ends with "Sandbox" ` +
 			`(${sandboxClassNames.join(', ')}), but @cloudflare/sandbox is not in your package.json. ` +
 			`Install it: \`npm install @cloudflare/sandbox\`.`,
 	);

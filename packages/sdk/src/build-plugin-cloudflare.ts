@@ -425,7 +425,7 @@ ${agentClasses}
 
 // ─── User-declared Sandbox re-exports ──────────────────────────────────────
 // One line per DO binding in the user's wrangler.jsonc whose class_name
-// contains "Sandbox". Flue aliases the single \`Sandbox\` class shipped by
+// ends with "Sandbox". Flue aliases the single \`Sandbox\` class shipped by
 // \`@cloudflare/sandbox\` so each user-chosen class_name resolves at the
 // bundle's top level. The binding + container image configuration is owned
 // by the user's wrangler.jsonc.
@@ -564,8 +564,7 @@ export default {
 			assertSandboxPackageInstalled(sandboxClassNames, [ctx.outputDir, ctx.workspaceDir]);
 			for (const className of sandboxClassNames) {
 				console.log(
-					`[flue] Detected Sandbox-named DO binding "${className}" — ` +
-						`re-exporting from @cloudflare/sandbox.`,
+					`[flue] Auto-wiring DO binding "${className}" to @cloudflare/sandbox's Sandbox class.`,
 				);
 			}
 		}

@@ -3,7 +3,7 @@
 	// merges its own contributions (the `main` entry + per-agent DO bindings
 	// and migration), and writes the composed config to dist/wrangler.jsonc.
 	//
-	// The DO binding whose class_name contains "Sandbox" triggers Flue's
+	// The DO binding whose class_name ends with "Sandbox" triggers Flue's
 	// automatic re-export of the Sandbox class from @cloudflare/sandbox in
 	// the generated Worker bundle.
 	"$schema": "https://workers.cloudflare.com/schema/wrangler.json",

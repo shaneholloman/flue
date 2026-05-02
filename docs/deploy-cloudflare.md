@@ -258,7 +258,7 @@ You own the container config. That means three things:
 2. Declare the Durable Object binding, migration, and container image in your `wrangler.jsonc` at the project root.
 3. Commit a `Dockerfile` at the path your `containers[].image` points to.
 
-Flue automates one piece: **any DO binding whose `class_name` contains `Sandbox` is automatically wired up as `@cloudflare/sandbox`'s `Sandbox` class in the generated Worker bundle.** Pick any name you want (`Sandbox`, `PyBoxSandbox`, `SupportSandbox`, …) and Flue handles the re-export.
+Flue automates one piece: **any DO binding whose `class_name` ends with `Sandbox` is automatically wired up as `@cloudflare/sandbox`'s `Sandbox` class in the generated Worker bundle.** Pick any name you want (`Sandbox`, `PyBoxSandbox`, `SupportSandbox`, …) and Flue handles the re-export.
 
 ### Example
 
