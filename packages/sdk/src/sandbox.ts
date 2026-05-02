@@ -74,11 +74,39 @@ function createBashSessionEnv(
 	const resolve = (p: string) => (p.startsWith('/') ? p : fs.resolvePath(cwd, p));
 
 	return {
-		// just-bash does not consume `timeout` today; strip it at the boundary
-		// so we don't pass an unknown option through. CF Sandbox and Daytona
-		// adapters consume `timeout` directly via SandboxApi.exec.
-		exec: (cmd, opts) =>
-			bash.exec(cmd, opts ? { cwd: opts.cwd, env: opts.env } : undefined),
+		exec: async (cmd, opts) => {
+			const exec = bash.exec as unknown as (
+				this: BashLike,
+				command: string,
+				options?: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal },
+			) => Promise<ShellResult>;
+			const timeout = opts?.timeout;
+			let timeoutSignal: AbortSignal | undefined;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+
+			if (typeof timeout === 'number') {
+				const controller = new AbortController();
+				timeoutSignal = controller.signal;
+				timer = setTimeout(() => controller.abort(), timeout * 1000);
+			}
+
+			try {
+				const result = await exec.call(
+					bash,
+					cmd,
+					opts ? { cwd: opts.cwd, env: opts.env, signal: timeoutSignal } : undefined,
+				);
+				if (timeoutSignal?.aborted) {
+					return {
+						...result,
+						stderr: result.stderr || `[flue] Command timed out after ${timeout} seconds.`,
+					};
+				}
+				return result;
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		},
 		scope: (options) => createScope(options?.commands ?? []),
 		readFile: (p) => fs.readFile(resolve(p)),
 		readFileBuffer: (p) => fs.readFileBuffer(resolve(p)),

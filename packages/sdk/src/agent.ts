@@ -208,28 +208,11 @@ function createBashTool(env: SessionEnv): AgentTool<any> {
 			'Execute a bash command. Returns stdout and stderr. Output is truncated to the last 2000 lines or 50KB.',
 		parameters: Type.Object({
 			command: Type.String({ description: 'Bash command to execute' }),
-			timeout: Type.Optional(
-				Type.Number({
-					description: 'Timeout in seconds. Must be a finite, non-negative number.',
-					minimum: 0,
-				}),
-			),
+			timeout: Type.Optional(Type.Number({ description: 'Timeout in seconds' })),
 		}),
 		async execute(_toolCallId, params: { command: string; timeout?: number }, signal?) {
 			throwIfAborted(signal);
-			// Flue does not impose an SDK-level upper bound on `timeout`; each
-			// adapter (just-bash, @cloudflare/sandbox, daytona, etc.) applies
-			// its own platform policy. We do guard against the obviously-bad
-			// values an LLM can still emit despite the JSON-Schema declaration
-			// (negatives, NaN, Infinity) — those become "no caller-supplied
-			// timeout" so the adapter's default kicks in instead.
-			const timeout =
-				typeof params.timeout === 'number' &&
-				Number.isFinite(params.timeout) &&
-				params.timeout >= 0
-					? params.timeout
-					: undefined;
-			const result = await env.exec(params.command, { timeout });
+			const result = await env.exec(params.command, { timeout: params.timeout });
 			return formatBashResult(result, params.command);
 		},
 	};

@@ -102,9 +102,6 @@ class DaytonaSandboxApi implements SandboxApi {
 			command,
 			options?.cwd,
 			options?.env,
-			// Caller-supplied timeout (seconds) wins; preserve the previous
-			// 120s default for callers that omit it. Daytona's executeCommand
-			// expects seconds.
 			options?.timeout ?? 120,
 		);
 		return {
