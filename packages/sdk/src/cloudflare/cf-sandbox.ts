@@ -90,11 +90,14 @@ export async function cfSandboxToSessionEnv(
 
 		async exec(
 			command: string,
-			execOpts?: { cwd?: string; env?: Record<string, string> },
+			execOpts?: { cwd?: string; env?: Record<string, string>; timeout?: number },
 		): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+			const timeoutMs =
+				typeof execOpts?.timeout === 'number' ? execOpts.timeout * 1000 : undefined;
 			const result = await sandbox.exec(command, {
 				cwd: execOpts?.cwd,
 				env: execOpts?.env,
+				timeout: timeoutMs,
 			});
 			return {
 				stdout: result.stdout ?? '',

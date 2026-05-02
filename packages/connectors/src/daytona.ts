@@ -96,13 +96,13 @@ class DaytonaSandboxApi implements SandboxApi {
 
 	async exec(
 		command: string,
-		options?: { cwd?: string; env?: Record<string, string> },
+		options?: { cwd?: string; env?: Record<string, string>; timeout?: number },
 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
 		const response = await this.sandbox.process.executeCommand(
 			command,
 			options?.cwd,
 			options?.env,
-			120, // timeout in seconds
+			options?.timeout,
 		);
 		return {
 			stdout: response.result ?? '',

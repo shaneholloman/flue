@@ -212,8 +212,7 @@ function createBashTool(env: SessionEnv): AgentTool<any> {
 		}),
 		async execute(_toolCallId, params: { command: string; timeout?: number }, signal?) {
 			throwIfAborted(signal);
-			// TODO: wire timeout through SessionEnv.exec
-			const result = await env.exec(params.command);
+			const result = await env.exec(params.command, { timeout: params.timeout });
 			return formatBashResult(result, params.command);
 		},
 	};

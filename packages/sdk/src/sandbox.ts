@@ -17,7 +17,12 @@ export function createCwdSessionEnv(parentEnv: SessionEnv, cwd: string): Session
 	};
 
 	return {
-		exec: (cmd, opts) => parentEnv.exec(cmd, { cwd: opts?.cwd ?? scopedCwd, env: opts?.env }),
+		exec: (cmd, opts) =>
+			parentEnv.exec(cmd, {
+				cwd: opts?.cwd ?? scopedCwd,
+				env: opts?.env,
+				timeout: opts?.timeout,
+			}),
 		scope: async (options) =>
 			createCwdSessionEnv(await createScopedEnv(parentEnv, options?.commands ?? []), scopedCwd),
 		readFile: (p) => parentEnv.readFile(resolvePath(p)),
@@ -69,7 +74,39 @@ function createBashSessionEnv(
 	const resolve = (p: string) => (p.startsWith('/') ? p : fs.resolvePath(cwd, p));
 
 	return {
-		exec: (cmd, opts) => bash.exec(cmd, opts),
+		exec: async (cmd, opts) => {
+			const exec = bash.exec as unknown as (
+				this: BashLike,
+				command: string,
+				options?: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal },
+			) => Promise<ShellResult>;
+			const timeout = opts?.timeout;
+			let timeoutSignal: AbortSignal | undefined;
+			let timer: ReturnType<typeof setTimeout> | undefined;
+
+			if (typeof timeout === 'number') {
+				const controller = new AbortController();
+				timeoutSignal = controller.signal;
+				timer = setTimeout(() => controller.abort(), timeout * 1000);
+			}
+
+			try {
+				const result = await exec.call(
+					bash,
+					cmd,
+					opts ? { cwd: opts.cwd, env: opts.env, signal: timeoutSignal } : undefined,
+				);
+				if (timeoutSignal?.aborted) {
+					return {
+						...result,
+						stderr: result.stderr || `[flue] Command timed out after ${timeout} seconds.`,
+					};
+				}
+				return result;
+			} finally {
+				if (timer) clearTimeout(timer);
+			}
+		},
 		scope: (options) => createScope(options?.commands ?? []),
 		readFile: (p) => fs.readFile(resolve(p)),
 		readFileBuffer: (p) => fs.readFileBuffer(resolve(p)),
@@ -135,7 +172,7 @@ export interface SandboxApi {
 	rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 	exec(
 		command: string,
-		options?: { cwd?: string; env?: Record<string, string> },
+		options?: { cwd?: string; env?: Record<string, string>; timeout?: number },
 	): Promise<ShellResult>;
 }
 
@@ -154,11 +191,12 @@ export function createSandboxSessionEnv(
 	return {
 		async exec(
 			command: string,
-			options?: { cwd?: string; env?: Record<string, string> },
+			options?: { cwd?: string; env?: Record<string, string>; timeout?: number },
 		): Promise<ShellResult> {
 			return api.exec(command, {
 				cwd: options?.cwd ?? cwd,
 				env: options?.env,
+				timeout: options?.timeout,
 			});
 		},
 
