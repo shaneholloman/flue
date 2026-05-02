@@ -289,6 +289,27 @@ await session.prompt('Review the latest changes.'); // uses reviewer
 await session.task('Research related issues.', { role: 'researcher' }); // uses researcher
 ```
 
+### Provider Gateways
+
+Use `providers` when model traffic needs to go through an enterprise API gateway,
+proxy, or custom endpoint. Overrides apply to every model resolved by the agent,
+including role-level and per-call model overrides.
+
+```ts
+const agent = await init({
+  model: 'anthropic/claude-sonnet-4-6',
+  providers: {
+    anthropic: {
+      baseUrl: env.ANTHROPIC_BASE_URL,
+      headers: {
+        'X-Custom-Auth': env.GATEWAY_KEY,
+      },
+      apiKey: 'dummy',
+    },
+  },
+});
+```
+
 ### Custom Virtual Sandboxes
 
 For most agents, use the built-in virtual sandbox or `sandbox: 'local'`. If you need to customize just-bash directly, pass a Bash factory. The factory must return a fresh Bash-like runtime each time; share the filesystem object in the closure to persist files across sessions and prompts.

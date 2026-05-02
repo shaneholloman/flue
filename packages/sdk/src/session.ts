@@ -193,6 +193,7 @@ export class Session implements FlueSession {
 				tools,
 				messages: previousMessages,
 			},
+			getApiKey: (provider) => this.getProviderApiKey(provider),
 			toolExecution: 'parallel',
 		});
 
@@ -407,11 +408,11 @@ export class Session implements FlueSession {
 
 		const roleModel = resolveRoleModel(this.config.roles, roleName);
 		if (roleModel && this.config.resolveModel) {
-			model = this.config.resolveModel(roleModel);
+			model = this.config.resolveModel(roleModel, this.config.providers);
 		}
 
 		if (promptModel && this.config.resolveModel) {
-			model = this.config.resolveModel(promptModel);
+			model = this.config.resolveModel(promptModel, this.config.providers);
 		}
 
 		return this.requireModel(model, callSite);
@@ -429,6 +430,10 @@ export class Session implements FlueSession {
 				`Pass \`{ model: "provider/model-id" }\` to \`init()\` for an agent-wide default, ` +
 				`or to this prompt()/skill() call for a one-off override.`,
 		);
+	}
+
+	private getProviderApiKey(provider: string): string | undefined {
+		return this.config.providers?.[provider]?.apiKey;
 	}
 
 	private buildSystemPrompt(roleName?: string): string {
@@ -835,7 +840,7 @@ export class Session implements FlueSession {
 			const result = await compact(
 				preparation,
 				model,
-				undefined,
+				this.getProviderApiKey(model.provider),
 				this.compactionAbortController.signal,
 			);
 

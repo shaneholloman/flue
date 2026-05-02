@@ -8,7 +8,8 @@
  *
  * User agent code should never import from here.
  */
-import { getModel } from '@mariozechner/pi-ai';
+import { getModel, type Api, type Model } from '@mariozechner/pi-ai';
+import type { ProviderConfig, ProviderOverrides } from './types.ts';
 
 export { createFlueContext } from './client.ts';
 export type { FlueContextConfig, FlueContextInternal } from './client.ts';
@@ -21,12 +22,7 @@ export { bashFactoryToSessionEnv } from './sandbox.ts';
 // parseJsonBody) is bundled via static imports inside error-utils.ts and
 // doesn't need to appear on this surface. If a future template needs more,
 // add it here at that time.
-export {
-	parseJsonBody,
-	toHttpResponse,
-	toSseData,
-	validateAgentRequest,
-} from './error-utils.ts';
+export { parseJsonBody, toHttpResponse, toSseData, validateAgentRequest } from './error-utils.ts';
 export {
 	AgentNotFoundError,
 	InvalidRequestError,
@@ -43,7 +39,10 @@ export {
  * transitive deps. Centralizing the resolver here keeps `_entry.ts`
  * dependency-free apart from `@flue/sdk/*`.
  */
-export function resolveModel(modelString: string): ReturnType<typeof getModel> {
+export function resolveModel(
+	modelString: string,
+	providers?: ProviderOverrides,
+): ReturnType<typeof getModel> {
 	const slash = modelString.indexOf('/');
 	if (slash === -1) {
 		throw new Error(
@@ -65,5 +64,22 @@ export function resolveModel(modelString: string): ReturnType<typeof getModel> {
 				`is not registered with @mariozechner/pi-ai.`,
 		);
 	}
-	return resolved;
+	return applyProviderConfig(resolved, providers?.[provider]);
+}
+
+function applyProviderConfig<TApi extends Api>(
+	model: Model<TApi>,
+	providerConfig: ProviderConfig | undefined,
+): Model<TApi> {
+	if (!providerConfig?.baseUrl && !providerConfig?.headers) {
+		return model;
+	}
+	return {
+		...model,
+		baseUrl: providerConfig.baseUrl ?? model.baseUrl,
+		headers:
+			model.headers || providerConfig.headers
+				? { ...(model.headers ?? {}), ...(providerConfig.headers ?? {}) }
+				: undefined,
+	};
 }
