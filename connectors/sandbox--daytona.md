@@ -1,7 +1,8 @@
 ---
 {
   "category": "sandbox",
-  "website": "https://daytona.io"
+  "website": "https://daytona.io",
+  "aliases": ["@daytona/sdk"]
 }
 ---
 

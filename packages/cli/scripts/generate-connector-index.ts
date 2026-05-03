@@ -16,13 +16,21 @@
  * filename convention here, update that route too.
  *
  * Frontmatter (JSON, fenced by `---` lines):
- *   { "category": "sandbox", "website": "https://daytona.io" }   ← named connector
- *   { "category": "sandbox", "root": true }                        ← category root
+ *   { "category": "sandbox", "website": "https://daytona.io" }                      ← named connector
+ *   { "category": "sandbox", "website": "...", "aliases": ["@daytona/sdk"] }        ← connector with aliases
+ *   { "category": "sandbox", "root": true }                                          ← category root
+ *
+ * Aliases are an optional list of additional names a user can pass to
+ * `flue add <name>` that resolve to the same connector. Reserved for cases
+ * where the canonical brand name is genuinely ambiguous (companies with
+ * multiple products) — not for synonyms or marketing variants. See
+ * `connectors/README.md` for the authoring guideline.
  *
  * The script aborts (non-zero exit) on:
  *   - missing/malformed frontmatter
  *   - missing required fields (`category` always; `website` for connectors)
- *   - two files resolving to the same slug
+ *   - malformed `aliases` (not an array, contains non-strings or empty strings)
+ *   - any name (slug or alias) resolving to two different connectors
  */
 import { readdir, readFile, writeFile, mkdir } from 'node:fs/promises';
 import { dirname, join } from 'node:path';
@@ -39,6 +47,7 @@ interface FrontmatterCommon {
 }
 interface FrontmatterConnector extends FrontmatterCommon {
 	website: string;
+	aliases: string[];
 	root?: undefined;
 }
 interface FrontmatterRoot extends FrontmatterCommon {
@@ -50,6 +59,7 @@ interface ConnectorRecord {
 	slug: string;
 	category: string;
 	website: string;
+	aliases: string[];
 	file: string;
 }
 interface CategoryRootRecord {
@@ -88,7 +98,23 @@ function parseFrontmatter(source: string, file: string): Frontmatter {
 			`[connectors] ${file}: frontmatter missing required string field "website" (or set "root": true for a category root).`,
 		);
 	}
-	return { category: parsed.category, website: parsed.website };
+	let aliases: string[] = [];
+	if ('aliases' in parsed && parsed.aliases !== undefined) {
+		if (!Array.isArray(parsed.aliases)) {
+			throw new Error(
+				`[connectors] ${file}: frontmatter "aliases" must be an array of strings if present.`,
+			);
+		}
+		for (const a of parsed.aliases) {
+			if (typeof a !== 'string' || !a.trim()) {
+				throw new Error(
+					`[connectors] ${file}: frontmatter "aliases" must contain only non-empty strings.`,
+				);
+			}
+		}
+		aliases = parsed.aliases;
+	}
+	return { category: parsed.category, website: parsed.website, aliases };
 }
 
 async function main() {
@@ -98,7 +124,9 @@ async function main() {
 
 	const connectors: ConnectorRecord[] = [];
 	const categoryRoots: CategoryRootRecord[] = [];
-	const seenSlugs = new Map<string, string>();
+	// Tracks any string a user can pass to `flue add` (slugs, category roots,
+	// and aliases) so we can guarantee unambiguous resolution at runtime.
+	const seenNames = new Map<string, string>();
 
 	for (const file of allFiles) {
 		const stem = file.slice(0, -'.md'.length);
@@ -121,13 +149,26 @@ async function main() {
 					`[connectors] ${file}: filename category "${category}" does not match frontmatter category "${fm.category}".`,
 				);
 			}
-			if (seenSlugs.has(slug)) {
+			if (seenNames.has(slug)) {
 				throw new Error(
-					`[connectors] slug collision: both "${seenSlugs.get(slug)}" and "${file}" resolve to slug "${slug}". Rename one.`,
+					`[connectors] name collision: both "${seenNames.get(slug)}" and "${file}" resolve to "${slug}". Rename one.`,
 				);
 			}
-			seenSlugs.set(slug, file);
-			connectors.push({ slug, category, website: fm.website, file });
+			seenNames.set(slug, file);
+			for (const alias of fm.aliases) {
+				if (alias === slug) {
+					throw new Error(
+						`[connectors] ${file}: alias "${alias}" duplicates the connector's own slug. Remove it from "aliases".`,
+					);
+				}
+				if (seenNames.has(alias)) {
+					throw new Error(
+						`[connectors] name collision: alias "${alias}" in ${file} is already taken by ${seenNames.get(alias)}.`,
+					);
+				}
+				seenNames.set(alias, file);
+			}
+			connectors.push({ slug, category, website: fm.website, aliases: fm.aliases, file });
 		} else {
 			// Category root: <category>.md
 			if (!fm.root) {
@@ -142,12 +183,12 @@ async function main() {
 			}
 			// Also use the bare slug as a reserved one so a future connector
 			// named the same as a category can't shadow it.
-			if (seenSlugs.has(stem)) {
+			if (seenNames.has(stem)) {
 				throw new Error(
-					`[connectors] slug collision: "${seenSlugs.get(stem)}" already uses slug "${stem}".`,
+					`[connectors] name collision: "${seenNames.get(stem)}" already uses "${stem}".`,
 				);
 			}
-			seenSlugs.set(stem, file);
+			seenNames.set(stem, file);
 			categoryRoots.push({ category: fm.category, file });
 		}
 	}
@@ -156,7 +197,7 @@ async function main() {
 	const connectorsLit = connectors
 		.map(
 			(c) =>
-				`\t{ slug: ${JSON.stringify(c.slug)}, category: ${JSON.stringify(c.category)}, website: ${JSON.stringify(c.website)} },`,
+				`\t{ slug: ${JSON.stringify(c.slug)}, category: ${JSON.stringify(c.category)}, website: ${JSON.stringify(c.website)}, aliases: ${JSON.stringify(c.aliases)} },`,
 		)
 		.join('\n');
 	const rootsLit = categoryRoots
@@ -169,7 +210,7 @@ async function main() {
 	// "no overlap" when the registry currently has 1+ entries.
 	const out =
 		banner +
-		`export const CONNECTORS: readonly { readonly slug: string; readonly category: string; readonly website: string }[] = [\n${connectorsLit}\n];\n\n` +
+		`export const CONNECTORS: readonly { readonly slug: string; readonly category: string; readonly website: string; readonly aliases: readonly string[] }[] = [\n${connectorsLit}\n];\n\n` +
 		`export const CATEGORY_ROOTS: readonly { readonly category: string }[] = [\n${rootsLit}\n];\n`;
 
 	await mkdir(dirname(outFile), { recursive: true });

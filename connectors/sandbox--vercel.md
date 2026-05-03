@@ -1,7 +1,8 @@
 ---
 {
   "category": "sandbox",
-  "website": "https://vercel.com/sandbox"
+  "website": "https://vercel.com/sandbox",
+  "aliases": ["@vercel/sandbox"]
 }
 ---
 

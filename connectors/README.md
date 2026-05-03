@@ -81,16 +81,37 @@ For named connectors:
 ---
 ```
 
-Required fields:
+Fields:
 
-| Field      | Type    | Required when           | Description                                   |
-| ---------- | ------- | ----------------------- | --------------------------------------------- |
-| `category` | string  | always                  | Connector category. Must be one of the supported categories listed above. |
-| `website`  | string  | named connectors only   | Provider's homepage. Shown in `flue add` listing |
-| `root`     | boolean | category roots only     | Must be `true`. Marks file as the category root |
+| Field      | Type     | Required when           | Description                                   |
+| ---------- | -------- | ----------------------- | --------------------------------------------- |
+| `category` | string   | always                  | Connector category. Must be one of the supported categories listed above. |
+| `website`  | string   | named connectors only   | Provider's homepage. Shown in `flue add` listing |
+| `aliases`  | string[] | optional                | Additional names users can pass to `flue add`. See "Aliases" below |
+| `root`     | boolean  | category roots only     | Must be `true`. Marks file as the category root |
 
 The website strips frontmatter when serving the markdown — agents and humans
 see clean content.
+
+### Aliases
+
+`aliases` lets a connector be addressable by names beyond its canonical slug.
+For example, `sandbox--vercel.md` declares `"aliases": ["@vercel/sandbox"]`,
+so `flue add @vercel/sandbox` and `flue add vercel` both resolve to the same
+connector. The canonical slug is still what the listing UI advertises and
+what the registry URL is keyed on; aliases are purely a convenience for
+users who'd otherwise type a more specific name.
+
+**Use aliases sparingly.** They're reserved for cases where the canonical
+brand name is genuinely ambiguous because the company has multiple products
+(e.g. Vercel does hosting, sandboxes, and databases — `vercel` alone doesn't
+say which one). Don't add aliases for synonyms, marketing variants, or
+spelling preferences.
+
+The prebuild script enforces uniqueness: an alias can't collide with another
+connector's slug or another connector's alias. CLI lookups are
+case-insensitive against both slugs and aliases, so you don't need to add
+casing variants.
 
 ## Body conventions
 

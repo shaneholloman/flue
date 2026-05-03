@@ -804,6 +804,25 @@ function registryUrlFor(slug: string): string {
 }
 
 /**
+ * Resolve a user-supplied name to a registered connector. Tries an exact
+ * match (slug or alias) first, then falls back to a case-insensitive match.
+ * Returns the matched connector entry, or undefined if nothing matched.
+ */
+function resolveConnector(name: string): (typeof CONNECTORS)[number] | undefined {
+	// Exact: slug.
+	const bySlug = CONNECTORS.find((c) => c.slug === name);
+	if (bySlug) return bySlug;
+	// Exact: alias.
+	const byAlias = CONNECTORS.find((c) => c.aliases.includes(name));
+	if (byAlias) return byAlias;
+	// Case-insensitive fallback (slug or alias).
+	const lower = name.toLowerCase();
+	return CONNECTORS.find(
+		(c) => c.slug.toLowerCase() === lower || c.aliases.some((a) => a.toLowerCase() === lower),
+	);
+}
+
+/**
  * Render a 3-column table aligned by the longest entry. Simple and
  * intentionally unfussy — connector listings are always small.
  */
@@ -943,16 +962,16 @@ async function addCommand(args: AddArgs) {
 		return;
 	}
 
-	const known = CONNECTORS.find((c) => c.slug === args.name);
+	const known = resolveConnector(args.name);
 	if (!known) {
 		printUnknownConnector(args.name, process.stderr);
 		process.exit(1);
 	}
 
-	const result = await fetchConnectorMarkdown(args.name);
+	const result = await fetchConnectorMarkdown(known.slug);
 	if ('notFound' in result) {
 		console.error(
-			`[flue] The connector registry did not have markdown for "${args.name}". ` +
+			`[flue] The connector registry did not have markdown for "${known.slug}". ` +
 				`Your installed CLI may be out of sync with the registry — try updating @flue/cli.`,
 		);
 		process.exit(1);
