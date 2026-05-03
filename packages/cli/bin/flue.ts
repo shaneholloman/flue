@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
+import { determineAgent } from '@vercel/detect-agent';
 import {
 	build,
 	dev,
@@ -9,6 +10,7 @@ import {
 	resolveEnvFiles,
 	resolveWorkspaceFromCwd,
 } from '@flue/sdk';
+import { CONNECTORS, CATEGORY_ROOTS } from './_connectors.generated.ts';
 
 /**
  * Resolve the workspace directory for a CLI command.
@@ -55,11 +57,13 @@ function printUsage() {
 			'  flue dev   --target <node|cloudflare> [--workspace <path>] [--output <path>] [--port <number>] [--env <path>]...\n' +
 			'  flue run   <agent> --target node --id <id> [--payload <json>] [--workspace <path>] [--output <path>] [--port <number>] [--env <path>]...\n' +
 			'  flue build --target <node|cloudflare> [--workspace <path>] [--output <path>]\n' +
+			'  flue add   [<name>] [--category <category>] [--print]\n' +
 			'\n' +
 			'Commands:\n' +
 			'  dev    Long-running watch-mode dev server. Rebuilds and reloads on file changes.\n' +
 			'  run    One-shot build + invoke an agent (production-style; use for CI / scripted runs).\n' +
 			'  build  Build a deployable artifact to ./dist (production deploys).\n' +
+			'  add    Install a connector. Pipes installation instructions for an AI coding agent to follow.\n' +
 			'\n' +
 			'Flags:\n' +
 			'  --workspace <path>   Workspace root (containing agents/ and roles/). Default: ./.flue/ if it exists, else ./\n' +
@@ -67,6 +71,8 @@ function printUsage() {
 			`  --port <number>      Port for the dev server. Default: ${DEFAULT_DEV_PORT}\n` +
 			'  --env <path>         Load env vars from a .env-format file. Repeatable; later files override earlier on key collision.\n' +
 			'                       Works for both Node and Cloudflare targets. Shell-set env vars win over file values.\n' +
+			'  --category <name>    (flue add) Fetch the generic instructions for a connector category instead of a specific connector.\n' +
+			'  --print              (flue add) Print the raw connector markdown to stdout regardless of whether the caller is an agent.\n' +
 			'\n' +
 			'Examples:\n' +
 			'  flue dev --target node\n' +
@@ -76,6 +82,9 @@ function printUsage() {
 			'  flue run hello --target node --id test-1 --payload \'{"name": "World"}\' --env .env\n' +
 			'  flue build --target node\n' +
 			'  flue build --target cloudflare --workspace ./.flue --output ./build\n' +
+			'  flue add\n' +
+			'  flue add daytona | claude\n' +
+			'  flue add --category sandbox\n' +
 			'\n' +
 			'Note: set the model inside your agent via `init({ model: "provider/model-id" })` ' +
 			'or per-call `{ model: ... }` on prompt/skill/task.',
@@ -119,7 +128,17 @@ interface DevArgs {
 	envFiles: string[];
 }
 
-type ParsedArgs = RunArgs | BuildArgs | DevArgs;
+interface AddArgs {
+	command: 'add';
+	/** Positional connector name (e.g. "daytona"). Empty string when no name was passed. */
+	name: string;
+	/** --category value (e.g. "sandbox"). Empty string when not passed. Mutually exclusive with `name`. */
+	category: string;
+	/** --print forces raw-markdown-to-stdout regardless of agent detection. */
+	print: boolean;
+}
+
+type ParsedArgs = RunArgs | BuildArgs | DevArgs | AddArgs;
 
 function parseFlags(flags: string[]): {
 	target?: 'node' | 'cloudflare';
@@ -225,8 +244,52 @@ function printCloudflareRunUnsupported(agent: string, id: string, payload: strin
 	process.exit(1);
 }
 
+function parseAddArgs(rest: string[]): AddArgs {
+	let name = '';
+	let category = '';
+	let print = false;
+
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i]!;
+		if (arg === '--category') {
+			const value = rest[++i];
+			if (!value) {
+				console.error('Missing value for --category');
+				process.exit(1);
+			}
+			category = value;
+		} else if (arg === '--print') {
+			print = true;
+		} else if (arg.startsWith('--')) {
+			console.error(`Unknown flag for \`flue add\`: ${arg}`);
+			printUsage();
+			process.exit(1);
+		} else {
+			if (name) {
+				console.error(`Unexpected extra argument for \`flue add\`: ${arg}`);
+				printUsage();
+				process.exit(1);
+			}
+			name = arg;
+		}
+	}
+
+	if (name && category) {
+		console.error(
+			'`flue add` accepts either a connector name or --category, not both. Got both.',
+		);
+		process.exit(1);
+	}
+
+	return { command: 'add', name, category, print };
+}
+
 function parseArgs(argv: string[]): ParsedArgs {
 	const [command, ...rest] = argv;
+
+	if (command === 'add') {
+		return parseAddArgs(rest);
+	}
 
 	if (command === 'build') {
 		const flags = parseFlags(rest);
@@ -726,6 +789,181 @@ async function run(args: RunArgs) {
 	stopServer(child);
 }
 
+// ─── `flue add` ─────────────────────────────────────────────────────────────
+
+// Default registry base. Can be overridden via FLUE_REGISTRY_URL for local
+// development against `pnpm --filter @flue/www dev`. Internal-only env var;
+// not part of any documented user-facing surface.
+const DEFAULT_REGISTRY_URL = 'https://flueframework.com/cli/connectors';
+
+function registryUrlFor(slug: string): string {
+	const base = (process.env.FLUE_REGISTRY_URL ?? DEFAULT_REGISTRY_URL).replace(/\/+$/, '');
+	return `${base}/${slug}.md`;
+}
+
+/**
+ * Render a 3-column table aligned by the longest entry. Simple and
+ * intentionally unfussy — connector listings are always small.
+ */
+function renderConnectorTable(rows: { command: string; category: string; website: string }[]): string {
+	if (rows.length === 0) return '  (none)';
+	const cmdW = Math.max(...rows.map((r) => r.command.length));
+	const catW = Math.max(...rows.map((r) => r.category.length));
+	const gap = '     ';
+	return rows
+		.map((r) => `  ${r.command.padEnd(cmdW)}${gap}${r.category.padEnd(catW)}${gap}${r.website}`)
+		.join('\n');
+}
+
+function categoryRootHint(): string {
+	if (CATEGORY_ROOTS.length === 0) return '';
+	const lines: string[] = [];
+	lines.push('');
+	lines.push(`Don't see what you need?`);
+	// Compute the widest "flue add --category <name>" so the right-side text
+	// in subsequent lines aligns under itself instead of under the command.
+	const cmds = CATEGORY_ROOTS.map((r) => `flue add --category ${r.category}`);
+	const cmdW = Math.max(...cmds.map((c) => c.length));
+	for (const root of CATEGORY_ROOTS) {
+		const cmd = `flue add --category ${root.category}`.padEnd(cmdW);
+		lines.push(`  ${cmd}     Generic instructions for building a ${root.category}`);
+		lines.push(`  ${' '.repeat(cmdW)}     connector from scratch. Pipe to your coding agent.`);
+	}
+	return lines.join('\n');
+}
+
+function printListing(stream: NodeJS.WriteStream) {
+	stream.write('flue add <name>\n\n');
+	stream.write('Available connectors:\n');
+	const rows = CONNECTORS.map((c) => ({
+		command: `flue add ${c.slug}`,
+		category: c.category,
+		website: c.website,
+	}));
+	stream.write(renderConnectorTable(rows));
+	stream.write('\n');
+	const hint = categoryRootHint();
+	if (hint) stream.write(hint + '\n');
+}
+
+function printUnknownConnector(name: string, stream: NodeJS.WriteStream) {
+	stream.write(`Connector "${name}" not found.\n\n`);
+	stream.write('Available connectors:\n');
+	const rows = CONNECTORS.map((c) => ({
+		command: `flue add ${c.slug}`,
+		category: c.category,
+		website: c.website,
+	}));
+	stream.write(renderConnectorTable(rows));
+	stream.write('\n');
+	if (CATEGORY_ROOTS.length > 0) {
+		stream.write('\nTo build one from scratch with your coding agent:\n');
+		for (const root of CATEGORY_ROOTS) {
+			stream.write(`  flue add --category ${root.category}\n`);
+		}
+	}
+}
+
+async function fetchConnectorMarkdown(slug: string): Promise<{ body: string } | { notFound: true }> {
+	const url = registryUrlFor(slug);
+	let res: Response;
+	try {
+		res = await fetch(url);
+	} catch (err) {
+		console.error(
+			`[flue] Failed to reach the connector registry at ${url}.\n` +
+				`  ${err instanceof Error ? err.message : String(err)}`,
+		);
+		process.exit(1);
+	}
+	if (res.status === 404) return { notFound: true };
+	if (!res.ok) {
+		console.error(`[flue] Connector registry returned HTTP ${res.status} for ${url}.`);
+		process.exit(1);
+	}
+	return { body: await res.text() };
+}
+
+function printHumanInstructions(displaySlug: string, isCategory: boolean) {
+	// Goes to stderr so piping `flue add daytona | <agent>` still produces a
+	// clean stdout in agent-mode. The human-mode message is purely
+	// informational; agents detect themselves and read stdout.
+	const cmd = isCategory ? `flue add --category ${displaySlug}` : `flue add ${displaySlug}`;
+	const stream = process.stderr;
+	stream.write(`${cmd}\n\n`);
+	stream.write('To install this connector, pipe it to your coding agent:\n\n');
+	stream.write(`  ${cmd} | claude\n`);
+	stream.write(`  ${cmd} | opencode\n`);
+	stream.write(`  ${cmd} | codex\n`);
+	stream.write(`  ${cmd} | cursor-agent\n\n`);
+	stream.write('Or paste this prompt into any agent:\n\n');
+	stream.write(`  Run ${cmd} and follow the instructions.\n`);
+}
+
+async function addCommand(args: AddArgs) {
+	// No name, no category → print local list, no network.
+	if (!args.name && !args.category) {
+		printListing(process.stderr);
+		return;
+	}
+
+	if (args.category) {
+		// `flue add --category sandbox` → fetch <category>.md (the category root)
+		const root = CATEGORY_ROOTS.find((r) => r.category === args.category);
+		if (!root) {
+			console.error(
+				`[flue] Unknown category "${args.category}". Known categories: ${
+					CATEGORY_ROOTS.map((r) => r.category).join(', ') || '(none)'
+				}`,
+			);
+			process.exit(1);
+		}
+		const result = await fetchConnectorMarkdown(args.category);
+		if ('notFound' in result) {
+			console.error(
+				`[flue] The connector registry did not have markdown for category "${args.category}". ` +
+					`Your installed CLI may be out of sync with the registry — try updating @flue/cli.`,
+			);
+			process.exit(1);
+		}
+
+		const isAgentMode =
+			args.print || (await determineAgent().catch(() => ({ isAgent: false }))).isAgent === true;
+		if (isAgentMode) {
+			process.stdout.write(result.body);
+			if (!result.body.endsWith('\n')) process.stdout.write('\n');
+			return;
+		}
+		printHumanInstructions(args.category, true);
+		return;
+	}
+
+	// Positional name path.
+	const known = CONNECTORS.find((c) => c.slug === args.name);
+	if (!known) {
+		printUnknownConnector(args.name, process.stderr);
+		process.exit(1);
+	}
+
+	const result = await fetchConnectorMarkdown(args.name);
+	if ('notFound' in result) {
+		console.error(
+			`[flue] The connector registry did not have markdown for "${args.name}". ` +
+				`Your installed CLI may be out of sync with the registry — try updating @flue/cli.`,
+		);
+		process.exit(1);
+	}
+
+	const isAgentMode =
+		args.print || (await determineAgent().catch(() => ({ isAgent: false }))).isAgent === true;
+	if (isAgentMode) {
+		process.stdout.write(result.body);
+		if (!result.body.endsWith('\n')) process.stdout.write('\n');
+		return;
+	}
+	printHumanInstructions(args.name, false);
+}
+
 // ─── Entry Point ────────────────────────────────────────────────────────────
 
 const args = parseArgs(process.argv.slice(2));
@@ -747,6 +985,8 @@ if (args.command === 'build') {
 	buildCommand(args);
 } else if (args.command === 'dev') {
 	devCommand(args);
+} else if (args.command === 'add') {
+	addCommand(args);
 } else {
 	run(args);
 }

@@ -8,7 +8,7 @@
  * @example
  * ```typescript
  * import { Daytona } from '@daytona/sdk';
- * import { daytona } from '@flue/connectors/daytona';
+ * import { daytona } from './connectors/daytona';
  *
  * const client = new Daytona({ apiKey: process.env.DAYTONA_API_KEY });
  * const sandbox = await client.create({ image: 'ubuntu:latest' });
