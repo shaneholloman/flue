@@ -13,6 +13,7 @@
 			"cache": false
 		},
 		"build": {},
+		"//#check:lint": {},
 		"check:types": {
 			"dependsOn": ["^check:types"],
 			"outputLogs": "errors-only"
