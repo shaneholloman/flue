@@ -19,7 +19,6 @@ Flue isn't another AI SDK. It's a proper runtime-agnostic framework — think As
 | [`@flue/sdk`](packages/sdk)   | Core SDK: build system, sessions, tools |
 | [`@flue/cli`](packages/cli)   | CLI for building and running agents     |
 
-
 ## Examples
 
 ### Quickstart
