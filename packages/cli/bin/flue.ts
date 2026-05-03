@@ -897,12 +897,12 @@ function printHumanInstructions(args: AddArgs) {
 	const stream = process.stderr;
 	stream.write(`${cmd}\n\n`);
 	stream.write('To install this connector, pipe it to your coding agent:\n\n');
-	stream.write(`  ${cmd} | claude\n`);
-	stream.write(`  ${cmd} | opencode\n`);
-	stream.write(`  ${cmd} | codex\n`);
-	stream.write(`  ${cmd} | cursor-agent\n\n`);
+	stream.write(`  ${cmd} --print | claude\n`);
+	stream.write(`  ${cmd} --print | opencode\n`);
+	stream.write(`  ${cmd} --print | codex\n`);
+	stream.write(`  ${cmd} --print | cursor-agent\n\n`);
 	stream.write('Or paste this prompt into any agent:\n\n');
-	stream.write(`  Run ${cmd} and follow the instructions.\n`);
+	stream.write(`  Run "${cmd} --print" and follow the instructions.\n`);
 }
 
 async function addCommand(args: AddArgs) {
