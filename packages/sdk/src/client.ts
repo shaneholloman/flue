@@ -10,6 +10,7 @@ import type {
 	FlueContext,
 	FlueEventCallback,
 	FlueAgent,
+	ProvidersConfig,
 	SandboxFactory,
 	SessionEnv,
 	SessionStore,
@@ -66,12 +67,13 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 				const env = options?.cwd ? createCwdSessionEnv(baseEnv, options.cwd) : baseEnv;
 				const store: SessionStore = options?.persist ?? config.defaultStore;
 				const localContext = await discoverSessionContext(env);
+				const providers = mergeProvidersConfig(config.agentConfig.providers, options?.providers);
 
 				// Agent-level model override. Per-call `model` on prompt()/skill() still wins
 				// because resolveModelForCall() applies it on top of this default.
 				const agentModel =
 					options?.model && config.agentConfig.resolveModel
-						? config.agentConfig.resolveModel(options.model)
+						? config.agentConfig.resolveModel(options.model, providers)
 						: config.agentConfig.model;
 
 				const agentConfig: AgentConfig = {
@@ -80,6 +82,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					skills: localContext.skills,
 					model: agentModel,
 					role: options?.role ?? config.agentConfig.role,
+					providers,
 				};
 
 				return new AgentClient(
@@ -166,6 +169,28 @@ async function resolveSessionEnv(
 	throw new Error('[flue] Invalid sandbox option passed to init().');
 }
 
+function mergeProvidersConfig(
+	base: ProvidersConfig | undefined,
+	settings: ProvidersConfig | undefined,
+): ProvidersConfig | undefined {
+	if (!base) return settings;
+	if (!settings) return base;
+
+	const merged: ProvidersConfig = { ...base };
+	for (const [provider, config] of Object.entries(settings)) {
+		const previous = merged[provider];
+		merged[provider] = {
+			...previous,
+			...config,
+			headers:
+				previous?.headers || config.headers
+					? { ...(previous?.headers ?? {}), ...(config.headers ?? {}) }
+					: undefined,
+		};
+	}
+	return merged;
+}
+
 // ─── @flue/sdk/client public API ────────────────────────────────────────────
 
 export { Type } from '@mariozechner/pi-ai';
@@ -190,6 +215,8 @@ export type {
 	BashLike,
 	SessionEnv,
 	SessionOptions,
+	ProviderSettings,
+	ProvidersConfig,
 	PromptOptions,
 	PromptResponse,
 	SkillOptions,
