@@ -58,22 +58,7 @@ import { createSandboxSessionEnv } from '@flue/sdk/sandbox';
 import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/sdk/sandbox';
 import type { Sandbox as VercelSandbox } from '@vercel/sandbox';
 
-const DEFAULT_VERCEL_CWD = '/vercel/sandbox';
-
-function isAbortError(err: unknown, signal: AbortSignal): boolean {
-	if (err === signal.reason) return true;
-	return err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError');
-}
-
-// ─── Options ────────────────────────────────────────────────────────────────
-
 export interface VercelConnectorOptions {
-	/**
-	 * Working directory to use when Flue does not receive an explicit cwd.
-	 * Vercel sandboxes default to /vercel/sandbox.
-	 */
-	cwd?: string;
-
 	/**
 	 * Cleanup behavior when the session is destroyed.
 	 *
@@ -84,9 +69,9 @@ export interface VercelConnectorOptions {
 	cleanup?: boolean | (() => Promise<void>);
 }
 
-// ─── VercelSandboxApi ───────────────────────────────────────────────────────
-
-/** Implements SandboxApi by wrapping the Vercel Sandbox SDK. */
+/**
+ * Implements SandboxApi by wrapping the Vercel Sandbox SDK.
+ */
 class VercelSandboxApi implements SandboxApi {
 	constructor(private sandbox: VercelSandbox) {}
 
@@ -134,10 +119,10 @@ class VercelSandboxApi implements SandboxApi {
 		command: string,
 		options?: { cwd?: string; env?: Record<string, string>; timeout?: number },
 	): Promise<{ stdout: string; stderr: string; exitCode: number }> {
-		let signal: AbortSignal | undefined;
-		if (typeof options?.timeout === 'number') {
-			signal = AbortSignal.timeout(options.timeout * 1000);
-		}
+		const signal =
+			typeof options?.timeout === 'number'
+				? AbortSignal.timeout(options.timeout * 1000)
+				: undefined;
 
 		try {
 			const response = await this.sandbox.runCommand({
@@ -147,15 +132,17 @@ class VercelSandboxApi implements SandboxApi {
 				env: options?.env,
 				signal,
 			});
-
 			const [stdout, stderr] = await Promise.all([
 				response.stdout({ signal }),
 				response.stderr({ signal }),
 			]);
-
 			return { stdout, stderr, exitCode: response.exitCode };
 		} catch (err) {
-			if (signal?.aborted && isAbortError(err, signal)) {
+			const aborted =
+				signal?.aborted &&
+				(err === signal.reason ||
+					(err instanceof Error && (err.name === 'AbortError' || err.name === 'TimeoutError')));
+			if (aborted) {
 				return {
 					stdout: '',
 					stderr: `[flue:vercel] Command timed out after ${options?.timeout} seconds.`,
@@ -167,16 +154,10 @@ class VercelSandboxApi implements SandboxApi {
 	}
 }
 
-// ─── Connector ──────────────────────────────────────────────────────────────
-
 /**
  * Create a Flue sandbox factory from an initialized Vercel Sandbox.
- *
- * The user creates the sandbox using the Vercel SDK directly, then
- * passes it here. Flue wraps it into a SessionEnv for agent use.
- *
- * @param sandbox - An initialized Vercel Sandbox instance.
- * @param options - Connector options (cwd, cleanup behavior).
+ * The user owns the sandbox lifecycle; Flue wraps it into a SessionEnv
+ * for agent use.
  */
 export function vercel(
 	sandbox: VercelSandbox,
@@ -184,9 +165,10 @@ export function vercel(
 ): SandboxFactory {
 	return {
 		async createSessionEnv({ cwd }: { id: string; cwd?: string }): Promise<SessionEnv> {
-			const sandboxCwd = cwd ?? options?.cwd ?? DEFAULT_VERCEL_CWD;
+			const sandboxCwd = cwd ?? '/vercel/sandbox';
 			const api = new VercelSandboxApi(sandbox);
 
+			// Resolve cleanup function
 			let cleanupFn: (() => Promise<void>) | undefined;
 			if (options?.cleanup === true) {
 				cleanupFn = async () => {

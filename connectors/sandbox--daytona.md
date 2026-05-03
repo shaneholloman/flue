@@ -59,8 +59,6 @@ import { createSandboxSessionEnv } from '@flue/sdk/sandbox';
 import type { SandboxApi, SandboxFactory, SessionEnv, FileStat } from '@flue/sdk/sandbox';
 import type { Sandbox as DaytonaSandbox } from '@daytona/sdk';
 
-// ─── Options ────────────────────────────────────────────────────────────────
-
 export interface DaytonaConnectorOptions {
 	/**
 	 * Cleanup behavior when the session is destroyed.
@@ -71,8 +69,6 @@ export interface DaytonaConnectorOptions {
 	 */
 	cleanup?: boolean | (() => Promise<void>);
 }
-
-// ─── DaytonaSandboxApi ──────────────────────────────────────────────────────
 
 /**
  * Implements SandboxApi by wrapping Daytona's TypeScript SDK.
@@ -151,16 +147,10 @@ class DaytonaSandboxApi implements SandboxApi {
 	}
 }
 
-// ─── Connector ──────────────────────────────────────────────────────────────
-
 /**
  * Create a Flue sandbox factory from an initialized Daytona sandbox.
- *
- * The user creates the sandbox using the Daytona SDK directly, then
- * passes it here. Flue wraps it into a SessionEnv for agent use.
- *
- * @param sandbox - An initialized Daytona Sandbox instance.
- * @param options - Connector options (cleanup behavior, etc.).
+ * The user owns the sandbox lifecycle; Flue wraps it into a SessionEnv
+ * for agent use.
  */
 export function daytona(
 	sandbox: DaytonaSandbox,
