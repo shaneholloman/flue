@@ -407,11 +407,11 @@ export class Session implements FlueSession {
 		let model: Model<any> | undefined = this.config.model;
 
 		const roleModel = resolveRoleModel(this.config.roles, roleName);
-		if (roleModel && this.config.resolveModel) {
+		if (roleModel) {
 			model = this.config.resolveModel(roleModel, this.config.providers);
 		}
 
-		if (promptModel && this.config.resolveModel) {
+		if (promptModel) {
 			model = this.config.resolveModel(promptModel, this.config.providers);
 		}
 
@@ -427,8 +427,7 @@ export class Session implements FlueSession {
 		if (model) return model;
 		throw new Error(
 			`[flue] No model configured for ${callSite}. ` +
-				`Pass \`{ model: "provider/model-id" }\` to \`init()\` for an agent-wide default, ` +
-				`or to this prompt()/skill() call for a one-off override.`,
+				`Pass \`{ model: "provider/model-id" }\` to this call or configure a role model.`,
 		);
 	}
 

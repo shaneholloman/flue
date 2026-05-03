@@ -54,34 +54,40 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 		},
 
 		async init(options?: AgentInit): Promise<FlueAgent> {
-			const id = options?.id ?? config.id;
+			if (!options || !('model' in options)) {
+				throw new Error(
+					'[flue] init() requires a model. Pass { model: "provider/model-id" } or { model: false }.',
+				);
+			}
+			if (options.model !== false && typeof options.model !== 'string') {
+				throw new Error('[flue] init({ model }) must be a model string or false.');
+			}
+
+			const id = options.id ?? config.id;
 			if (initializedAgentIds.has(id)) {
 				throw new Error(`[flue] init() has already been called for agent "${id}" in this request.`);
 			}
 			initializedAgentIds.add(id);
 
 			try {
-				assertRoleExists(config.agentConfig.roles, options?.role);
-				const sandbox = options?.sandbox;
-				const baseEnv = await resolveSessionEnv(id, sandbox, config, options?.cwd);
-				const env = options?.cwd ? createCwdSessionEnv(baseEnv, options.cwd) : baseEnv;
-				const store: SessionStore = options?.persist ?? config.defaultStore;
+				assertRoleExists(config.agentConfig.roles, options.role);
+				const sandbox = options.sandbox;
+				const baseEnv = await resolveSessionEnv(id, sandbox, config, options.cwd);
+				const env = options.cwd ? createCwdSessionEnv(baseEnv, options.cwd) : baseEnv;
+				const store: SessionStore = options.persist ?? config.defaultStore;
 				const localContext = await discoverSessionContext(env);
-				const providers = mergeProvidersConfig(config.agentConfig.providers, options?.providers);
+				const providers = mergeProvidersConfig(config.agentConfig.providers, options.providers);
 
 				// Agent-level model override. Per-call `model` on prompt()/skill() still wins
 				// because resolveModelForCall() applies it on top of this default.
-				const agentModel =
-					options?.model && config.agentConfig.resolveModel
-						? config.agentConfig.resolveModel(options.model, providers)
-						: config.agentConfig.model;
+				const agentModel = config.agentConfig.resolveModel(options.model, providers);
 
 				const agentConfig: AgentConfig = {
 					...config.agentConfig,
 					systemPrompt: localContext.systemPrompt,
 					skills: localContext.skills,
 					model: agentModel,
-					role: options?.role ?? config.agentConfig.role,
+					role: options.role ?? config.agentConfig.role,
 					providers,
 				};
 
@@ -91,8 +97,8 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					env,
 					store,
 					currentEventCallback,
-					options?.commands,
-					options?.tools,
+					options.commands,
+					options.tools,
 				);
 			} catch (error) {
 				initializedAgentIds.delete(id);
@@ -204,6 +210,7 @@ export type {
 	FlueSessions,
 	FlueSession,
 	AgentInit,
+	ModelConfig,
 	FlueEvent,
 	FlueEventCallback,
 	SessionData,

@@ -9,7 +9,7 @@
  * User agent code should never import from here.
  */
 import { getModel, type Api, type Model } from '@mariozechner/pi-ai';
-import type { ProviderSettings, ProvidersConfig } from './types.ts';
+import type { ModelConfig, ProviderSettings, ProvidersConfig } from './types.ts';
 
 export { createFlueContext } from './client.ts';
 export type { FlueContextConfig, FlueContextInternal } from './client.ts';
@@ -40,9 +40,12 @@ export {
  * dependency-free apart from `@flue/sdk/*`.
  */
 export function resolveModel(
-	modelString: string,
+	model: ModelConfig | undefined,
 	providers?: ProvidersConfig,
-): ReturnType<typeof getModel> {
+): ReturnType<typeof getModel> | undefined {
+	if (model === false || model === undefined) return undefined;
+
+	const modelString = model;
 	const slash = modelString.indexOf('/');
 	if (slash === -1) {
 		throw new Error(
