@@ -43,13 +43,14 @@ export class CloudflarePlugin implements BuildPlugin {
 	async generateEntryPoint(ctx: BuildContext): Promise<string> {
 		const { agents, roles } = ctx;
 		const rolesJson = JSON.stringify(roles);
+		validateCloudflareAgentNames(ctx);
 
 		const webhookAgents = agents.filter((a) => a.triggers.webhook);
 
 		// Generate import statements for all agent handlers
 		const agentImports = agents
-			.map((a) => {
-				const varName = agentVarName(a.name);
+			.map((a, index) => {
+				const varName = agentVarName(a.name, index);
 				const filePath = a.filePath.replace(/\\/g, '/');
 				return `import ${varName} from '${filePath}';`;
 			})
@@ -71,7 +72,7 @@ export class CloudflarePlugin implements BuildPlugin {
 		const agentClasses = webhookAgents
 			.map((a) => {
 				const className = agentClassName(a.name);
-				const handlerVar = agentVarName(a.name);
+				const handlerVar = agentVarName(a.name, agents.indexOf(a));
 				return `export class ${className} extends Agent {
   async onRequest(request) {
     return handleAgentRequest(request, this, ${JSON.stringify(a.name)}, ${handlerVar});
@@ -593,8 +594,29 @@ export default {
 	}
 }
 
-function agentVarName(name: string): string {
-	return 'handler_' + name.replace(/[^a-zA-Z0-9]/g, '_');
+function agentVarName(name: string, index: number): string {
+	const readableName = name.replace(/[^a-zA-Z0-9]/g, '_').replace(/^_+|_+$/g, '') || 'agent';
+	return `handler_${readableName}_${index}`;
+}
+
+const CLOUDFLARE_AGENT_NAME_PATTERN = /^[a-z][a-z0-9]*(?:-[a-z0-9]+)*$/;
+
+function validateCloudflareAgentNames(ctx: BuildContext): void {
+	const invalidAgents = ctx.agents.filter((agent) => !CLOUDFLARE_AGENT_NAME_PATTERN.test(agent.name));
+	if (invalidAgents.length === 0) return;
+
+	const invalidList = invalidAgents
+		.map((agent) => {
+			const relPath = path.relative(ctx.workspaceDir, agent.filePath);
+			return `${relPath} (${agent.name})`;
+		})
+		.join(', ');
+
+	throw new Error(
+		`[flue] Cloudflare target requires agent filenames to use lower-kebab-case so ` +
+			`Durable Object bindings route correctly. Invalid agent file(s): ${invalidList}. ` +
+			`Rename them to match ${CLOUDFLARE_AGENT_NAME_PATTERN}.`,
+	);
 }
 
 /**

@@ -18,8 +18,8 @@ export class NodePlugin implements BuildPlugin {
 		// CLI's `flue run` can invoke them in local mode. The webhookAgents
 		// set below gates which are reachable over public HTTP when deployed.
 		const agentImports = agents
-			.map((a) => {
-				const varName = agentVarName(a.name);
+			.map((a, index) => {
+				const varName = agentVarName(a.name, index);
 				const filePath = a.filePath.replace(/\\/g, '/');
 				return `import ${varName} from '${filePath}';`;
 			})
@@ -27,7 +27,7 @@ export class NodePlugin implements BuildPlugin {
 
 		// Build the handler map — includes ALL agents, not just webhook ones.
 		const handlerMapEntries = agents
-			.map((a) => `  ${JSON.stringify(a.name)}: ${agentVarName(a.name)},`)
+			.map((a, index) => `  ${JSON.stringify(a.name)}: ${agentVarName(a.name, index)},`)
 			.join('\n');
 
 		// Build webhook agent names set — used to gate the public HTTP route.
@@ -287,6 +287,7 @@ process.on('SIGTERM', () => { server.close(); process.exit(0); });
 	}
 }
 
-function agentVarName(name: string): string {
-	return 'handler_' + name.replace(/[^a-zA-Z0-9]/g, '_');
+function agentVarName(name: string, index: number): string {
+	const readableName = name.replace(/[^a-zA-Z0-9]/g, '_').replace(/^_+|_+$/g, '') || 'agent';
+	return `handler_${readableName}_${index}`;
 }
