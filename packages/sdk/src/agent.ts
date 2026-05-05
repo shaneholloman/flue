@@ -297,9 +297,9 @@ function createGrepTool(env: SessionEnv): AgentTool<any> {
 			throwIfAborted(signal);
 
 			const searchPath = params.path || '.';
-			let cmd = `grep -rn "${escapeShellArg(params.pattern)}" ${escapeShellArg(searchPath)}`;
+			let cmd = `grep -rn ${shellQuote(params.pattern)} ${shellQuote(searchPath)}`;
 			if (params.include) {
-				cmd = `grep -rn --include="${escapeShellArg(params.include)}" "${escapeShellArg(params.pattern)}" ${escapeShellArg(searchPath)}`;
+				cmd = `grep -rn --include=${shellQuote(params.include)} ${shellQuote(params.pattern)} ${shellQuote(searchPath)}`;
 			}
 
 			const result = await env.exec(cmd);
@@ -339,16 +339,17 @@ function createGlobTool(env: SessionEnv): AgentTool<any> {
 	return {
 		name: 'glob',
 		label: 'Find Files',
-		description: 'Find files by glob pattern. Returns matching file paths.',
+		description:
+			'Find files by filename pattern using shell find -name semantics. Returns matching file paths.',
 		parameters: Type.Object({
-			pattern: Type.String({ description: 'Glob pattern, e.g. "**/*.ts"' }),
+			pattern: Type.String({ description: 'Filename pattern, e.g. "*.ts"' }),
 			path: Type.Optional(Type.String({ description: 'Directory to search in (default: .)' })),
 		}),
 		async execute(_toolCallId, params: { pattern: string; path?: string }, signal?) {
 			throwIfAborted(signal);
 
 			const searchPath = params.path || '.';
-			const cmd = `find ${escapeShellArg(searchPath)} -type f -name "${escapeShellArg(params.pattern)}" 2>/dev/null | head -${MAX_GLOB_RESULTS}`;
+			const cmd = `find ${shellQuote(searchPath)} -type f -name ${shellQuote(params.pattern)} 2>/dev/null | head -${MAX_GLOB_RESULTS}`;
 			const result = await env.exec(cmd);
 
 			if (result.exitCode !== 0 && !result.stdout.trim()) {
@@ -359,6 +360,7 @@ function createGlobTool(env: SessionEnv): AgentTool<any> {
 			}
 
 			const paths = result.stdout.trim().split('\n').filter(Boolean);
+
 			if (paths.length === 0) {
 				return {
 					content: [{ type: 'text', text: 'No files found matching pattern.' }],
@@ -390,8 +392,8 @@ function countOccurrences(str: string, substr: string): number {
 	return count;
 }
 
-function escapeShellArg(arg: string): string {
-	return arg.replace(/\\/g, '\\\\').replace(/"/g, '\\"').replace(/\$/g, '\\$').replace(/`/g, '\\`');
+function shellQuote(arg: string): string {
+	return `'${arg.replace(/'/g, `'\\''`)}'`;
 }
 
 function truncateHead(
