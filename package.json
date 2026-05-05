@@ -29,5 +29,10 @@
 	},
 	"dependencies": {
 		"just-bash": "^2.14.2"
+	},
+	"pnpm": {
+		"overrides": {
+			"typescript": "5.9.3"
+		}
 	}
 }

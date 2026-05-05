@@ -464,7 +464,7 @@ export type FlueEventCallback = (event: FlueEvent) => void;
 export interface AgentInfo {
 	name: string;
 	filePath: string;
-	triggers: { webhook?: boolean; cron?: string };
+	triggers: { webhook?: boolean };
 }
 
 export interface BuildContext {

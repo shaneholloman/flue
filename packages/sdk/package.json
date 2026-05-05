@@ -50,6 +50,7 @@
 		"hono": "^4.7.0",
 		"just-bash": "^2.14.2",
 		"package-up": "^5.0.0",
+		"typescript": "^5.9.2",
 		"valibot": "^1.0.0"
 	},
 	"devDependencies": {

@@ -886,7 +886,7 @@ async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolea
  * Best-effort — silently returns null if anything goes wrong.
  */
 function pickExampleAgentName(outputDir: string, workspaceDir: string): string | null {
-	type ManifestEntry = { name: string; triggers?: { webhook?: boolean; cron?: string } };
+	type ManifestEntry = { name: string; triggers?: { webhook?: boolean } };
 	try {
 		const manifestPath = path.join(outputDir, 'dist', 'manifest.json');
 		if (fs.existsSync(manifestPath)) {

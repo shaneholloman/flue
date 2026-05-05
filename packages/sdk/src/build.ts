@@ -2,6 +2,7 @@ import * as esbuild from 'esbuild';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { packageUpSync } from 'package-up';
+import { parseAgentFile } from './agent-parser.ts';
 import { parseFrontmatterFile } from './context.ts';
 import { CloudflarePlugin } from './build-plugin-cloudflare.ts';
 import { NodePlugin } from './build-plugin-node.ts';
@@ -52,8 +53,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 	// locally (see FLUE_MODE=local in the Node plugin). This supports the
 	// "CI-only agent" pattern documented in the README.
 	const webhookAgents = agents.filter((a) => a.triggers.webhook);
-	const cronAgents = agents.filter((a) => a.triggers.cron);
-	const triggerlessAgents = agents.filter((a) => !a.triggers.webhook && !a.triggers.cron);
+	const triggerlessAgents = agents.filter((a) => !a.triggers.webhook);
 
 	console.log(
 		`[flue] Found ${Object.keys(roles).length} role(s): ${Object.keys(roles).join(', ') || '(none)'}`,
@@ -61,11 +61,6 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 	console.log(`[flue] Found ${agents.length} agent(s): ${agents.map((a) => a.name).join(', ')}`);
 	if (webhookAgents.length > 0) {
 		console.log(`[flue] Webhook agents: ${webhookAgents.map((a) => a.name).join(', ')}`);
-	}
-	if (cronAgents.length > 0) {
-		console.log(
-			`[flue] Cron agents (manifest only): ${cronAgents.map((a) => `${a.name} (${a.triggers.cron})`).join(', ')}`,
-		);
 	}
 	if (triggerlessAgents.length > 0) {
 		console.log(
@@ -266,33 +261,13 @@ function discoverAgents(workspaceRoot: string): AgentInfo[] {
 		.filter((f) => /\.(ts|js|mts|mjs)$/.test(f))
 		.map((f) => {
 			const filePath = path.join(agentsDir, f);
-			const triggers = parseTriggers(filePath);
+			const { triggers } = parseAgentFile(filePath);
 			return {
 				name: f.replace(/\.(ts|js|mts|mjs)$/, ''),
 				filePath,
 				triggers,
 			};
 		});
-}
-
-/** Extract trigger config via regex. Only triggers are parsed at build time (needed for routing). */
-function parseTriggers(filePath: string): { webhook?: boolean; cron?: string } {
-	const source = fs.readFileSync(filePath, 'utf-8');
-	const result: { webhook?: boolean; cron?: string } = {};
-
-	const triggersExportMatch = source.match(/export\s+const\s+triggers\s*=\s*\{([^}]*)\}/);
-	if (!triggersExportMatch) return result;
-
-	const triggersBlock = triggersExportMatch[1] ?? '';
-	if (/webhook\s*:\s*true/.test(triggersBlock)) {
-		result.webhook = true;
-	}
-	const cronMatch = triggersBlock.match(/cron\s*:\s*['"]([^'"]+)['"]/);
-	if (cronMatch?.[1]) {
-		result.cron = cronMatch[1];
-	}
-
-	return result;
 }
 
 /** Externalize user's direct deps (bare name + subpath wildcard). */
