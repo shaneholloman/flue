@@ -265,13 +265,15 @@ function formatBashResult(
 ): AgentToolResult<any> {
 	const combined = (result.stdout + (result.stderr ? '\n' + result.stderr : '')).trim();
 	const { text: output } = truncateTail(combined, MAX_READ_LINES, MAX_READ_BYTES);
-
-	if (result.exitCode !== 0) {
-		throw new Error(`${output}\n\nCommand exited with code ${result.exitCode}`);
-	}
+	const exitLine = `Command exited with code ${result.exitCode}`;
 
 	return {
-		content: [{ type: 'text', text: output || '(no output)' }],
+		content: [
+			{
+				type: 'text',
+				text: result.exitCode === 0 ? output || '(no output)' : `${output || '(no output)'}\n\n${exitLine}`,
+			},
+		],
 		details: { command, exitCode: result.exitCode },
 	};
 }
