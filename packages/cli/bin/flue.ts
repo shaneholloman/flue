@@ -586,6 +586,8 @@ async function consumeSSE(
 
 // ─── Server Management ─────────────────────────────────────────────────────
 
+let serverProcess: ChildProcess | undefined;
+
 function startServer(
 	serverPath: string,
 	port: number,
@@ -625,10 +627,11 @@ async function waitForServer(port: number, timeoutMs = 30000): Promise<boolean> 
 	return false;
 }
 
-function stopServer(child: ChildProcess) {
-	if (!child.killed) {
-		child.kill('SIGTERM');
+function stopServer() {
+	if (serverProcess && !serverProcess.killed) {
+		serverProcess.kill('SIGTERM');
 	}
+	serverProcess = undefined;
 }
 
 // ─── Find Available Port ────────────────────────────────────────────────────
@@ -718,7 +721,7 @@ async function run(args: RunArgs) {
 
 	// 3. Start server
 	console.error(`[flue] Starting server on port ${port}...`);
-	const child = startServer(serverPath, port, fileEnv, outputDir);
+	serverProcess = startServer(serverPath, port, fileEnv, outputDir);
 
 	// Pipe server stdout/stderr for visibility
 	const pipeServerOutput = (data: Buffer) => {
@@ -733,14 +736,14 @@ async function run(args: RunArgs) {
 			if (line.trim()) console.error(line);
 		}
 	};
-	child.stdout?.on('data', pipeServerOutput);
-	child.stderr?.on('data', pipeServerOutput);
+	serverProcess.stdout?.on('data', pipeServerOutput);
+	serverProcess.stderr?.on('data', pipeServerOutput);
 
 	// 4. Wait for server to be ready
 	const ready = await waitForServer(port);
 	if (!ready) {
 		console.error('[flue] Server did not become ready within 30s');
-		stopServer(child);
+		stopServer();
 		process.exit(1);
 	}
 	console.error(`[flue] Server ready. Running agent: ${args.agent}`);
@@ -754,7 +757,7 @@ async function run(args: RunArgs) {
 			console.error(
 				`[flue] Agent "${args.agent}" not found. Available agents: ${agentNames.join(', ') || '(none)'}`,
 			);
-			stopServer(child);
+			stopServer();
 			process.exit(1);
 		}
 	} catch {
@@ -778,7 +781,7 @@ async function run(args: RunArgs) {
 	// 7. Print result and exit
 	if (outcome.error) {
 		console.error(`[flue] Agent error: ${outcome.error}`);
-		stopServer(child);
+		stopServer();
 		process.exit(1);
 	}
 
@@ -788,7 +791,7 @@ async function run(args: RunArgs) {
 	}
 
 	console.error('[flue] Done.');
-	stopServer(child);
+	stopServer();
 }
 
 // ─── `flue add` ─────────────────────────────────────────────────────────────
@@ -992,16 +995,13 @@ async function addCommand(args: AddArgs) {
 
 const args = parseArgs(process.argv.slice(2));
 
-// Signal handling
-let serverProcess: ChildProcess | undefined;
-
 process.on('SIGINT', () => {
-	if (serverProcess) stopServer(serverProcess);
+	stopServer();
 	process.exit(130);
 });
 
 process.on('SIGTERM', () => {
-	if (serverProcess) stopServer(serverProcess);
+	stopServer();
 	process.exit(143);
 });
 
