@@ -777,7 +777,11 @@ export class Session implements FlueSession {
 				await this.save();
 			}
 
-			await this.runCompaction('overflow', true);
+			try {
+				await this.runCompaction('overflow', true);
+			} finally {
+				this.overflowRecoveryAttempted = false;
+			}
 			return;
 		}
 		if (assistantMessage.stopReason === 'error') return;
