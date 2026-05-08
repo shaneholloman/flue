@@ -6,7 +6,8 @@ Agent framework where agents are directories compiled into deployable server art
 
 - `packages/sdk/` — Core SDK (`@flue/sdk`). Build system, session management, agent harness, tools.
 - `packages/cli/` — CLI (`@flue/cli`). `flue run` command.
-- `examples/hello-world/` — Test workspace with 7 example agents.
+- `examples/hello-world/` — Test workspace with example agents covering the SDK's surfaces.
+- `examples/cloudflare/` — Test workspace for Cloudflare-specific features (Workers AI binding, etc.).
 
 ## Building
 
@@ -62,6 +63,21 @@ This builds the workspace, starts a temporary server, invokes the agent via SSE,
 
 ```
 pnpm run check:types    # in packages/sdk/
+```
+
+## Models
+
+`provider/model-id` strings; providers come from pi-ai's registry. API keys via env (`ANTHROPIC_API_KEY`, etc.) or `init({ providers: { ... } })`.
+
+```ts
+init({ model: 'anthropic/claude-sonnet-4-6' })
+init({ model: 'openai/gpt-4.1-mini' })
+```
+
+`cloudflare/...` routes through `env.AI.run()` on the Cloudflare target — no API keys, just `"ai": { "binding": "AI" }` in `wrangler.jsonc`. Errors clearly on `--target node`.
+
+```ts
+init({ model: 'cloudflare/@cf/moonshotai/kimi-k2.6' })
 ```
 
 ## Architecture

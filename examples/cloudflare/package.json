@@ -1,0 +1,9 @@
+{
+	"name": "cloudflare",
+	"private": true,
+	"type": "module",
+	"dependencies": {
+		"@flue/sdk": "workspace:*",
+		"agents": "*"
+	}
+}

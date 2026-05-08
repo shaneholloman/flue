@@ -1,0 +1,12 @@
+{
+	// User-owned wrangler config for this Flue app. Flue reads this file,
+	// merges its own contributions (the `main` entry + per-agent DO bindings
+	// and migration), and writes the composed config to dist/wrangler.jsonc.
+	"$schema": "https://workers.cloudflare.com/schema/wrangler.json",
+	"name": "cloudflare",
+	"compatibility_date": "2026-04-01",
+	"compatibility_flags": ["nodejs_compat"],
+	"ai": {
+		"binding": "AI"
+	},
+}

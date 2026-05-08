@@ -117,9 +117,17 @@ import {
   RouteNotFoundError,
   InvalidRequestError,
 } from '@flue/sdk/internal';
-import { runWithCloudflareContext, cfSandboxToSessionEnv } from '@flue/sdk/cloudflare';
+import {
+  runWithCloudflareContext,
+  cfSandboxToSessionEnv,
+  registerCloudflareAIBindingProvider,
+} from '@flue/sdk/cloudflare';
 
 ${agentImports}
+
+// Must run before any request handler — pi-ai's registry must know about the
+// binding API by the time agent code calls \`init({ model: 'cloudflare/...' })\`.
+registerCloudflareAIBindingProvider();
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 
