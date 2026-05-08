@@ -207,6 +207,11 @@ app.all('/agents/:name/:id', async (c) => {
         stream.writeSSE({ data: JSON.stringify(event), event: event.type, id: String(eventId++) }).catch(() => {});
       });
 
+      // Keep long-running, otherwise-idle SSE streams alive.
+      const heartbeat = setInterval(() => {
+        stream.write(': heartbeat\n\n').catch(() => {});
+      }, 25_000);
+
       try {
         const result = await handler(ctx);
         if (!isIdle) {
@@ -229,6 +234,7 @@ app.all('/agents/:name/:id', async (c) => {
           await stream.writeSSE({ data: JSON.stringify(idle), event: 'idle', id: String(eventId++) });
         }
       } finally {
+        clearInterval(heartbeat);
         ctx.setEventCallback(undefined);
       }
     });
@@ -261,7 +267,12 @@ app.onError((err) => toHttpResponse(err));
 
 const port = parseInt(process.env.PORT || '3000', 10);
 
-const server = serve({ fetch: app.fetch, port });
+const server = serve({
+  fetch: app.fetch,
+  port,
+  // SSE requests can outlive Node's default 300s request timeout.
+  serverOptions: { requestTimeout: 0 },
+});
 console.log('[flue] Server listening on http://localhost:' + port);
 if (isLocalMode) {
   console.log('[flue] Mode: local (all agents invokable, including trigger-less)');
