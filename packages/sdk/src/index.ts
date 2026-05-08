@@ -48,6 +48,7 @@ export {
 	type DevOptions,
 } from './dev.ts';
 export { createTools, BUILTIN_TOOL_NAMES } from './agent.ts';
+export { ResultUnavailableError } from './result.ts';
 
 // Note: createFlueContext, InMemorySessionStore, bashFactoryToSessionEnv, and the
 // FlueContextConfig/FlueContextInternal types are intentionally NOT re-exported

@@ -1,37 +1,33 @@
+import type { AgentTool } from '@mariozechner/pi-agent-core';
 import { toJsonSchema } from '@valibot/to-json-schema';
 import * as v from 'valibot';
 
 export const HEADLESS_PREAMBLE =
 	'You are running in headless mode with no human operator. Work autonomously — never ask questions, never wait for user input. Make your best judgment and proceed independently.';
 
-export function buildResultInstructions(schema: v.GenericSchema): string {
-	const jsonSchema = toJsonSchema(schema, { errorMode: 'ignore' });
-	const { $schema: _, ...schemaWithoutMeta } = jsonSchema;
+/**
+ * Names of the SDK-injected tools used to capture schema-typed results.
+ * Surfaced for diagnostics and logging; not part of the public API.
+ */
+export const FINISH_TOOL_NAME = 'finish';
+export const GIVE_UP_TOOL_NAME = 'give_up';
+
+/** Footer appended to user prompts/skill bodies when a `result` schema is set. */
+function buildResultFooter(): string {
 	return [
 		'',
-		'```json',
-		JSON.stringify(schemaWithoutMeta, null, 2),
-		'```',
-		'',
-		'Example: (Object)',
-		'---RESULT_START---',
-		'{"key": "value"}',
-		'---RESULT_END---',
-		'',
-		'Example: (String)',
-		'---RESULT_START---',
-		'Hello, world!',
-		'---RESULT_END---',
+		`When the task is complete, call the \`${FINISH_TOOL_NAME}\` tool with your final answer as its arguments. The arguments are validated against the required schema; if validation fails you will receive an error and may try again.`,
+		`If you determine that you cannot complete the task or cannot produce a result that conforms to the required schema, call the \`${GIVE_UP_TOOL_NAME}\` tool with a clear \`reason\`.`,
+		`Do not respond with the answer in plain text — only a successful \`${FINISH_TOOL_NAME}\` (or \`${GIVE_UP_TOOL_NAME}\`) call counts.`,
 	].join('\n');
 }
 
-/** Follow-up prompt used when the LLM forgets to include RESULT_START/RESULT_END delimiters. */
-export function buildResultExtractionPrompt(schema: v.GenericSchema): string {
+/** Follow-up prompt sent when the LLM ends a turn without calling `finish` or `give_up`. */
+export function buildResultFollowUpPrompt(): string {
 	return [
-		'Your task is complete. Now respond with ONLY your final result.',
-		'No explanation, no preamble — just the result in the following format, conforming to this schema:',
-		buildResultInstructions(schema),
-	].join('\n');
+		`You ended your turn without calling \`${FINISH_TOOL_NAME}\` or \`${GIVE_UP_TOOL_NAME}\`.`,
+		`Either call \`${FINISH_TOOL_NAME}\` with your final answer, or call \`${GIVE_UP_TOOL_NAME}\` with a reason if you cannot determine the answer.`,
+	].join(' ');
 }
 
 export function buildSkillPrompt(
@@ -46,10 +42,7 @@ export function buildSkillPrompt(
 	}
 
 	if (schema) {
-		parts.push(
-			'When complete, you MUST output your result between these exact delimiters conforming to this schema:',
-		);
-		parts.push(buildResultInstructions(schema));
+		parts.push(buildResultFooter());
 	}
 
 	return parts.join('\n');
@@ -59,70 +52,200 @@ export function buildPromptText(text: string, schema?: v.GenericSchema): string 
 	const parts: string[] = [HEADLESS_PREAMBLE, '', text];
 
 	if (schema) {
-		parts.push(
-			'When complete, you MUST output your result between these exact delimiters conforming to this schema:',
-		);
-		parts.push(buildResultInstructions(schema));
+		parts.push(buildResultFooter());
 	}
 
 	return parts.join('\n');
 }
 
-/** Extract the last ---RESULT_START---/---RESULT_END--- block from agent text and validate against schema. */
-export function extractResult<S extends v.GenericSchema>(
-	text: string,
+// ─── Result tools ───────────────────────────────────────────────────────────
+
+/**
+ * Outcome of a schema'd prompt/skill call. `pending` means the LLM ended its
+ * turn without calling either of the result tools.
+ */
+export type ResultOutcome<T> =
+	| { type: 'pending' }
+	| { type: 'finished'; value: T }
+	| { type: 'gave_up'; reason: string };
+
+export interface ResultToolBundle<T> {
+	tools: AgentTool<any>[];
+	getOutcome(): ResultOutcome<T>;
+}
+
+/**
+ * Produce the per-call `finish` and `give_up` tool pair for a given valibot schema.
+ *
+ * - `finish`'s parameters are derived from the schema via `@valibot/to-json-schema`.
+ *   Non-object top-level schemas are wrapped in a `{ result: <schema> }` envelope
+ *   because every LLM provider expects tool arguments to be a top-level object.
+ * - Pi-agent-core validates args against the JSON Schema before calling `execute`.
+ *   Inside `execute` we additionally run `valibot.safeParse` to enforce
+ *   valibot-specific refinements and to obtain the parsed output (transforms,
+ *   defaults, coercion). On valibot failure we throw — pi-agent-core surfaces
+ *   the throw as a tool-error tool-result, so the LLM can self-correct.
+ * - First successful `finish` (or `give_up`) call wins. Subsequent calls return
+ *   a tool error rather than throwing, to keep the conversation transcript natural.
+ * - Successful calls set `terminate: true` so pi-agent-core ends the loop after
+ *   the current tool batch.
+ */
+export function createResultTools<S extends v.GenericSchema>(
 	schema: S,
-): v.InferOutput<S> {
-	const resultBlock = extractLastResultBlock(text);
+): ResultToolBundle<v.InferOutput<S>> {
+	let outcome: ResultOutcome<v.InferOutput<S>> = { type: 'pending' };
 
-	if (resultBlock === null) {
-		throw new ResultExtractionError(
-			'No ---RESULT_START--- / ---RESULT_END--- block found in the assistant response.',
-			text,
-		);
-	}
+	const wrapped = needsEnvelope(schema);
+	const innerJsonSchema = stripJsonSchemaMeta(
+		toJsonSchema(schema, { errorMode: 'ignore' }) as Record<string, unknown>,
+	);
+	const finishParameters = wrapped
+		? {
+				type: 'object',
+				properties: { result: innerJsonSchema },
+				required: ['result'],
+				additionalProperties: false,
+			}
+		: innerJsonSchema;
 
-	let result: unknown = resultBlock;
-	if (schema.type === 'object' || schema.type === 'array') {
-		try {
-			result = JSON.parse(resultBlock);
-		} catch {
-			throw new ResultExtractionError(
-				'Result block contains invalid JSON for the expected schema.',
-				resultBlock,
-			);
-		}
-	}
+	const finishDescription =
+		`Call this tool when the task is complete. Provide your final answer as the arguments. ` +
+		`The arguments are validated against the required schema; if validation fails you will ` +
+		`receive an error message and may try again. ` +
+		`The first successful \`${FINISH_TOOL_NAME}\` call wins — once the task is finished, do ` +
+		`not call \`${FINISH_TOOL_NAME}\` again.`;
 
-	const parsed = v.safeParse(schema, result);
-	if (!parsed.success) {
-		throw new ResultExtractionError(
-			`Result does not match the expected schema: ${parsed.issues.map((i) => i.message).join(', ')}`,
-			resultBlock,
-		);
-	}
+	const giveUpDescription =
+		`Call this tool only if you have determined that you cannot complete the task or ` +
+		`cannot produce a result that conforms to the required schema. Provide a clear \`reason\`. ` +
+		`This ends the task with a failure.`;
 
-	return parsed.output;
+	const finishTool: AgentTool<any> = {
+		name: FINISH_TOOL_NAME,
+		label: FINISH_TOOL_NAME,
+		description: finishDescription,
+		parameters: finishParameters as any,
+		async execute(_toolCallId, params) {
+			if (outcome.type !== 'pending') {
+				return alreadyDoneToolError(outcome);
+			}
+
+			const candidate = wrapped ? (params as { result: unknown }).result : params;
+			const parsed = v.safeParse(schema, candidate);
+			if (!parsed.success) {
+				const issues = parsed.issues
+					.map((i) => i.message + (i.path ? ` (at ${formatIssuePath(i.path)})` : ''))
+					.join('; ');
+				// Throw — pi-agent-core encodes this as a tool-error tool-result, which
+				// the LLM sees on its next turn and can correct.
+				throw new Error(
+					`Result does not match the required schema: ${issues}. ` +
+						`Please call \`${FINISH_TOOL_NAME}\` again with a corrected payload.`,
+				);
+			}
+
+			outcome = { type: 'finished', value: parsed.output };
+			return {
+				content: [{ type: 'text', text: 'Result accepted. The task is complete.' }],
+				details: { tool: FINISH_TOOL_NAME, result: parsed.output },
+				terminate: true,
+			};
+		},
+	};
+
+	const giveUpTool: AgentTool<any> = {
+		name: GIVE_UP_TOOL_NAME,
+		label: GIVE_UP_TOOL_NAME,
+		description: giveUpDescription,
+		parameters: {
+			type: 'object',
+			properties: {
+				reason: {
+					type: 'string',
+					minLength: 1,
+					description: 'A clear explanation of why the task cannot be completed.',
+				},
+			},
+			required: ['reason'],
+			additionalProperties: false,
+		} as any,
+		async execute(_toolCallId, params) {
+			if (outcome.type !== 'pending') {
+				return alreadyDoneToolError(outcome);
+			}
+
+			const reason = (params as { reason: unknown }).reason;
+			if (typeof reason !== 'string' || reason.trim().length === 0) {
+				throw new Error(`\`${GIVE_UP_TOOL_NAME}\` requires a non-empty \`reason\` string.`);
+			}
+
+			outcome = { type: 'gave_up', reason };
+			return {
+				content: [{ type: 'text', text: 'Acknowledged.' }],
+				details: { tool: GIVE_UP_TOOL_NAME, reason },
+				terminate: true,
+			};
+		},
+	};
+
+	return {
+		tools: [finishTool, giveUpTool],
+		getOutcome: () => outcome,
+	};
 }
 
-function extractLastResultBlock(text: string): string | null {
-	const regex = /---RESULT_START---\s*\n([\s\S]*?)---RESULT_END---/g;
-	const matches = text.matchAll(regex);
-	let lastMatch: string | null = null;
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
-	for (const match of matches) {
-		lastMatch = match[1]?.trim() ?? null;
-	}
-
-	return lastMatch;
+function needsEnvelope(schema: v.GenericSchema): boolean {
+	// Valibot's runtime `type` discriminator. Tool parameters must be an
+	// object at the top level; anything else gets wrapped in `{ result: ... }`.
+	const type = (schema as { type?: string }).type;
+	return type !== 'object';
 }
 
-export class ResultExtractionError extends Error {
+function stripJsonSchemaMeta(jsonSchema: Record<string, unknown>): Record<string, unknown> {
+	const { $schema: _schema, ...rest } = jsonSchema as { $schema?: unknown } & Record<string, unknown>;
+	return rest;
+}
+
+function formatIssuePath(path: ReadonlyArray<{ key?: unknown }>): string {
+	return path
+		.map((p) => (typeof p.key === 'number' ? `[${p.key}]` : `.${String(p.key ?? '?')}`))
+		.join('')
+		.replace(/^\./, '');
+}
+
+function alreadyDoneToolError<T>(outcome: ResultOutcome<T>) {
+	const detail =
+		outcome.type === 'finished'
+			? 'A result was already submitted; the task is complete.'
+			: 'The task was already given up; it cannot be resumed.';
+	// Returning an error-shaped tool result (rather than throwing) keeps the
+	// transcript natural and avoids re-triggering termination logic.
+	return {
+		content: [
+			{
+				type: 'text' as const,
+				text: `${detail} Do not call this tool again.`,
+			},
+		],
+		details: { alreadyDone: true },
+	};
+}
+
+// ─── Errors ─────────────────────────────────────────────────────────────────
+
+/**
+ * Thrown when the LLM calls the `give_up` tool, indicating it cannot produce a
+ * result that conforms to the required schema. Carries the LLM-supplied
+ * `reason` and the assistant transcript leading up to the give-up.
+ */
+export class ResultUnavailableError extends Error {
 	constructor(
-		message: string,
-		public readonly rawOutput: string,
+		public readonly reason: string,
+		public readonly assistantText: string,
 	) {
-		super(message);
-		this.name = 'ResultExtractionError';
+		super(`The agent gave up: ${reason}`);
+		this.name = 'ResultUnavailableError';
 	}
 }

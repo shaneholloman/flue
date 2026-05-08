@@ -21,10 +21,11 @@ import {
 } from './compaction.ts';
 import {
 	buildPromptText,
-	buildResultExtractionPrompt,
+	buildResultFollowUpPrompt,
 	buildSkillPrompt,
-	extractResult,
-	ResultExtractionError,
+	createResultTools,
+	ResultUnavailableError,
+	type ResultToolBundle,
 } from './result.ts';
 import { addUsage, emptyUsage, fromProviderUsage } from './usage.ts';
 import { loadSkillByPath } from './context.ts';
@@ -97,6 +98,12 @@ interface RuntimeScopeOptions {
 	model?: string;
 	thinkingLevel?: ThinkingLevel;
 	callSite: string;
+	/**
+	 * SDK-injected pi-agent-core tools spliced in alongside builtins and custom
+	 * tools for the duration of this call. Used by the schema'd-result flow to
+	 * inject `finish` and `give_up`.
+	 */
+	extraTools?: AgentTool<any>[];
 }
 
 interface InternalTaskResult<T> {
@@ -261,53 +268,20 @@ export class Session implements FlueSession {
 	prompt(text: string, options?: PromptOptions<v.GenericSchema | undefined>): CallHandle<any> {
 		return createCallHandle(options?.signal, (signal) =>
 			this.runOperation('prompt', signal, async () => {
-				const role = this.resolveEffectiveRole(options?.role);
-
 				const schema = options?.result as v.GenericSchema | undefined;
-				const fullPrompt = buildPromptText(text, schema);
-
-				const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-				return this.withScopedRuntime(
-					{
-						commands: effectiveCommands,
-						tools: options?.tools ?? [],
-						role,
-						model: options?.model,
-						thinkingLevel: options?.thinkingLevel,
-						callSite: 'this prompt() call',
-					},
-					async ({ resolvedModel }) => {
-						// Two snapshots, two purposes:
-						//   - `beforeLength` indexes the volatile flat-message array and is
-						//     used by `syncHarnessMessagesSince` to copy newly produced
-						//     harness messages into the durable history tree.
-						//   - `beforeLeafId` anchors a window in that durable tree and is
-						//     used by `aggregateUsageSince` to sum usage across exactly the
-						//     entries this call appended (including any compaction entry).
-						const beforeLength = this.harness.state.messages.length;
-						const beforeLeafId = this.history.getLeafId();
-						await this.harness.prompt(fullPrompt);
-						await this.harness.waitForIdle();
-						await this.syncHarnessMessagesSince(beforeLength, 'prompt');
-						await this.checkLatestAssistantForCompaction();
-						this.throwIfError('prompt');
-
-						const model: PromptModel = { id: resolvedModel.id };
-						if (schema) {
-							const result = await this.extractResultWithRetry(schema);
-							return {
-								result,
-								usage: this.aggregateUsageSince(beforeLeafId),
-								model,
-							};
-						}
-						return {
-							text: this.getAssistantText(),
-							usage: this.aggregateUsageSince(beforeLeafId),
-							model,
-						};
-					},
-				);
+				return this.runPromptCall({
+					promptText: buildPromptText(text, schema),
+					schema,
+					tools: options?.tools,
+					commands: options?.commands,
+					role: options?.role,
+					model: options?.model,
+					thinkingLevel: options?.thinkingLevel,
+					source: 'prompt',
+					errorLabel: 'prompt',
+					callSite: 'this prompt() call',
+					signal,
+				});
 			}),
 		);
 	}
@@ -320,8 +294,6 @@ export class Session implements FlueSession {
 	skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): CallHandle<any> {
 		return createCallHandle(options?.signal, (signal) =>
 			this.runOperation('skill', signal, async () => {
-				const role = this.resolveEffectiveRole(options?.role);
-
 				let registeredSkill = this.config.skills[name];
 
 				// Fallback: file-path lookup under .agents/skills/. Only attempted when the
@@ -347,43 +319,19 @@ export class Session implements FlueSession {
 				}
 
 				const schema = options?.result as v.GenericSchema | undefined;
-				const skillPrompt = buildSkillPrompt(registeredSkill.instructions, options?.args, schema);
-
-				const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-				return this.withScopedRuntime(
-					{
-						commands: effectiveCommands,
-						tools: options?.tools ?? [],
-						role,
-						model: options?.model,
-						thinkingLevel: options?.thinkingLevel,
-						callSite: `this skill("${name}") call`,
-					},
-					async ({ resolvedModel }) => {
-						const beforeLength = this.harness.state.messages.length;
-						const beforeLeafId = this.history.getLeafId();
-						await this.harness.prompt(skillPrompt);
-						await this.harness.waitForIdle();
-						await this.syncHarnessMessagesSince(beforeLength, 'skill');
-						await this.checkLatestAssistantForCompaction();
-						this.throwIfError(`skill("${name}")`);
-
-						const model: PromptModel = { id: resolvedModel.id };
-						if (schema) {
-							const result = await this.extractResultWithRetry(schema);
-							return {
-								result,
-								usage: this.aggregateUsageSince(beforeLeafId),
-								model,
-							};
-						}
-						return {
-							text: this.getAssistantText(),
-							usage: this.aggregateUsageSince(beforeLeafId),
-							model,
-						};
-					},
-				);
+				return this.runPromptCall({
+					promptText: buildSkillPrompt(registeredSkill.instructions, options?.args, schema),
+					schema,
+					tools: options?.tools,
+					commands: options?.commands,
+					role: options?.role,
+					model: options?.model,
+					thinkingLevel: options?.thinkingLevel,
+					source: 'skill',
+					errorLabel: `skill("${name}")`,
+					callSite: `this skill("${name}") call`,
+					signal,
+				});
 			}),
 		);
 	}
@@ -599,6 +547,7 @@ export class Session implements FlueSession {
 				options.thinkingLevel,
 			),
 			...customTools,
+			...(options.extraTools ?? []),
 		];
 		try {
 			return await fn({ resolvedModel });
@@ -1069,26 +1018,131 @@ export class Session implements FlueSession {
 		return undefined;
 	}
 
-	private async extractResultWithRetry<S extends v.GenericSchema>(
-		schema: S,
-	): Promise<v.InferOutput<S>> {
-		const text = this.getAssistantText();
-		try {
-			return extractResult(text, schema);
-		} catch (err) {
-			if (!(err instanceof ResultExtractionError)) throw err;
-			if (!err.message.includes('RESULT_START')) throw err;
+	/**
+	 * Shared body of `prompt()` and `skill()`: scope the runtime, optionally
+	 * inject the result-tool pair, drive the harness, and aggregate usage.
+	 *
+	 * Returns `PromptResultResponse<T>` when `schema` is set, else `PromptResponse`.
+	 */
+	private async runPromptCall(args: {
+		promptText: string;
+		schema: v.GenericSchema | undefined;
+		tools: ToolDef[] | undefined;
+		commands: Command[] | undefined;
+		role: string | undefined;
+		model: string | undefined;
+		thinkingLevel: ThinkingLevel | undefined;
+		source: MessageSource;
+		errorLabel: string;
+		callSite: string;
+		signal: AbortSignal;
+	}): Promise<PromptResponse | PromptResultResponse<unknown>> {
+		const role = this.resolveEffectiveRole(args.role);
+		const resultBundle = args.schema ? createResultTools(args.schema) : undefined;
+		const effectiveCommands = mergeCommands(this.agentCommands, args.commands);
 
-			const followUpPrompt = buildResultExtractionPrompt(schema);
-			const beforeRetry = this.harness.state.messages.length;
-			await this.harness.prompt(followUpPrompt);
+		return this.withScopedRuntime(
+			{
+				commands: effectiveCommands,
+				tools: args.tools ?? [],
+				role,
+				model: args.model,
+				thinkingLevel: args.thinkingLevel,
+				callSite: args.callSite,
+				extraTools: resultBundle?.tools,
+			},
+			async ({ resolvedModel }) => {
+				// Two snapshots, two purposes:
+				//   - `beforeLength` indexes the volatile flat-message array and is
+				//     used by `syncHarnessMessagesSince` to copy newly produced
+				//     harness messages into the durable history tree.
+				//   - `beforeLeafId` anchors a window in that durable tree and is
+				//     used by `aggregateUsageSince` to sum usage across exactly the
+				//     entries this call appended (including any compaction entry).
+				const beforeLength = this.harness.state.messages.length;
+				const beforeLeafId = this.history.getLeafId();
+				const model: PromptModel = { id: resolvedModel.id };
+
+				if (resultBundle) {
+					const result = await this.runWithResultTools(
+						args.promptText,
+						resultBundle,
+						beforeLength,
+						args.source,
+						args.errorLabel,
+						args.signal,
+					);
+					return {
+						result,
+						usage: this.aggregateUsageSince(beforeLeafId),
+						model,
+					};
+				}
+
+				await this.harness.prompt(args.promptText);
+				await this.harness.waitForIdle();
+				await this.syncHarnessMessagesSince(beforeLength, args.source);
+				await this.checkLatestAssistantForCompaction();
+				this.throwIfError(args.errorLabel);
+
+				return {
+					text: this.getAssistantText(),
+					usage: this.aggregateUsageSince(beforeLeafId),
+					model,
+				};
+			},
+		);
+	}
+
+	/**
+	 * Drive the harness through one or more turns until the LLM either calls
+	 * the `finish` tool (success) or the `give_up` tool (typed error).
+	 *
+	 * If a turn ends with neither tool called, we send a brief reminder and
+	 * loop. There is no retry cap from the SDK's perspective: the model has a
+	 * clear escape hatch via `give_up`, the user has cancellation via `signal`,
+	 * and pi-agent-core has its own iteration limits as the final ceiling.
+	 * `MAX_FOLLOWUPS` is a defense-in-depth ceiling against pathological loops.
+	 *
+	 * `beforeLength` is the harness-message-array length sampled by the caller
+	 * *before* the very first prompt; we keep advancing it across iterations so
+	 * `syncHarnessMessagesSince` only copies newly-produced messages each turn.
+	 */
+	private async runWithResultTools<T>(
+		initialPrompt: string,
+		bundle: ResultToolBundle<T>,
+		beforeLength: number,
+		source: MessageSource,
+		errorLabel: string,
+		signal: AbortSignal,
+	): Promise<T> {
+		let nextPrompt: string = initialPrompt;
+		let cursor = beforeLength;
+		const MAX_FOLLOWUPS = 32;
+		for (let attempt = 0; attempt <= MAX_FOLLOWUPS; attempt++) {
+			if (signal.aborted) throw abortErrorFor(signal);
+			await this.harness.prompt(nextPrompt);
 			await this.harness.waitForIdle();
-			await this.syncHarnessMessagesSince(beforeRetry, 'retry');
+			await this.syncHarnessMessagesSince(cursor, source);
+			cursor = this.harness.state.messages.length;
 			await this.checkLatestAssistantForCompaction();
+			this.throwIfError(errorLabel);
 
-			const retryText = this.getAssistantText();
-			return extractResult(retryText, schema);
+			const outcome = bundle.getOutcome();
+			if (outcome.type === 'finished') {
+				return outcome.value;
+			}
+			if (outcome.type === 'gave_up') {
+				throw new ResultUnavailableError(outcome.reason, this.getAssistantText());
+			}
+			// outcome.type === 'pending' → nudge the model and try again.
+			nextPrompt = buildResultFollowUpPrompt();
+			source = 'retry';
 		}
+		throw new ResultUnavailableError(
+			`Agent did not call \`finish\` or \`give_up\` after ${MAX_FOLLOWUPS + 1} attempts.`,
+			this.getAssistantText(),
+		);
 	}
 }
 
