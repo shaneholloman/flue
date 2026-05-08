@@ -523,6 +523,9 @@ export type BashFactory = () => BashLike | Promise<BashLike>;
 export type FlueEvent = (
 	| { type: 'agent_start' }
 	| { type: 'text_delta'; text: string }
+	| { type: 'thinking_start' }
+	| { type: 'thinking_delta'; delta: string }
+	| { type: 'thinking_end'; content: string }
 	| { type: 'tool_start'; toolName: string; toolCallId: string; args?: any }
 	| { type: 'tool_end'; toolName: string; toolCallId: string; isError: boolean; result?: any }
 	| { type: 'turn_end' }

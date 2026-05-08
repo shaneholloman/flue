@@ -211,6 +211,12 @@ export class Session implements FlueSession {
 					const aEvent = event.assistantMessageEvent;
 					if (aEvent.type === 'text_delta') {
 						this.emit({ type: 'text_delta', text: aEvent.delta });
+					} else if (aEvent.type === 'thinking_start') {
+						this.emit({ type: 'thinking_start' });
+					} else if (aEvent.type === 'thinking_delta') {
+						this.emit({ type: 'thinking_delta', delta: aEvent.delta });
+					} else if (aEvent.type === 'thinking_end') {
+						this.emit({ type: 'thinking_end', content: aEvent.content });
 					}
 					break;
 				}
