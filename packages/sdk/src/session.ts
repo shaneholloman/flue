@@ -32,6 +32,7 @@ import {
 	assertRoleExists,
 	resolveEffectiveRole as resolveEffectiveRoleName,
 	resolveRoleModel,
+	resolveRoleThinkingLevel,
 } from './roles.ts';
 import { SessionHistory, type ContextEntry, type MessageSource } from './session-history.ts';
 import type {
@@ -52,6 +53,7 @@ import type {
 	ShellResult,
 	SkillOptions,
 	TaskOptions,
+	ThinkingLevel,
 	ToolDef,
 } from './types.ts';
 
@@ -91,6 +93,7 @@ interface RuntimeScopeOptions {
 	tools: ToolDef[];
 	role?: string;
 	model?: string;
+	thinkingLevel?: ThinkingLevel;
 	callSite: string;
 }
 
@@ -106,6 +109,7 @@ interface InternalTaskResult<T> {
 
 interface InternalTaskOptions<S extends v.GenericSchema | undefined> extends TaskOptions<S> {
 	inheritedModel?: string;
+	inheritedThinkingLevel?: ThinkingLevel;
 }
 
 /** In-memory session store. Sessions persist for the lifetime of the process. */
@@ -196,6 +200,7 @@ export class Session implements FlueSession {
 				model: this.config.model,
 				tools,
 				messages: previousMessages,
+				thinkingLevel: this.config.thinkingLevel ?? 'off',
 			},
 			getApiKey: (provider) => this.getProviderApiKey(provider),
 			toolExecution: 'parallel',
@@ -265,6 +270,7 @@ export class Session implements FlueSession {
 					tools: options?.tools ?? [],
 					role,
 					model: options?.model,
+					thinkingLevel: options?.thinkingLevel,
 					callSite: 'this prompt() call',
 				},
 				async ({ resolvedModel }) => {
@@ -345,6 +351,7 @@ export class Session implements FlueSession {
 					tools: options?.tools ?? [],
 					role,
 					model: options?.model,
+					thinkingLevel: options?.thinkingLevel,
 					callSite: `this skill("${name}") call`,
 				},
 				async ({ resolvedModel }) => {
@@ -457,6 +464,17 @@ export class Session implements FlueSession {
 		return this.requireModel(model, callSite);
 	}
 
+	/** Precedence: call-level > role-level > agent-level default > 'off'. */
+	private resolveThinkingLevelForCall(
+		callValue: ThinkingLevel | undefined,
+		roleName: string | undefined,
+	): ThinkingLevel {
+		if (callValue !== undefined) return callValue;
+		const roleLevel = resolveRoleThinkingLevel(this.config.roles, roleName);
+		if (roleLevel !== undefined) return roleLevel;
+		return this.config.thinkingLevel ?? 'off';
+	}
+
 	/**
 	 * Throws a clear, actionable error when no model is configured for a call.
 	 * Use with the resolved model (post-precedence) to guarantee we never hand
@@ -528,10 +546,12 @@ export class Session implements FlueSession {
 		tools: ToolDef[],
 		role?: string,
 		model?: string,
+		thinkingLevel?: ThinkingLevel,
 	): AgentTool<any>[] {
 		return createTools(env, {
 			roles: this.config.roles,
-			task: (params, signal) => this.runTaskForTool(params, commands, tools, role, model, signal),
+			task: (params, signal) =>
+				this.runTaskForTool(params, commands, tools, role, model, thinkingLevel, signal),
 		});
 	}
 
@@ -544,6 +564,7 @@ export class Session implements FlueSession {
 		const previousTools = this.harness.state.tools;
 		const previousModel = this.harness.state.model;
 		const previousSystemPrompt = this.harness.state.systemPrompt;
+		const previousThinkingLevel = this.harness.state.thinkingLevel;
 
 		const resolvedModel = this.resolveModelForCall(
 			options.model,
@@ -552,6 +573,10 @@ export class Session implements FlueSession {
 		);
 		this.harness.state.model = resolvedModel;
 		this.harness.state.systemPrompt = this.buildSystemPrompt(options.role);
+		this.harness.state.thinkingLevel = this.resolveThinkingLevelForCall(
+			options.thinkingLevel,
+			options.role,
+		);
 		this.harness.state.tools = [
 			...this.createBuiltinTools(
 				scopedEnv,
@@ -559,6 +584,7 @@ export class Session implements FlueSession {
 				options.tools,
 				options.role,
 				options.model,
+				options.thinkingLevel,
 			),
 			...customTools,
 		];
@@ -568,6 +594,7 @@ export class Session implements FlueSession {
 			this.harness.state.tools = previousTools;
 			this.harness.state.model = previousModel;
 			this.harness.state.systemPrompt = previousSystemPrompt;
+			this.harness.state.thinkingLevel = previousThinkingLevel;
 		}
 	}
 
@@ -579,6 +606,7 @@ export class Session implements FlueSession {
 		tools: ToolDef[],
 		inheritedRole: string | undefined,
 		inheritedModel: string | undefined,
+		inheritedThinkingLevel: ThinkingLevel | undefined,
 		signal?: AbortSignal,
 	): Promise<AgentToolResult<TaskToolResultDetails>> {
 		const result = await this.runTask(
@@ -586,6 +614,7 @@ export class Session implements FlueSession {
 			{
 				role: params.role ?? inheritedRole,
 				inheritedModel,
+				inheritedThinkingLevel,
 				cwd: params.cwd,
 				commands,
 				tools,
@@ -661,8 +690,12 @@ export class Session implements FlueSession {
 
 			const schema = options?.result as v.GenericSchema | undefined;
 			const roleModel = resolveRoleModel(this.config.roles, role);
+			const roleThinkingLevel = resolveRoleThinkingLevel(this.config.roles, role);
 			const childOptions: PromptOptions<v.GenericSchema | undefined> = {
 				model: options?.model ?? (roleModel ? undefined : options?.inheritedModel),
+				thinkingLevel:
+					options?.thinkingLevel ??
+					(roleThinkingLevel !== undefined ? undefined : options?.inheritedThinkingLevel),
 				tools: options?.tools,
 			};
 			if (schema) childOptions.result = schema;

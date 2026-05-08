@@ -1,4 +1,4 @@
-import type { Role } from './types.ts';
+import type { Role, ThinkingLevel } from './types.ts';
 
 export function assertRoleExists(roles: Record<string, Role>, roleName: string | undefined): void {
 	if (!roleName) return;
@@ -28,4 +28,12 @@ export function resolveRoleModel(
 ): string | undefined {
 	assertRoleExists(roles, roleName);
 	return roleName ? roles[roleName]?.model : undefined;
+}
+
+export function resolveRoleThinkingLevel(
+	roles: Record<string, Role>,
+	roleName: string | undefined,
+): ThinkingLevel | undefined {
+	assertRoleExists(roles, roleName);
+	return roleName ? roles[roleName]?.thinkingLevel : undefined;
 }

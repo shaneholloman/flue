@@ -1,6 +1,8 @@
 import type { Model, TSchema } from '@mariozechner/pi-ai';
-import type { AgentMessage } from '@mariozechner/pi-agent-core';
+import type { AgentMessage, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type * as v from 'valibot';
+
+export type { ThinkingLevel };
 
 // ─── Skill ──────────────────────────────────────────────────────────────────
 
@@ -19,6 +21,13 @@ export interface Role {
 	/** Markdown body of the role file (below the frontmatter). */
 	instructions: string;
 	model?: string;
+	/**
+	 * Reasoning effort to apply to model calls performed under this role. Forwarded
+	 * to pi-ai's `SimpleStreamOptions.reasoning`. Models without reasoning support
+	 * silently ignore it. Pi-ai clamps the requested level against
+	 * `Model.thinkingLevelMap` per provider. Use `"off"` to explicitly disable.
+	 */
+	thinkingLevel?: ThinkingLevel;
 }
 
 // ─── Commands (per-prompt/shell external CLI access) ────────────────────────
@@ -160,6 +169,11 @@ export interface AgentConfig {
 	providers?: ProvidersConfig;
 	/** Resolve model config to a Model instance. Throws on invalid model strings. */
 	resolveModel: (model: ModelConfig | undefined, providers?: ProvidersConfig) => Model<any> | undefined;
+	/**
+	 * Agent-wide default reasoning effort. Per-call and role-level values override
+	 * this. Defaults to `"off"` (matching pi-agent-core's default) when unset.
+	 */
+	thinkingLevel?: ThinkingLevel;
 	compaction?: CompactionConfig;
 }
 
@@ -235,6 +249,18 @@ export interface AgentInit {
 
 	/** Agent-wide default role. Overridden by session-level or per-call roles. */
 	role?: string;
+
+	/**
+	 * Default reasoning effort for every prompt(), skill(), and task() call.
+	 * Forwarded to pi-ai's `SimpleStreamOptions.reasoning`. Pi-ai clamps the
+	 * requested level against the model's `thinkingLevelMap`; non-reasoning
+	 * models ignore it.
+	 *
+	 * Precedence (highest wins): per-call `thinkingLevel` > role
+	 * `thinkingLevel` > agent `thinkingLevel`. When nothing is set, the harness
+	 * defaults to `"off"`.
+	 */
+	thinkingLevel?: ThinkingLevel;
 
 	/**
 	 * Provider runtime settings for every model used by this agent, including
@@ -451,6 +477,8 @@ export interface PromptOptions<S extends v.GenericSchema | undefined = undefined
 	role?: string;
 	/** e.g., 'anthropic/claude-sonnet-4-20250514' */
 	model?: string;
+	/** Override reasoning effort for this call. See `AgentInit.thinkingLevel`. */
+	thinkingLevel?: ThinkingLevel;
 }
 
 export interface SkillOptions<S extends v.GenericSchema | undefined = undefined> {
@@ -461,6 +489,8 @@ export interface SkillOptions<S extends v.GenericSchema | undefined = undefined>
 	tools?: ToolDef[];
 	role?: string;
 	model?: string;
+	/** Override reasoning effort for this call. See `AgentInit.thinkingLevel`. */
+	thinkingLevel?: ThinkingLevel;
 }
 
 export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> {
@@ -469,6 +499,8 @@ export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> 
 	tools?: ToolDef[];
 	role?: string;
 	model?: string;
+	/** Override reasoning effort for this call. See `AgentInit.thinkingLevel`. */
+	thinkingLevel?: ThinkingLevel;
 	/** Working directory for the detached task session. Defaults to the parent session cwd. */
 	cwd?: string;
 }

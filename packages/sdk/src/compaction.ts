@@ -565,6 +565,7 @@ async function generateTurnPrefixSummary(
 
 	const completionOptions: SimpleStreamOptions = { maxTokens, signal };
 	if (apiKey) completionOptions.apiKey = apiKey;
+	if (model.reasoning) completionOptions.reasoning = 'high';
 
 	const response = await completeSimple(
 		model,

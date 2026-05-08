@@ -99,6 +99,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					model: agentModel,
 					role: options.role ?? config.agentConfig.role,
 					providers,
+					thinkingLevel: options.thinkingLevel ?? config.agentConfig.thinkingLevel,
 				};
 
 				return new AgentClient(
@@ -245,4 +246,5 @@ export type {
 	ShellResult,
 	ToolDef,
 	ToolParameters,
+	ThinkingLevel,
 } from './types.ts';
