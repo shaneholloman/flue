@@ -1,5 +1,5 @@
 import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import { Type } from '@mariozechner/pi-ai';
+import { type Static, Type } from '@mariozechner/pi-ai';
 import type { Role, SessionEnv } from './types.ts';
 
 const MAX_READ_LINES = 2000;
@@ -42,7 +42,7 @@ export interface CreateToolsOptions {
 }
 
 export function createTools(env: SessionEnv, options?: CreateToolsOptions): AgentTool<any>[] {
-	const tools = [
+	const tools: AgentTool<any>[] = [
 		createReadTool(env),
 		createWriteTool(env),
 		createEditTool(env),
@@ -54,18 +54,20 @@ export function createTools(env: SessionEnv, options?: CreateToolsOptions): Agen
 	return tools;
 }
 
-function createReadTool(env: SessionEnv): AgentTool<any> {
+const ReadParams = Type.Object({
+	path: Type.String({ description: 'Path to the file to read' }),
+	offset: Type.Optional(Type.Number({ description: 'Line number to start from (1-indexed)' })),
+	limit: Type.Optional(Type.Number({ description: 'Maximum number of lines to read' })),
+});
+
+function createReadTool(env: SessionEnv): AgentTool<typeof ReadParams> {
 	return {
 		name: 'read',
 		label: 'Read File',
 		description:
 			'Read a file or list a directory. For files, output is truncated to 2000 lines or 50KB — use offset/limit for large files. For directories, returns the list of entries.',
-		parameters: Type.Object({
-			path: Type.String({ description: 'Path to the file to read' }),
-			offset: Type.Optional(Type.Number({ description: 'Line number to start from (1-indexed)' })),
-			limit: Type.Optional(Type.Number({ description: 'Maximum number of lines to read' })),
-		}),
-		async execute(_toolCallId, params: { path: string; offset?: number; limit?: number }, signal?) {
+		parameters: ReadParams,
+		async execute(_toolCallId: string, params: Static<typeof ReadParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 
 			try {
@@ -114,17 +116,19 @@ function createReadTool(env: SessionEnv): AgentTool<any> {
 	};
 }
 
-function createWriteTool(env: SessionEnv): AgentTool<any> {
+const WriteParams = Type.Object({
+	path: Type.String({ description: 'Path to the file to write' }),
+	content: Type.String({ description: 'Content to write to the file' }),
+});
+
+function createWriteTool(env: SessionEnv): AgentTool<typeof WriteParams> {
 	return {
 		name: 'write',
 		label: 'Write File',
 		description:
 			'Write content to a file. Creates the file and parent directories if they do not exist.',
-		parameters: Type.Object({
-			path: Type.String({ description: 'Path to the file to write' }),
-			content: Type.String({ description: 'Content to write to the file' }),
-		}),
-		async execute(_toolCallId, params: { path: string; content: string }, signal?) {
+		parameters: WriteParams,
+		async execute(_toolCallId: string, params: Static<typeof WriteParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 			const resolved = env.resolvePath(params.path);
 			const dir = resolved.replace(/\/[^/]*$/, '');
@@ -145,23 +149,21 @@ function createWriteTool(env: SessionEnv): AgentTool<any> {
 	};
 }
 
-function createEditTool(env: SessionEnv): AgentTool<any> {
+const EditParams = Type.Object({
+	path: Type.String({ description: 'Path to the file to edit' }),
+	oldText: Type.String({ description: 'Exact text to find (must be unique)' }),
+	newText: Type.String({ description: 'Replacement text' }),
+	replaceAll: Type.Optional(Type.Boolean({ description: 'Replace all occurrences' })),
+});
+
+function createEditTool(env: SessionEnv): AgentTool<typeof EditParams> {
 	return {
 		name: 'edit',
 		label: 'Edit File',
 		description:
 			'Edit a file using exact text replacement. The oldText must match a unique region of the file. Use replaceAll to replace all occurrences.',
-		parameters: Type.Object({
-			path: Type.String({ description: 'Path to the file to edit' }),
-			oldText: Type.String({ description: 'Exact text to find (must be unique)' }),
-			newText: Type.String({ description: 'Replacement text' }),
-			replaceAll: Type.Optional(Type.Boolean({ description: 'Replace all occurrences' })),
-		}),
-		async execute(
-			_toolCallId,
-			params: { path: string; oldText: string; newText: string; replaceAll?: boolean },
-			signal?,
-		) {
+		parameters: EditParams,
+		async execute(_toolCallId: string, params: Static<typeof EditParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 			const content = await env.readFile(params.path);
 
@@ -200,17 +202,19 @@ function createEditTool(env: SessionEnv): AgentTool<any> {
 	};
 }
 
-function createBashTool(env: SessionEnv): AgentTool<any> {
+const BashParams = Type.Object({
+	command: Type.String({ description: 'Bash command to execute' }),
+	timeout: Type.Optional(Type.Number({ description: 'Timeout in seconds' })),
+});
+
+function createBashTool(env: SessionEnv): AgentTool<typeof BashParams> {
 	return {
 		name: 'bash',
 		label: 'Run Command',
 		description:
 			'Execute a bash command. Returns stdout and stderr. Output is truncated to the last 2000 lines or 50KB.',
-		parameters: Type.Object({
-			command: Type.String({ description: 'Bash command to execute' }),
-			timeout: Type.Optional(Type.Number({ description: 'Timeout in seconds' })),
-		}),
-		async execute(_toolCallId, params: { command: string; timeout?: number }, signal?) {
+		parameters: BashParams,
+		async execute(_toolCallId: string, params: Static<typeof BashParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 			const result = await env.exec(params.command, { timeout: params.timeout });
 			return formatBashResult(result, params.command);
@@ -218,13 +222,27 @@ function createBashTool(env: SessionEnv): AgentTool<any> {
 	};
 }
 
+const TaskParams = Type.Object({
+	description: Type.Optional(
+		Type.String({ description: 'Short human-readable label for the delegated work' }),
+	),
+	prompt: Type.String({ description: 'Focused instructions for the child agent' }),
+	role: Type.Optional(Type.String({ description: 'Role to use for the child agent' })),
+	cwd: Type.Optional(
+		Type.String({
+			description:
+				'Working directory for the child agent. AGENTS.md and skills are discovered from here.',
+		}),
+	),
+});
+
 function createTaskTool(
 	runTask: (
 		params: TaskToolParams,
 		signal?: AbortSignal,
 	) => Promise<AgentToolResult<TaskToolResultDetails>>,
 	roles: Record<string, Role>,
-): AgentTool<any> {
+): AgentTool<typeof TaskParams> {
 	const roleNames = Object.keys(roles);
 	const roleDescription =
 		roleNames.length > 0
@@ -239,20 +257,8 @@ function createTaskTool(
 			'Use this for independent research, file exploration, or parallel work. ' +
 			'The task returns only its final answer to this conversation.' +
 			roleDescription,
-		parameters: Type.Object({
-			description: Type.Optional(
-				Type.String({ description: 'Short human-readable label for the delegated work' }),
-			),
-			prompt: Type.String({ description: 'Focused instructions for the child agent' }),
-			role: Type.Optional(Type.String({ description: 'Role to use for the child agent' })),
-			cwd: Type.Optional(
-				Type.String({
-					description:
-						'Working directory for the child agent. AGENTS.md and skills are discovered from here.',
-				}),
-			),
-		}),
-		async execute(_toolCallId, params: TaskToolParams, signal?) {
+		parameters: TaskParams,
+		async execute(_toolCallId: string, params: Static<typeof TaskParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 			return runTask(params, signal);
 		},
@@ -278,22 +284,20 @@ function formatBashResult(
 	};
 }
 
-function createGrepTool(env: SessionEnv): AgentTool<any> {
+const GrepParams = Type.Object({
+	pattern: Type.String({ description: 'Search pattern (regex)' }),
+	path: Type.Optional(Type.String({ description: 'Directory or file to search (default: .)' })),
+	include: Type.Optional(Type.String({ description: 'Glob filter, e.g. "*.ts"' })),
+});
+
+function createGrepTool(env: SessionEnv): AgentTool<typeof GrepParams> {
 	return {
 		name: 'grep',
 		label: 'Search Files',
 		description:
 			'Search file contents for a regex pattern. Returns matching lines with file paths and line numbers.',
-		parameters: Type.Object({
-			pattern: Type.String({ description: 'Search pattern (regex)' }),
-			path: Type.Optional(Type.String({ description: 'Directory or file to search (default: .)' })),
-			include: Type.Optional(Type.String({ description: 'Glob filter, e.g. "*.ts"' })),
-		}),
-		async execute(
-			_toolCallId,
-			params: { pattern: string; path?: string; include?: string },
-			signal?,
-		) {
+		parameters: GrepParams,
+		async execute(_toolCallId: string, params: Static<typeof GrepParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 
 			const searchPath = params.path || '.';
@@ -335,17 +339,19 @@ function createGrepTool(env: SessionEnv): AgentTool<any> {
 	};
 }
 
-function createGlobTool(env: SessionEnv): AgentTool<any> {
+const GlobParams = Type.Object({
+	pattern: Type.String({ description: 'Filename pattern, e.g. "*.ts"' }),
+	path: Type.Optional(Type.String({ description: 'Directory to search in (default: .)' })),
+});
+
+function createGlobTool(env: SessionEnv): AgentTool<typeof GlobParams> {
 	return {
 		name: 'glob',
 		label: 'Find Files',
 		description:
 			'Find files by filename pattern using shell find -name semantics. Returns matching file paths.',
-		parameters: Type.Object({
-			pattern: Type.String({ description: 'Filename pattern, e.g. "*.ts"' }),
-			path: Type.Optional(Type.String({ description: 'Directory to search in (default: .)' })),
-		}),
-		async execute(_toolCallId, params: { pattern: string; path?: string }, signal?) {
+		parameters: GlobParams,
+		async execute(_toolCallId: string, params: Static<typeof GlobParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
 
 			const searchPath = params.path || '.';
