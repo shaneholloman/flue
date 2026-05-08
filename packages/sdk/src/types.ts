@@ -312,7 +312,7 @@ export interface FlueSession {
 	prompt<S extends v.GenericSchema>(
 		text: string,
 		options: PromptOptions<S> & { result: S },
-	): Promise<v.InferOutput<S>>;
+	): Promise<PromptResultResponse<v.InferOutput<S>>>;
 	prompt(text: string, options?: PromptOptions): Promise<PromptResponse>;
 
 	shell(command: string, options?: ShellOptions): Promise<ShellResult>;
@@ -320,20 +320,70 @@ export interface FlueSession {
 	skill<S extends v.GenericSchema>(
 		name: string,
 		options: SkillOptions<S> & { result: S },
-	): Promise<v.InferOutput<S>>;
+	): Promise<PromptResultResponse<v.InferOutput<S>>>;
 	skill(name: string, options?: SkillOptions): Promise<PromptResponse>;
 
 	task<S extends v.GenericSchema>(
 		text: string,
 		options: TaskOptions<S> & { result: S },
-	): Promise<v.InferOutput<S>>;
+	): Promise<PromptResultResponse<v.InferOutput<S>>>;
 	task(text: string, options?: TaskOptions): Promise<PromptResponse>;
 
 	delete(): Promise<void>;
 }
 
+/**
+ * Token + cost usage aggregated across every LLM call dispatched by a
+ * single prompt(), skill(), or task() invocation, including:
+ *   - every assistant turn produced by the call,
+ *   - any result-extraction retry triggered by `result: schema` callers,
+ *   - any compaction summarization (1–2 internal calls) triggered when
+ *     context approached the model's window during the call,
+ *   - the post-compaction retry assistant turn for overflow recovery.
+ *
+ * `cost` is computed by pi-ai as `(model.cost.X / 1_000_000) * usage.X`,
+ * where `model.cost.X` is the per-million-token rate from the model's
+ * cost table. The currency of `cost` therefore matches whatever unit that
+ * rate is denominated in. For pi-ai's built-in model registry the rates
+ * mirror each provider's published pricing (USD for the major commercial
+ * providers); custom-registered models or proxied endpoints may use other
+ * units. When in doubt, consult the active model's cost table.
+ */
+export interface PromptUsage {
+	input: number;
+	output: number;
+	cacheRead: number;
+	cacheWrite: number;
+	totalTokens: number;
+	cost: {
+		input: number;
+		output: number;
+		cacheRead: number;
+		cacheWrite: number;
+		total: number;
+	};
+}
+
+/**
+ * Identifies the model that Flue selected for the call (after applying the
+ * call > role > agent precedence). When more than one model runs during the
+ * call (rare; e.g. cross-model flows), this reflects the model in effect for
+ * the call's primary turn.
+ */
+export interface PromptModel {
+	id: string;
+}
+
 export interface PromptResponse {
 	text: string;
+	usage: PromptUsage;
+	model: PromptModel;
+}
+
+export interface PromptResultResponse<T> {
+	result: T;
+	usage: PromptUsage;
+	model: PromptModel;
 }
 
 // ─── Session Store ──────────────────────────────────────────────────────────
@@ -368,6 +418,13 @@ export interface CompactionEntry extends SessionEntryBase {
 	firstKeptEntryId: string;
 	tokensBefore: number;
 	details?: { readFiles: string[]; modifiedFiles: string[] };
+	/**
+	 * Token usage consumed by the summarization call(s) that produced this
+	 * compaction. Aggregated across the 1–2 internal LLM calls that
+	 * `compact()` dispatched. Undefined for compactions persisted before
+	 * this field was introduced (treated as zero by aggregators).
+	 */
+	usage?: PromptUsage;
 }
 
 export interface BranchSummaryEntry extends SessionEntryBase {
