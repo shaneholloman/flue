@@ -1,4 +1,5 @@
 /** Wraps a @cloudflare/sandbox instance (from getSandbox()) into SessionEnv. */
+import { abortErrorFor } from '../abort.ts';
 import { createSandboxSessionEnv } from '../sandbox.ts';
 import type { SandboxApi } from '../sandbox.ts';
 import type { SessionEnv } from '../types.ts';
@@ -90,8 +91,18 @@ export async function cfSandboxToSessionEnv(
 
 		async exec(
 			command: string,
-			execOpts?: { cwd?: string; env?: Record<string, string>; timeout?: number },
+			execOpts?: {
+				cwd?: string;
+				env?: Record<string, string>;
+				timeout?: number;
+				signal?: AbortSignal;
+			},
 		): Promise<{ stdout: string; stderr: string; exitCode: number }> {
+			// The Cloudflare sandbox API has no signal param, so we can
+			// only check before and after the remote call.
+			const externalSignal = execOpts?.signal;
+			if (externalSignal?.aborted) throw abortErrorFor(externalSignal);
+
 			const timeoutMs =
 				typeof execOpts?.timeout === 'number' ? execOpts.timeout * 1000 : undefined;
 			const result = await sandbox.exec(command, {
@@ -99,6 +110,9 @@ export async function cfSandboxToSessionEnv(
 				env: execOpts?.env,
 				timeout: timeoutMs,
 			});
+
+			if (externalSignal?.aborted) throw abortErrorFor(externalSignal);
+
 			return {
 				stdout: result.stdout ?? '',
 				stderr: result.stderr ?? '',

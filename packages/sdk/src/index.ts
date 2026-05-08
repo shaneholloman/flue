@@ -17,6 +17,7 @@ export type {
 	BashLike,
 	SessionOptions,
 	PromptOptions,
+	CallHandle,
 	PromptResponse,
 	PromptResultResponse,
 	PromptUsage,

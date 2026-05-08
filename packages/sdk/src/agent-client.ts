@@ -1,3 +1,4 @@
+import { createCallHandle } from './abort.ts';
 import { discoverSessionContext } from './context.ts';
 import { createCwdSessionEnv } from './sandbox.ts';
 import { deleteSessionTree, Session, type CreateTaskSessionOptions } from './session.ts';
@@ -5,6 +6,7 @@ import { createScopedEnv, mergeCommands } from './env-utils.ts';
 import { assertRoleExists } from './roles.ts';
 import type {
 	AgentConfig,
+	CallHandle,
 	Command,
 	FlueAgent,
 	FlueSessions,
@@ -46,15 +48,17 @@ export class AgentClient implements FlueAgent {
 		return this.openSession(id, 'get-or-create', options);
 	}
 
-	async shell(command: string, options?: ShellOptions): Promise<ShellResult> {
-		const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-		const env = await createScopedEnv(this.env, effectiveCommands);
-		const result = await env.exec(command, {
-			env: options?.env,
-			cwd: options?.cwd,
-			timeout: options?.timeout,
+	shell(command: string, options?: ShellOptions): CallHandle<ShellResult> {
+		return createCallHandle(options?.signal, async (signal) => {
+			const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
+			const env = await createScopedEnv(this.env, effectiveCommands);
+			const result = await env.exec(command, {
+				env: options?.env,
+				cwd: options?.cwd,
+				signal,
+			});
+			return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
 		});
-		return { stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
 	}
 
 	private async openSession(

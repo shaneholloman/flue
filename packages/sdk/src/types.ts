@@ -89,7 +89,19 @@ export interface FileStat {
 export interface SessionEnv {
 	exec(
 		command: string,
-		options?: { cwd?: string; env?: Record<string, string>; timeout?: number },
+		options?: {
+			cwd?: string;
+			env?: Record<string, string>;
+			timeout?: number;
+			/**
+			 * Cancel the in-flight command. Aborting rejects with an
+			 * `AbortError`. Composes with `timeout`; whichever fires first
+			 * wins. `timeout` and `signal` differ on purpose: `signal`
+			 * throws, `timeout` returns a `ShellResult` whose stderr
+			 * reports the timeout.
+			 */
+			signal?: AbortSignal;
+		},
 	): Promise<ShellResult>;
 
 	/** Create an operation-scoped environment, usually backed by a fresh Bash runtime. */
@@ -308,7 +320,7 @@ export interface FlueAgent {
 	readonly sessions: FlueSessions;
 
 	/** Run a shell command in the agent sandbox without recording it in a conversation. */
-	shell(command: string, options?: ShellOptions): Promise<ShellResult>;
+	shell(command: string, options?: ShellOptions): CallHandle<ShellResult>;
 }
 
 export interface FlueSessions {
@@ -327,28 +339,41 @@ export interface SessionOptions {
 
 // ─── Flue Session ───────────────────────────────────────────────────────────
 
+/**
+ * Awaitable handle returned by `prompt()`, `skill()`, `task()`, and `shell()`.
+ * Aborting rejects the awaited value with an `AbortError` (a `DOMException`)
+ * whose `cause` is the signal's `reason`. Pass `options.signal` to merge an
+ * external `AbortSignal` (e.g. `AbortSignal.timeout(ms)`) with the handle's.
+ */
+export interface CallHandle<T> extends PromiseLike<T> {
+	/** Fires when the call is aborted, whether via `abort()` or `options.signal`. */
+	readonly signal: AbortSignal;
+	/** Cancel the in-flight call. */
+	abort(reason?: unknown): void;
+}
+
 export interface FlueSession {
 	readonly id: string;
 
 	prompt<S extends v.GenericSchema>(
 		text: string,
 		options: PromptOptions<S> & { result: S },
-	): Promise<PromptResultResponse<v.InferOutput<S>>>;
-	prompt(text: string, options?: PromptOptions): Promise<PromptResponse>;
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	prompt(text: string, options?: PromptOptions): CallHandle<PromptResponse>;
 
-	shell(command: string, options?: ShellOptions): Promise<ShellResult>;
+	shell(command: string, options?: ShellOptions): CallHandle<ShellResult>;
 
 	skill<S extends v.GenericSchema>(
 		name: string,
 		options: SkillOptions<S> & { result: S },
-	): Promise<PromptResultResponse<v.InferOutput<S>>>;
-	skill(name: string, options?: SkillOptions): Promise<PromptResponse>;
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	skill(name: string, options?: SkillOptions): CallHandle<PromptResponse>;
 
 	task<S extends v.GenericSchema>(
 		text: string,
 		options: TaskOptions<S> & { result: S },
-	): Promise<PromptResultResponse<v.InferOutput<S>>>;
-	task(text: string, options?: TaskOptions): Promise<PromptResponse>;
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	task(text: string, options?: TaskOptions): CallHandle<PromptResponse>;
 
 	delete(): Promise<void>;
 }
@@ -466,7 +491,6 @@ export interface SessionStore {
 /** All option fields are scoped to the duration of the call. */
 export interface PromptOptions<S extends v.GenericSchema | undefined = undefined> {
 	result?: S;
-	timeout?: number;
 	commands?: Command[];
 	tools?: ToolDef[];
 	role?: string;
@@ -474,18 +498,21 @@ export interface PromptOptions<S extends v.GenericSchema | undefined = undefined
 	model?: string;
 	/** Override reasoning effort for this call. See `AgentInit.thinkingLevel`. */
 	thinkingLevel?: ThinkingLevel;
+	/** Cancel this call. See `CallHandle`. */
+	signal?: AbortSignal;
 }
 
 export interface SkillOptions<S extends v.GenericSchema | undefined = undefined> {
 	args?: Record<string, unknown>;
 	result?: S;
-	timeout?: number;
 	commands?: Command[];
 	tools?: ToolDef[];
 	role?: string;
 	model?: string;
 	/** Override reasoning effort for this call. See `AgentInit.thinkingLevel`. */
 	thinkingLevel?: ThinkingLevel;
+	/** Cancel this call. See `CallHandle`. */
+	signal?: AbortSignal;
 }
 
 export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> {
@@ -498,13 +525,16 @@ export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> 
 	thinkingLevel?: ThinkingLevel;
 	/** Working directory for the detached task session. Defaults to the parent session cwd. */
 	cwd?: string;
+	/** Cancel this task. See `CallHandle`. */
+	signal?: AbortSignal;
 }
 
 export interface ShellOptions {
 	env?: Record<string, string>;
 	cwd?: string;
-	timeout?: number;
 	commands?: Command[];
+	/** Cancel this call. See `CallHandle`. */
+	signal?: AbortSignal;
 }
 
 export interface ShellResult {

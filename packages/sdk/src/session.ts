@@ -3,6 +3,7 @@ import { Agent } from '@mariozechner/pi-agent-core';
 import type { AgentMessage, AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
 import type { AssistantMessage, Model } from '@mariozechner/pi-ai';
 import type * as v from 'valibot';
+import { abortErrorFor, createCallHandle } from './abort.ts';
 import {
 	BUILTIN_TOOL_NAMES,
 	createTools,
@@ -37,6 +38,7 @@ import {
 import { SessionHistory, type ContextEntry, type MessageSource } from './session-history.ts';
 import type {
 	AgentConfig,
+	CallHandle,
 	Command,
 	FlueEvent,
 	FlueEventCallback,
@@ -251,167 +253,175 @@ export class Session implements FlueSession {
 		});
 	}
 
-	async prompt<S extends v.GenericSchema>(
+	prompt<S extends v.GenericSchema>(
 		text: string,
 		options: PromptOptions<S> & { result: S },
-	): Promise<PromptResultResponse<v.InferOutput<S>>>;
-	async prompt(text: string, options?: PromptOptions): Promise<PromptResponse>;
-	async prompt(text: string, options?: PromptOptions<v.GenericSchema | undefined>): Promise<any> {
-		return this.runOperation('prompt', async () => {
-			const role = this.resolveEffectiveRole(options?.role);
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	prompt(text: string, options?: PromptOptions): CallHandle<PromptResponse>;
+	prompt(text: string, options?: PromptOptions<v.GenericSchema | undefined>): CallHandle<any> {
+		return createCallHandle(options?.signal, (signal) =>
+			this.runOperation('prompt', signal, async () => {
+				const role = this.resolveEffectiveRole(options?.role);
 
-			const schema = options?.result as v.GenericSchema | undefined;
-			const fullPrompt = buildPromptText(text, schema);
+				const schema = options?.result as v.GenericSchema | undefined;
+				const fullPrompt = buildPromptText(text, schema);
 
-			const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-			return this.withScopedRuntime(
-				{
-					commands: effectiveCommands,
-					tools: options?.tools ?? [],
-					role,
-					model: options?.model,
-					thinkingLevel: options?.thinkingLevel,
-					callSite: 'this prompt() call',
-				},
-				async ({ resolvedModel }) => {
-					// Two snapshots, two purposes:
-					//   - `beforeLength` indexes the volatile flat-message array and is
-					//     used by `syncHarnessMessagesSince` to copy newly produced
-					//     harness messages into the durable history tree.
-					//   - `beforeLeafId` anchors a window in that durable tree and is
-					//     used by `aggregateUsageSince` to sum usage across exactly the
-					//     entries this call appended (including any compaction entry).
-					const beforeLength = this.harness.state.messages.length;
-					const beforeLeafId = this.history.getLeafId();
-					await this.harness.prompt(fullPrompt);
-					await this.harness.waitForIdle();
-					await this.syncHarnessMessagesSince(beforeLength, 'prompt');
-					await this.checkLatestAssistantForCompaction();
-					this.throwIfError('prompt');
+				const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
+				return this.withScopedRuntime(
+					{
+						commands: effectiveCommands,
+						tools: options?.tools ?? [],
+						role,
+						model: options?.model,
+						thinkingLevel: options?.thinkingLevel,
+						callSite: 'this prompt() call',
+					},
+					async ({ resolvedModel }) => {
+						// Two snapshots, two purposes:
+						//   - `beforeLength` indexes the volatile flat-message array and is
+						//     used by `syncHarnessMessagesSince` to copy newly produced
+						//     harness messages into the durable history tree.
+						//   - `beforeLeafId` anchors a window in that durable tree and is
+						//     used by `aggregateUsageSince` to sum usage across exactly the
+						//     entries this call appended (including any compaction entry).
+						const beforeLength = this.harness.state.messages.length;
+						const beforeLeafId = this.history.getLeafId();
+						await this.harness.prompt(fullPrompt);
+						await this.harness.waitForIdle();
+						await this.syncHarnessMessagesSince(beforeLength, 'prompt');
+						await this.checkLatestAssistantForCompaction();
+						this.throwIfError('prompt');
 
-					const model: PromptModel = { id: resolvedModel.id };
-					if (schema) {
-						const result = await this.extractResultWithRetry(schema);
+						const model: PromptModel = { id: resolvedModel.id };
+						if (schema) {
+							const result = await this.extractResultWithRetry(schema);
+							return {
+								result,
+								usage: this.aggregateUsageSince(beforeLeafId),
+								model,
+							};
+						}
 						return {
-							result,
+							text: this.getAssistantText(),
 							usage: this.aggregateUsageSince(beforeLeafId),
 							model,
 						};
-					}
-					return {
-						text: this.getAssistantText(),
-						usage: this.aggregateUsageSince(beforeLeafId),
-						model,
-					};
-				},
-			);
-		});
+					},
+				);
+			}),
+		);
 	}
 
-	async skill<S extends v.GenericSchema>(
+	skill<S extends v.GenericSchema>(
 		name: string,
 		options: SkillOptions<S> & { result: S },
-	): Promise<PromptResultResponse<v.InferOutput<S>>>;
-	async skill(name: string, options?: SkillOptions): Promise<PromptResponse>;
-	async skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): Promise<any> {
-		return this.runOperation('skill', async () => {
-			const role = this.resolveEffectiveRole(options?.role);
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	skill(name: string, options?: SkillOptions): CallHandle<PromptResponse>;
+	skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): CallHandle<any> {
+		return createCallHandle(options?.signal, (signal) =>
+			this.runOperation('skill', signal, async () => {
+				const role = this.resolveEffectiveRole(options?.role);
 
-			let registeredSkill = this.config.skills[name];
+				let registeredSkill = this.config.skills[name];
 
-			// Fallback: file-path lookup under .agents/skills/. Only attempted when the
-			// name looks like a path (contains `/` or ends in `.md`/`.markdown`) so that
-			// typos of registered skill names still fail fast with a helpful error.
-			if (!registeredSkill && (name.includes('/') || /\.(md|markdown)$/i.test(name))) {
-				const loaded = await loadSkillByPath(this.env, this.env.cwd, name);
-				if (loaded) registeredSkill = loaded;
-			}
+				// Fallback: file-path lookup under .agents/skills/. Only attempted when the
+				// name looks like a path (contains `/` or ends in `.md`/`.markdown`) so that
+				// typos of registered skill names still fail fast with a helpful error.
+				if (!registeredSkill && (name.includes('/') || /\.(md|markdown)$/i.test(name))) {
+					const loaded = await loadSkillByPath(this.env, this.env.cwd, name);
+					if (loaded) registeredSkill = loaded;
+				}
 
-			if (!registeredSkill) {
-				const available = Object.keys(this.config.skills).join(', ') || '(none)';
-				const cwd = this.env.cwd;
-				throw new Error(
-					`Skill "${name}" not registered. Available: ${available}.\n\n` +
-						`Skills are loaded at init() time from ${cwd}/.agents/skills/<name>/SKILL.md ` +
-						`inside the session's sandbox. If you expected "${name}" to be there, make sure ` +
-						`the file exists in your sandbox at that path before calling init() — the default ` +
-						`empty sandbox starts with no files, so it has no skills unless you put them there.\n\n` +
-						`Skills can also be referenced by relative path under .agents/skills/ ` +
-						`(e.g. "triage/reproduce.md").`,
-				);
-			}
+				if (!registeredSkill) {
+					const available = Object.keys(this.config.skills).join(', ') || '(none)';
+					const cwd = this.env.cwd;
+					throw new Error(
+						`Skill "${name}" not registered. Available: ${available}.\n\n` +
+							`Skills are loaded at init() time from ${cwd}/.agents/skills/<name>/SKILL.md ` +
+							`inside the session's sandbox. If you expected "${name}" to be there, make sure ` +
+							`the file exists in your sandbox at that path before calling init() — the default ` +
+							`empty sandbox starts with no files, so it has no skills unless you put them there.\n\n` +
+							`Skills can also be referenced by relative path under .agents/skills/ ` +
+							`(e.g. "triage/reproduce.md").`,
+					);
+				}
 
-			const schema = options?.result as v.GenericSchema | undefined;
-			const skillPrompt = buildSkillPrompt(registeredSkill.instructions, options?.args, schema);
+				const schema = options?.result as v.GenericSchema | undefined;
+				const skillPrompt = buildSkillPrompt(registeredSkill.instructions, options?.args, schema);
 
-			const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-			return this.withScopedRuntime(
-				{
-					commands: effectiveCommands,
-					tools: options?.tools ?? [],
-					role,
-					model: options?.model,
-					thinkingLevel: options?.thinkingLevel,
-					callSite: `this skill("${name}") call`,
-				},
-				async ({ resolvedModel }) => {
-					const beforeLength = this.harness.state.messages.length;
-					const beforeLeafId = this.history.getLeafId();
-					await this.harness.prompt(skillPrompt);
-					await this.harness.waitForIdle();
-					await this.syncHarnessMessagesSince(beforeLength, 'skill');
-					await this.checkLatestAssistantForCompaction();
-					this.throwIfError(`skill("${name}")`);
+				const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
+				return this.withScopedRuntime(
+					{
+						commands: effectiveCommands,
+						tools: options?.tools ?? [],
+						role,
+						model: options?.model,
+						thinkingLevel: options?.thinkingLevel,
+						callSite: `this skill("${name}") call`,
+					},
+					async ({ resolvedModel }) => {
+						const beforeLength = this.harness.state.messages.length;
+						const beforeLeafId = this.history.getLeafId();
+						await this.harness.prompt(skillPrompt);
+						await this.harness.waitForIdle();
+						await this.syncHarnessMessagesSince(beforeLength, 'skill');
+						await this.checkLatestAssistantForCompaction();
+						this.throwIfError(`skill("${name}")`);
 
-					const model: PromptModel = { id: resolvedModel.id };
-					if (schema) {
-						const result = await this.extractResultWithRetry(schema);
+						const model: PromptModel = { id: resolvedModel.id };
+						if (schema) {
+							const result = await this.extractResultWithRetry(schema);
+							return {
+								result,
+								usage: this.aggregateUsageSince(beforeLeafId),
+								model,
+							};
+						}
 						return {
-							result,
+							text: this.getAssistantText(),
 							usage: this.aggregateUsageSince(beforeLeafId),
 							model,
 						};
-					}
-					return {
-						text: this.getAssistantText(),
-						usage: this.aggregateUsageSince(beforeLeafId),
-						model,
-					};
-				},
-			);
-		});
+					},
+				);
+			}),
+		);
 	}
 
-	async task<S extends v.GenericSchema>(
+	task<S extends v.GenericSchema>(
 		text: string,
 		options: TaskOptions<S> & { result: S },
-	): Promise<PromptResultResponse<v.InferOutput<S>>>;
-	async task(text: string, options?: TaskOptions): Promise<PromptResponse>;
-	async task(text: string, options?: TaskOptions<v.GenericSchema | undefined>): Promise<any> {
-		const result = await this.runTask(text, options, undefined);
-		return result.output;
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	task(text: string, options?: TaskOptions): CallHandle<PromptResponse>;
+	task(text: string, options?: TaskOptions<v.GenericSchema | undefined>): CallHandle<any> {
+		return createCallHandle(options?.signal, async (signal) => {
+			const result = await this.runTask(text, options, signal);
+			return result.output;
+		});
 	}
 
-	async shell(command: string, options?: ShellOptions): Promise<ShellResult> {
-		return this.runOperation('shell', async () => {
-			const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-			const env = await scopeSessionEnv(this.env, effectiveCommands);
-			const result = await env.exec(command, {
-				env: options?.env,
-				cwd: options?.cwd,
-				timeout: options?.timeout,
-			});
-			const shellResult = {
-				stdout: result.stdout,
-				stderr: result.stderr,
-				exitCode: result.exitCode,
-			};
-			const message = this.createShellMessage(command, shellResult, options);
-			this.history.appendMessage(message, 'shell');
-			this.harness.state.messages = this.history.buildContext();
-			await this.save();
-			return shellResult;
-		});
+	shell(command: string, options?: ShellOptions): CallHandle<ShellResult> {
+		return createCallHandle(options?.signal, (signal) =>
+			this.runOperation('shell', signal, async () => {
+				const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
+				const env = await scopeSessionEnv(this.env, effectiveCommands);
+				const result = await env.exec(command, {
+					env: options?.env,
+					cwd: options?.cwd,
+					signal,
+				});
+				const shellResult = {
+					stdout: result.stdout,
+					stderr: result.stderr,
+					exitCode: result.exitCode,
+				};
+				const message = this.createShellMessage(command, shellResult, options);
+				this.history.appendMessage(message, 'shell');
+				this.harness.state.messages = this.history.buildContext();
+				await this.save();
+				return shellResult;
+			}),
+		);
 	}
 
 	abort(): void {
@@ -652,7 +662,7 @@ export class Session implements FlueSession {
 		if (this.taskDepth >= MAX_TASK_DEPTH) {
 			throw new Error(`[flue] Maximum task depth (${MAX_TASK_DEPTH}) exceeded.`);
 		}
-		if (signal?.aborted) throw new Error('Operation aborted');
+		if (signal?.aborted) throw abortErrorFor(signal);
 
 		const taskId = crypto.randomUUID();
 		const requestedRole = options?.role ?? this.sessionRole ?? this.config.role;
@@ -684,10 +694,11 @@ export class Session implements FlueSession {
 			await this.recordTaskSession(child.id, child.storageKey, taskId);
 			this.activeTasks.add(child);
 
+			// Aborts during sandbox bring-up — child.prompt's own
+			// runOperation handles the in-flight case.
 			if (signal) {
 				abortListener = () => child?.abort();
 				signal.addEventListener('abort', abortListener, { once: true });
-				if (signal.aborted) throw new Error('Operation aborted');
 			}
 
 			const schema = options?.result as v.GenericSchema | undefined;
@@ -699,6 +710,7 @@ export class Session implements FlueSession {
 					options?.thinkingLevel ??
 					(roleThinkingLevel !== undefined ? undefined : options?.inheritedThinkingLevel),
 				tools: options?.tools,
+				signal,
 			};
 			if (schema) childOptions.result = schema;
 
@@ -741,14 +753,35 @@ export class Session implements FlueSession {
 
 	// ─── Internal ────────────────────────────────────────────────────────────
 
-	private async runOperation<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+	private async runOperation<T>(
+		operation: string,
+		signal: AbortSignal | undefined,
+		fn: () => Promise<T>,
+	): Promise<T> {
 		return this.runExclusive(operation, async () => {
+			if (signal?.aborted) throw abortErrorFor(signal);
+
+			// Mirror Session.abort() for the duration of this call.
+			// shell() doesn't use the harness/compaction/tasks — these
+			// hooks are inert there.
+			const onAbort = () => {
+				this.harness.abort();
+				this.compactionAbortController?.abort(signal?.reason);
+				for (const task of this.activeTasks) task.abort();
+			};
+			signal?.addEventListener('abort', onAbort, { once: true });
+
 			try {
 				return await fn();
 			} catch (error) {
-				this.emit({ type: 'error', error: getErrorMessage(error) });
-				throw error;
+				// After the signal aborts, anything thrown downstream is
+				// post-abort fallout (harness, tools, compaction). Surface
+				// a single AbortError shape to callers.
+				const surfaced = signal?.aborted ? abortErrorFor(signal) : error;
+				this.emit({ type: 'error', error: getErrorMessage(surfaced) });
+				throw surfaced;
 			} finally {
+				signal?.removeEventListener('abort', onAbort);
 				this.emit({ type: 'idle' });
 			}
 		});

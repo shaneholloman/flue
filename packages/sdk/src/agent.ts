@@ -216,7 +216,7 @@ function createBashTool(env: SessionEnv): AgentTool<typeof BashParams> {
 		parameters: BashParams,
 		async execute(_toolCallId: string, params: Static<typeof BashParams>, signal?: AbortSignal) {
 			throwIfAborted(signal);
-			const result = await env.exec(params.command, { timeout: params.timeout });
+			const result = await env.exec(params.command, { timeout: params.timeout, signal });
 			return formatBashResult(result, params.command);
 		},
 	};

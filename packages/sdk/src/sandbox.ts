@@ -3,6 +3,7 @@
  * Remote sandboxes don't use just-bash — commands go directly to the sandbox shell.
  */
 import type { BashFactory, BashLike, Command, FileStat, SessionEnv, ShellResult } from './types.ts';
+import { abortErrorFor } from './abort.ts';
 import { normalizePath } from './session.ts';
 import { createScopedEnv } from './env-utils.ts';
 
@@ -22,6 +23,7 @@ export function createCwdSessionEnv(parentEnv: SessionEnv, cwd: string): Session
 				cwd: opts?.cwd ?? scopedCwd,
 				env: opts?.env,
 				timeout: opts?.timeout,
+				signal: opts?.signal,
 			}),
 		scope: async (options) =>
 			createCwdSessionEnv(await createScopedEnv(parentEnv, options?.commands ?? []), scopedCwd),
@@ -80,21 +82,32 @@ function createBashSessionEnv(
 				options?: { cwd?: string; env?: Record<string, string>; signal?: AbortSignal },
 			) => Promise<ShellResult>;
 			const timeout = opts?.timeout;
+			const externalSignal = opts?.signal;
+
+			// Track the timeout signal separately so we can tell which
+			// source aborted after exec returns.
 			let timeoutSignal: AbortSignal | undefined;
 			let timer: ReturnType<typeof setTimeout> | undefined;
-
 			if (typeof timeout === 'number') {
-				const controller = new AbortController();
-				timeoutSignal = controller.signal;
-				timer = setTimeout(() => controller.abort(), timeout * 1000);
+				const ctrl = new AbortController();
+				timeoutSignal = ctrl.signal;
+				timer = setTimeout(() => ctrl.abort(), timeout * 1000);
 			}
+			const mergedSignal =
+				externalSignal && timeoutSignal
+					? AbortSignal.any([externalSignal, timeoutSignal])
+					: (externalSignal ?? timeoutSignal);
 
 			try {
 				const result = await exec.call(
 					bash,
 					cmd,
-					opts ? { cwd: opts.cwd, env: opts.env, signal: timeoutSignal } : undefined,
+					opts ? { cwd: opts.cwd, env: opts.env, signal: mergedSignal } : undefined,
 				);
+				// External signal throws (caller wants cancellation); numeric
+				// timeout returns a ShellResult so the LLM bash tool sees a
+				// recoverable value.
+				if (externalSignal?.aborted) throw abortErrorFor(externalSignal);
 				if (timeoutSignal?.aborted) {
 					return {
 						...result,
@@ -170,7 +183,12 @@ export interface SandboxApi {
 	rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 	exec(
 		command: string,
-		options?: { cwd?: string; env?: Record<string, string>; timeout?: number },
+		options?: {
+			cwd?: string;
+			env?: Record<string, string>;
+			timeout?: number;
+			signal?: AbortSignal;
+		},
 	): Promise<ShellResult>;
 }
 
@@ -185,12 +203,18 @@ export function createSandboxSessionEnv(api: SandboxApi, cwd: string): SessionEn
 	return {
 		async exec(
 			command: string,
-			options?: { cwd?: string; env?: Record<string, string>; timeout?: number },
+			options?: {
+				cwd?: string;
+				env?: Record<string, string>;
+				timeout?: number;
+				signal?: AbortSignal;
+			},
 		): Promise<ShellResult> {
 			return api.exec(command, {
 				cwd: options?.cwd ?? cwd,
 				env: options?.env,
 				timeout: options?.timeout,
+				signal: options?.signal,
 			});
 		},
 
