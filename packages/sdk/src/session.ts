@@ -210,9 +210,10 @@ export class Session implements FlueSession {
 				model: this.config.model,
 				tools,
 				messages: previousMessages,
-				thinkingLevel: this.config.thinkingLevel ?? 'off',
+				thinkingLevel: this.config.thinkingLevel ?? 'medium',
 			},
 			getApiKey: (provider) => this.getProviderApiKey(provider),
+			onPayload: (payload, model) => this.applyProviderPayloadOverrides(payload, model),
 			toolExecution: 'parallel',
 		});
 
@@ -503,7 +504,7 @@ export class Session implements FlueSession {
 		return this.requireModel(model, callSite);
 	}
 
-	/** Precedence: call-level > role-level > agent-level default > 'off'. */
+	/** Precedence: call-level > role-level > agent-level default > 'medium'. */
 	private resolveThinkingLevelForCall(
 		callValue: ThinkingLevel | undefined,
 		roleName: string | undefined,
@@ -511,7 +512,7 @@ export class Session implements FlueSession {
 		if (callValue !== undefined) return callValue;
 		const roleLevel = resolveRoleThinkingLevel(this.config.roles, roleName);
 		if (roleLevel !== undefined) return roleLevel;
-		return this.config.thinkingLevel ?? 'off';
+		return this.config.thinkingLevel ?? 'medium';
 	}
 
 	/**
@@ -529,6 +530,28 @@ export class Session implements FlueSession {
 
 	private getProviderApiKey(provider: string): string | undefined {
 		return this.config.providers?.[provider]?.apiKey;
+	}
+
+	/**
+	 * Mutate the outgoing provider request payload based on `ProviderSettings`.
+	 *
+	 * Currently only handles `storeResponses` for the OpenAI Responses API
+	 * (`openai-responses` and `azure-openai-responses`), which sets `store: true`
+	 * so multi-turn conversations against reasoning models with
+	 * `thinkingLevel: 'off'` can resolve per-item id references. The Codex
+	 * Responses provider rejects `store: true`, so it is intentionally skipped.
+	 *
+	 * Returning `undefined` keeps the upstream-built payload as-is.
+	 */
+	private applyProviderPayloadOverrides(payload: unknown, model: Model<any>): unknown {
+		if (model.api !== 'openai-responses' && model.api !== 'azure-openai-responses') {
+			return undefined;
+		}
+		const settings = this.config.providers?.[model.provider];
+		if (settings?.storeResponses !== true) {
+			return undefined;
+		}
+		return { ...(payload as Record<string, unknown>), store: true };
 	}
 
 	private buildSystemPrompt(roleName?: string): string {

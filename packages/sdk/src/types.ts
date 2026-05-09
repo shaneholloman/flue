@@ -172,6 +172,32 @@ export interface ProviderSettings {
 	 * come from the agent's runtime env instead of process-global env vars.
 	 */
 	apiKey?: string;
+	/**
+	 * Sets `store: true` on OpenAI Responses API requests for this provider.
+	 *
+	 * Only applies to providers using the `openai-responses` or
+	 * `azure-openai-responses` API (e.g. `openai`, `azure`); ignored for
+	 * Anthropic, Google, Codex Responses, and other backends. Defaults to
+	 * `false`, matching the underlying pi-ai default.
+	 *
+	 * Enable this only if you need multi-turn conversations with reasoning
+	 * models (e.g. gpt-5, gpt-5.5) **and** explicit `thinkingLevel: "off"`.
+	 * In that combination, pi-ai does not request encrypted reasoning content
+	 * back, and subsequent turns reference per-item ids (`fc_*`, `msg_*`,
+	 * `rs_*`) that OpenAI 404s with `"Items are not persisted when store is
+	 * set to false."`. Setting `store: true` opts those items into OpenAI's
+	 * server-side persistence so the references resolve.
+	 *
+	 * The default `thinkingLevel` of `"medium"` already keeps reasoning models
+	 * on the stateless encrypted-reasoning path and does not require this
+	 * flag. Most agents do not need to set it.
+	 *
+	 * **Data retention:** enabling this opts the conversation into OpenAI's
+	 * server-side storage (subject to your org's retention policy, default
+	 * 30 days). Do not enable on ZDR tiers or when handling data that must
+	 * not leave your control.
+	 */
+	storeResponses?: boolean;
 }
 
 export type ProvidersConfig = Record<string, ProviderSettings>;
@@ -197,8 +223,9 @@ export interface AgentConfig {
 	/** Resolve model config to a Model instance. Throws on invalid model strings. */
 	resolveModel: (model: ModelConfig | undefined, providers?: ProvidersConfig) => Model<any> | undefined;
 	/**
-	 * Agent-wide default reasoning effort. Per-call and role-level values override
-	 * this. Defaults to `"off"` (matching pi-agent-core's default) when unset.
+	 * Agent-wide default reasoning effort. Per-call and role-level values
+	 * override this. The harness substitutes `"medium"` when unset; see
+	 * `AgentInit.thinkingLevel` for the full precedence rules.
 	 */
 	thinkingLevel?: ThinkingLevel;
 	compaction?: CompactionConfig;
@@ -281,11 +308,12 @@ export interface AgentInit {
 	 * Default reasoning effort for every prompt(), skill(), and task() call.
 	 * Forwarded to pi-ai's `SimpleStreamOptions.reasoning`. Pi-ai clamps the
 	 * requested level against the model's `thinkingLevelMap`; non-reasoning
-	 * models ignore it.
+	 * models effectively run with reasoning off after clamping.
 	 *
 	 * Precedence (highest wins): per-call `thinkingLevel` > role
 	 * `thinkingLevel` > agent `thinkingLevel`. When nothing is set, the harness
-	 * defaults to `"off"`.
+	 * defaults to `"medium"`. Use `"off"` to explicitly disable reasoning on
+	 * models that support it.
 	 */
 	thinkingLevel?: ThinkingLevel;
 
