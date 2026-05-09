@@ -4,10 +4,9 @@
  * Modeled on Vite/Astro:
  *
  *   - The config file lives at the project root. Its directory IS the root for
- *     the purposes of resolving any relative paths it sets (`workspace`,
- *     `output`).
+ *     the purposes of resolving any relative paths it sets (`root`, `output`).
  *   - Discovery: `--config <path>` (resolved vs. cwd) wins; otherwise we search
- *     a starting directory (`--workspace` if given, else cwd) for any of the
+ *     a starting directory (`--root` if given, else cwd) for any of the
  *     supported extensions, in order.
  *   - Loading: plain Node dynamic `import()`. We rely on Node's native
  *     TypeScript type-stripping (Node ≥ 22.18 / ≥ 23.6 by default) to handle
@@ -44,14 +43,15 @@ export interface UserFlueConfig {
 	 */
 	target?: 'node' | 'cloudflare';
 	/**
-	 * Workspace dir (project root in Vite parlance — to be renamed `root`
-	 * in a future release). Relative paths are resolved vs. the directory
-	 * containing the config file. Defaults to that directory if unset.
+	 * Project root. Source files (`agents/`, `roles/`) live here directly,
+	 * or under `<root>/.flue/`. Relative paths are resolved vs. the
+	 * directory containing the config file (Vite-style: the config file's
+	 * dir IS the root by default). Defaults to that directory if unset.
 	 */
-	workspace?: string;
+	root?: string;
 	/**
 	 * Build output dir. Relative paths are resolved vs. the directory
-	 * containing the config file. Defaults to `<workspace>/dist`.
+	 * containing the config file. Defaults to `<root>/dist`.
 	 */
 	output?: string;
 }
@@ -63,7 +63,7 @@ export interface UserFlueConfig {
 export interface FlueConfig {
 	target: 'node' | 'cloudflare';
 	/** Absolute path. */
-	workspace: string;
+	root: string;
 	/** Absolute path. */
 	output: string;
 }
@@ -87,7 +87,7 @@ const TargetSchema = v.picklist(['node', 'cloudflare'] as const);
 
 const UserFlueConfigSchema = v.strictObject({
 	target: v.optional(TargetSchema),
-	workspace: v.optional(v.string()),
+	root: v.optional(v.string()),
 	output: v.optional(v.string()),
 });
 
@@ -199,9 +199,9 @@ export interface ResolveConfigOptions {
 	cwd: string;
 	/**
 	 * Optional starting directory to search for the config. If unset, falls
-	 * back to `cwd`. Used when the CLI received `--workspace` and we want to
-	 * look for a config inside that directory rather than cwd. Vite has the
-	 * same behavior with `--root`.
+	 * back to `cwd`. Used when the CLI received `--root` and we want to look
+	 * for a config inside that directory rather than cwd. Vite has the same
+	 * behavior with `--root`.
 	 */
 	searchFrom?: string;
 	/** Explicit `--config` value, or `false` to skip loading. */
@@ -267,7 +267,7 @@ export async function resolveConfig(opts: ResolveConfigOptions): Promise<Resolve
 	// the surface is flat today.
 	const merged: UserFlueConfig = {
 		target: inline.target ?? fileConfig.target,
-		workspace: inline.workspace ?? fileConfig.workspace,
+		root: inline.root ?? fileConfig.root,
 		output: inline.output ?? fileConfig.output,
 	};
 
@@ -280,26 +280,26 @@ export async function resolveConfig(opts: ResolveConfigOptions): Promise<Resolve
 		);
 	}
 
-	// Resolve workspace. Inline values were already absolutized by the CLI;
-	// file values are resolved vs. the config dir; default is the config dir
-	// (or searchFrom if no config). All paths emerge absolute.
-	const workspace = resolvePath(merged.workspace, {
-		fromConfig: !!fileConfig.workspace && inline.workspace === undefined,
+	// Resolve root. Inline values were already absolutized by the CLI; file
+	// values are resolved vs. the config dir; default is the config dir (or
+	// searchFrom if no config). All paths emerge absolute.
+	const root = resolvePath(merged.root, {
+		fromConfig: !!fileConfig.root && inline.root === undefined,
 		configDir,
 		fallback: configDir,
 	});
 
-	// Resolve output the same way; default is `<workspace>/dist`.
+	// Resolve output the same way; default is `<root>/dist`.
 	const output = resolvePath(merged.output, {
 		fromConfig: !!fileConfig.output && inline.output === undefined,
 		configDir,
-		fallback: path.join(workspace, 'dist'),
+		fallback: path.join(root, 'dist'),
 	});
 
 	return {
 		configPath,
 		userConfig: merged,
-		flueConfig: { target: merged.target, workspace, output },
+		flueConfig: { target: merged.target, root, output },
 	};
 }
 

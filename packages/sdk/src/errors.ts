@@ -75,7 +75,7 @@
  *     //   message: `Agent "foo" is not registered.`
  *     //   details: `Verify the agent name is correct.`
  *     //   dev:     `Available agents: "echo", "greeter". Agents are
- *     //            loaded from the workspace's "agents/" directory at
+ *     //            loaded from the project root's "agents/" directory at
  *     //            build time. ...`
  *
  * The wire response in production omits `dev`; in `flue dev` / `flue run`
@@ -274,13 +274,13 @@ export class AgentNotFoundError extends FlueHttpError {
 			message: `Agent "${name}" is not registered.`,
 			// Caller-safe: no enumeration, no framework internals.
 			details: `Verify the agent name is correct.`,
-			// Dev-only: sibling enumeration and workspace mechanics. Useful
+			// Dev-only: sibling enumeration and project-root mechanics. Useful
 			// for the human running the service; would leak namespace state
 			// or framework details to a public caller.
 			dev:
 				`Available agents: ${formatList(available)}.\n` +
-				`Agents are loaded from the workspace's "agents/" directory at build time. ` +
-				`Verify the agent file is present in the workspace being served.`,
+				`Agents are loaded from the project root's "agents/" directory at build time. ` +
+				`Verify the agent file is present in the project root being served.`,
 			status: 404,
 		});
 	}

@@ -27,8 +27,8 @@ which makes it a good fit for per-session agents that want a real OS.
 Pick the location based on the user's source layout (analogous to Next.js's
 `src/` folder):
 
-- **If `<workspace>/.flue/` exists**, write to `./.flue/connectors/boxd.ts`.
-- **Otherwise**, write to `./connectors/boxd.ts` at the workspace root.
+- **If `<root>/.flue/` exists**, write to `./.flue/connectors/boxd.ts`.
+- **Otherwise**, write to `./connectors/boxd.ts` at the project root.
 
 If neither feels right (uncommon layout, multiple workspaces, etc.), ask the
 user before writing.

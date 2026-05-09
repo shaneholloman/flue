@@ -112,7 +112,7 @@ const gh = defineCommand('gh', { env: { GH_TOKEN: process.env.GH_TOKEN } });
 export default async function ({ init, payload }: FlueContext) {
   // 'local' mounts the host filesystem at /workspace — ideal for CI
   // where the repo is already checked out. Skills and AGENTS.md are
-  // discovered automatically from the workspace directory.
+  // discovered automatically from the project root.
   //
   // `model` sets the default model for every prompt/skill call in this
   // agent. Override per-call with `{ model: '...' }` on prompt()/skill().

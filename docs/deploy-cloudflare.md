@@ -6,12 +6,12 @@ By the end, you will have a Flue agent running on Cloudflare Workers, and you wi
 
 ## Project layout
 
-The workspace root is your project directory. Source files (agents, roles, and any other code your agents import) live in one of two places, analogous to Next.js's `src/` folder:
+The project root is your project directory. Source files (agents, roles, and any other code your agents import) live in one of two places, analogous to Next.js's `src/` folder:
 
-- `./agents/`, `./roles/` — bare layout, source at the workspace root.
+- `./agents/`, `./roles/` — bare layout, source at the project root.
 - `./.flue/agents/`, `./.flue/roles/` — `.flue/` source layout. When you opt into this, treat `.flue/` as the home for everything agent-related (connectors, session stores, helpers, …).
 
-If `./.flue/` exists, Flue reads sources from there; otherwise it reads from the workspace root. The two layouts never mix. By default `flue build` writes to `./dist/` at the workspace root; pass `--output <path>` to redirect the build elsewhere. `wrangler.jsonc` and any `Dockerfile` you ship live at the workspace root, regardless of where the build lands. Examples in this guide use the `./.flue/` layout — drop the prefix if you prefer the bare layout.
+If `./.flue/` exists, Flue reads sources from there; otherwise it reads from the project root. The two layouts never mix. By default `flue build` writes to `./dist/` at the project root; pass `--output <path>` to redirect the build elsewhere. `wrangler.jsonc` and any `Dockerfile` you ship live at the project root, regardless of where the build lands. Examples in this guide use the `./.flue/` layout — drop the prefix if you prefer the bare layout.
 
 ## Hello World
 
@@ -66,7 +66,7 @@ npx flue build --target cloudflare
 npx wrangler deploy
 ```
 
-`flue build --target cloudflare` compiles your workspace into a `./dist` directory containing a Cloudflare Workers-compatible artifact. `wrangler deploy` pushes it live.
+`flue build --target cloudflare` compiles your project into a `./dist` directory containing a Cloudflare Workers-compatible artifact. `wrangler deploy` pushes it live.
 
 ### 4. Add your API key
 
@@ -99,7 +99,7 @@ npx wrangler deploy --secrets-file .env
 
 ### 5. Try it locally
 
-For local development, use `flue dev --target cloudflare`. It builds your workspace, then starts a Cloudflare Workers dev server (via wrangler) on port 3583 and watches for changes:
+For local development, use `flue dev --target cloudflare`. It builds your project root, then starts a Cloudflare Workers dev server (via wrangler) on port 3583 and watches for changes:
 
 ```bash
 npx flue dev --target cloudflare --env .env
@@ -409,7 +409,7 @@ const greeting = await session.skill('greet', {
 
 ## Building and deploying
 
-Flue compiles your workspace into a deployable artifact. For Cloudflare, this means a Workers-compatible bundle:
+Flue compiles your project into a deployable artifact. For Cloudflare, this means a Workers-compatible bundle:
 
 ```bash
 # Local development (build + watch + dev server on port 3583)

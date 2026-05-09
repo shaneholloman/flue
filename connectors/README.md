@@ -129,7 +129,7 @@ For reference, the shape they share:
    already-initialized X into Flue's `SandboxFactory`; user owns the
    provider lifecycle".
 3. **Where to write the file** — be explicit about the source-layout choice
-   (`<workspace>/.flue/connectors/` vs. `<workspace>/connectors/`) and tell
+   (`<root>/.flue/connectors/` vs. `<root>/connectors/`) and tell
    the agent to ask if unsure.
 4. **The full TypeScript file content** in a code block, ready to write
    verbatim. Don't include placeholders the agent has to fill in.

@@ -31,8 +31,8 @@ swap in `@e2b/code-interpreter` — its `Sandbox` class has the same
 Pick the location based on the user's source layout (analogous to Next.js's
 `src/` folder):
 
-- **If `<workspace>/.flue/` exists**, write to `./.flue/connectors/e2b.ts`.
-- **Otherwise**, write to `./connectors/e2b.ts` at the workspace root.
+- **If `<root>/.flue/` exists**, write to `./.flue/connectors/e2b.ts`.
+- **Otherwise**, write to `./connectors/e2b.ts` at the project root.
 
 If neither feels right (uncommon layout, multiple workspaces, etc.), ask the
 user before writing.

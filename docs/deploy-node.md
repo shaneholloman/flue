@@ -6,12 +6,12 @@ By the end, you will have a Flue agent running as a Node.js server, and you will
 
 ## Project layout
 
-The workspace root is your project directory. Source files (agents, roles, and any other code your agents import) live in one of two places, analogous to Next.js's `src/` folder:
+The project root is your project directory. Source files (agents, roles, and any other code your agents import) live in one of two places, analogous to Next.js's `src/` folder:
 
-- `./agents/`, `./roles/` — bare layout, source at the workspace root.
+- `./agents/`, `./roles/` — bare layout, source at the project root.
 - `./.flue/agents/`, `./.flue/roles/` — `.flue/` source layout. When you opt into this, treat `.flue/` as the home for everything agent-related (connectors, session stores, helpers, …).
 
-If `./.flue/` exists, Flue reads sources from there; otherwise it reads from the workspace root. The two layouts never mix. By default `flue build` writes to `./dist/` at the workspace root; pass `--output <path>` to redirect the build elsewhere. Examples in this guide use the `./.flue/` layout — drop the prefix if you prefer the bare layout.
+If `./.flue/` exists, Flue reads sources from there; otherwise it reads from the project root. The two layouts never mix. By default `flue build` writes to `./dist/` at the project root; pass `--output <path>` to redirect the build elsewhere. Examples in this guide use the `./.flue/` layout — drop the prefix if you prefer the bare layout.
 
 ## Hello World
 
@@ -73,7 +73,7 @@ Use the env var name your provider expects — `OPENAI_API_KEY` for OpenAI, `ANT
 
 ### 4. Build and run
 
-For local development, `flue dev --target node --env .env` is the fastest path. It builds your workspace, loads the env file, starts the server on port 3583, and watches for changes — edit an agent file, the server reloads automatically.
+For local development, `flue dev --target node --env .env` is the fastest path. It builds your project root, loads the env file, starts the server on port 3583, and watches for changes — edit an agent file, the server reloads automatically.
 
 ```bash
 npx flue dev --target node --env .env
@@ -97,7 +97,7 @@ set -a; source .env; set +a
 node dist/server.mjs
 ```
 
-`flue build --target node` compiles your workspace into a `./dist` directory. The built server uses [Hono](https://hono.dev/) under the hood and listens on port 3000 by default (configurable via the `PORT` environment variable). Your project's `node_modules` are still needed at runtime — the build externalizes your dependencies rather than bundling them.
+`flue build --target node` compiles your project into a `./dist` directory. The built server uses [Hono](https://hono.dev/) under the hood and listens on port 3000 by default (configurable via the `PORT` environment variable). Your project's `node_modules` are still needed at runtime — the build externalizes your dependencies rather than bundling them.
 
 You can also invoke any agent from the CLI without starting a server. `flue run` accepts the same `--env` flag:
 
@@ -162,7 +162,7 @@ const summary = await session.skill('summarize', {
 
 ## Using the local sandbox
 
-This is where Node.js really shines compared to other targets. The `'local'` sandbox mounts the host's `process.cwd()` at `/workspace`, giving the agent direct access to the real filesystem. Skills and `AGENTS.md` are discovered automatically from the workspace directory.
+This is where Node.js really shines compared to other targets. The `'local'` sandbox mounts the host's `process.cwd()` at `/workspace`, giving the agent direct access to the real filesystem. Skills and `AGENTS.md` are discovered automatically from the project root.
 
 `.flue/agents/reviewer.ts`:
 
@@ -336,7 +336,7 @@ You can back this with any database: SQLite, Postgres, Redis, etc.
 
 ## Building and deploying
 
-Flue compiles your workspace into a Node.js server:
+Flue compiles your project into a Node.js server:
 
 ```bash
 # Build

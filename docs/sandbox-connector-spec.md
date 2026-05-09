@@ -260,17 +260,17 @@ recursive mkdir, try/catch on `exists()`, and buffer/string conversion in
 
 ## Where the Connector File Lives in the User's Project
 
-The user's workspace root (the project directory) is always the same. What
+The user's project root is always the same. What
 varies is where the agent sources live inside it — analogous to Next.js's
 `src/` folder:
 
-- **`.flue/` source layout** (workspace contains a `.flue/` directory holding
+- **`.flue/` source layout** (root contains a `.flue/` directory holding
   `agents/`, `roles/`, etc.): write the connector to
   `./.flue/connectors/<name>.ts`.
-- **Bare layout** (workspace contains `agents/`, `roles/`, etc. at its root):
+- **Bare layout** (root contains `agents/`, `roles/`, etc. at its root):
   write the connector to `./connectors/<name>.ts`.
 
-The detection rule is simple: if `<workspace>/.flue/` exists, use the `.flue/`
+The detection rule is simple: if `<root>/.flue/` exists, use the `.flue/`
 location; otherwise use the bare location. If neither feels right (uncommon
 layout, multiple workspaces, etc.), ask the user before writing.
 

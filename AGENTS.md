@@ -6,8 +6,8 @@ Agent framework where agents are directories compiled into deployable server art
 
 - `packages/sdk/` — Core SDK (`@flue/sdk`). Build system, session management, agent harness, tools.
 - `packages/cli/` — CLI (`@flue/cli`). `flue run` command.
-- `examples/hello-world/` — Test workspace with example agents covering the SDK's surfaces.
-- `examples/cloudflare/` — Test workspace for Cloudflare-specific features (Workers AI binding, etc.).
+- `examples/hello-world/` — Test root with example agents covering the SDK's surfaces.
+- `examples/cloudflare/` — Test root for Cloudflare-specific features (Workers AI binding, etc.).
 
 ## Building
 
@@ -26,18 +26,18 @@ Three commands:
 - `flue run` — one-shot, production-style: build, invoke an agent once, exit. Used in CI / scripted invocations.
 - `flue build` — produce a `dist/` deployable artifact (no run).
 
-`--workspace` points at the workspace root — the project directory. Defaults to the current working directory if omitted. By default, the build is written to `<workspace>/dist/`; use `--output <path>` to redirect the build elsewhere.
+`--root` points at the project root. Defaults to the current working directory if omitted. By default, the build is written to `<root>/dist/`; use `--output <path>` to redirect the build elsewhere.
 
 Source files (agents, roles) live in one of two places, analogous to Next.js's `src/` folder:
 
-- `<workspace>/.flue/agents/`, `<workspace>/.flue/roles/` if a `.flue/` directory exists.
-- Otherwise `<workspace>/agents/`, `<workspace>/roles/` directly.
+- `<root>/.flue/agents/`, `<root>/.flue/roles/` if a `.flue/` directory exists.
+- Otherwise `<root>/agents/`, `<root>/roles/` directly.
 
 The two layouts never mix — if `.flue/` is present, the bare layout is ignored entirely.
 
 ### `flue.config.ts`
 
-A `flue.config.{ts,mts,mjs,js,cjs,cts}` file at the workspace root may set `target`, `workspace`, or `output`. Discovered automatically (or via `--config <path>`). CLI flags always override values from the config file.
+A `flue.config.{ts,mts,mjs,js,cjs,cts}` file at the project root may set `target`, `root`, or `output`. Discovered automatically (or via `--config <path>`). CLI flags always override values from the config file.
 
 ```ts
 // flue.config.ts
@@ -48,7 +48,7 @@ export default defineConfig({
 });
 ```
 
-Relative `workspace` / `output` values resolve against the directory containing the config file (Vite-style: the config file's dir IS the project root). The config is loaded via Node's native TS support (Node ≥ 23.6) with an esbuild fallback for older runtimes.
+Relative `root` / `output` values resolve against the directory containing the config file (Vite-style: the config file's dir IS the project root). The config is loaded via Node's native TS support (Node ≥ 22.18).
 
 ### `flue dev`
 
@@ -66,7 +66,7 @@ For `--target cloudflare`, the project must have `wrangler` available (it's a pe
 ### `flue run`
 
 ```
-node packages/cli/bin/flue.mjs run <agent-name> --target node --id <id> [--payload '<json>'] [--workspace <path>] [--output <path>]
+node packages/cli/bin/flue.mjs run <agent-name> --target node --id <id> [--payload '<json>'] [--root <path>] [--output <path>]
 ```
 
 Examples (run from the `examples/hello-world/` directory so the `./.flue/` source layout is picked up):
@@ -77,7 +77,7 @@ node ../../packages/cli/bin/flue.mjs run hello --target node --id test-1
 node ../../packages/cli/bin/flue.mjs run with-role --target node --id test-2 --payload '{"name": "Fred"}'
 ```
 
-This builds the workspace, starts a temporary server, invokes the agent via SSE, streams output to stderr, prints the final result to stdout, and shuts down.
+This builds the project, starts a temporary server, invokes the agent via SSE, streams output to stderr, prints the final result to stdout, and shuts down.
 
 **Requires `ANTHROPIC_API_KEY` in the environment.** For testing, use `claude-haiku-4-5` (cheapest model).
 
@@ -106,4 +106,4 @@ init({ model: 'cloudflare/@cf/moonshotai/kimi-k2.6' })
 
 ### Agent = Deployed Workspace
 
-A repo is built and deployed as an agent. `flue build` compiles the workspace (skills, roles, agents, context) into a self-contained server artifact. On every push to main, the agent is rebuilt and redeployed.
+A repo is built and deployed as an agent. `flue build` compiles the root (skills, roles, agents, context) into a self-contained server artifact. On every push to main, the agent is rebuilt and redeployed.

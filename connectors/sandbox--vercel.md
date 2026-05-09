@@ -23,8 +23,8 @@ owns the Vercel Sandbox lifecycle; this connector just adapts the sandbox.
 Pick the location based on the user's source layout (analogous to Next.js's
 `src/` folder):
 
-- **If `<workspace>/.flue/` exists**, write to `./.flue/connectors/vercel.ts`.
-- **Otherwise**, write to `./connectors/vercel.ts` at the workspace root.
+- **If `<root>/.flue/` exists**, write to `./.flue/connectors/vercel.ts`.
+- **Otherwise**, write to `./connectors/vercel.ts` at the project root.
 
 If neither feels right (uncommon layout, multiple workspaces, etc.), ask the
 user before writing.

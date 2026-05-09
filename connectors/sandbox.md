@@ -47,8 +47,8 @@ These are the things that aren't obvious from the spec or the example.
 
 - **File location.** Treat `.flue/` as a source-folder location, analogous to
   Next.js's `src/`: write to `./.flue/connectors/<name>.ts` if
-  `<workspace>/.flue/` exists, otherwise `./connectors/<name>.ts` at the
-  workspace root. Ask the user if their layout is unusual.
+  `<root>/.flue/` exists, otherwise `./connectors/<name>.ts` at the
+  project root. Ask the user if their layout is unusual.
 - **Imports.** The published surface is `@flue/sdk/sandbox`. Don't import
   from `@flue/sdk/internal` or any other internal path.
 - **Cancellation.** `SandboxApi.exec()` receives `timeout` (primary) and

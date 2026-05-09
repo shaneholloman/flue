@@ -654,20 +654,20 @@ export interface BuildContext {
 	agents: AgentInfo[];
 	roles: Record<string, Role>;
 	/**
-	 * The workspace root — typically the project's cwd. Source files
-	 * (agents/, roles/) live here directly, or under `<workspaceDir>/.flue/`
+	 * The project root — typically the user's cwd. Source files
+	 * (agents/, roles/) live here directly, or under `<root>/.flue/`
 	 * if that directory exists (the `.flue/`-as-src layout).
 	 */
-	workspaceDir: string;
+	root: string;
 	/**
 	 * Absolute path to the directory the build writes its artifacts into.
-	 * Defaults to `<workspaceDir>/dist`; users can override with `--output`
+	 * Defaults to `<root>/dist`; users can override with `--output`
 	 * (CLI) or `outputDir` (programmatic) to redirect the build elsewhere.
 	 *
 	 * Note that this is the literal output directory — `server.mjs`,
 	 * `wrangler.jsonc`, etc. are written directly inside it. The user's
 	 * `wrangler.jsonc` and the wrangler deploy-redirect file still anchor
-	 * on `workspaceDir`, regardless of this value.
+	 * on `root`, regardless of this value.
 	 */
 	outputDir: string;
 	options: BuildOptions;
@@ -719,20 +719,19 @@ export interface BuildPlugin {
 
 export interface BuildOptions {
 	/**
-	 * The workspace directory — the project root. Typically the cwd of the
-	 * `flue` invocation.
+	 * The project root — typically the cwd of the `flue` invocation.
 	 *
-	 * Source files (agents, roles) are discovered from `<workspaceDir>/.flue/`
-	 * if that directory exists, otherwise from `<workspaceDir>/` directly.
+	 * Source files (agents, roles) are discovered from `<root>/.flue/`
+	 * if that directory exists, otherwise from `<root>/` directly.
 	 * The two layouts never mix — `.flue/` wins unconditionally if present.
 	 */
-	workspaceDir: string;
+	root: string;
 	/**
-	 * Where the build artifacts are written. Defaults to `<workspaceDir>/dist`.
-	 * Pass an absolute or workspace-relative path to redirect the build
+	 * Where the build artifacts are written. Defaults to `<root>/dist`.
+	 * Pass an absolute or root-relative path to redirect the build
 	 * somewhere else (e.g. when integrating with another build system that
 	 * expects a specific directory). Resolved relative to the cwd at call
-	 * time, not `workspaceDir`.
+	 * time, not `root`.
 	 */
 	outputDir?: string;
 	target?: 'node' | 'cloudflare';

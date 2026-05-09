@@ -49,7 +49,7 @@ A few things to note:
 
 - **`triggers = {}`** — This agent has no HTTP trigger. It's designed to be run from the CLI, which is perfect for CI.
 - **`model`** — Every session needs a model. If you do not pass one to `init()` or a specific `prompt()` / `skill()` call, no model is chosen.
-- **`sandbox: 'local'`** — The `"local"` sandbox mounts the host filesystem at `/workspace`. In CI, this is the checked-out repo. Skills and `AGENTS.md` are discovered automatically from the workspace directory.
+- **`sandbox: 'local'`** — The `"local"` sandbox mounts the host filesystem at `/workspace`. In CI, this is the checked-out repo. Skills and `AGENTS.md` are discovered automatically from the project root.
 - **Result schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns a typed object.
 
 ### 3. Test it locally
@@ -59,7 +59,7 @@ npx flue run hello --target node --id test-1 \
   --payload '{"name": "World"}'
 ```
 
-`flue run` builds the workspace, starts a temporary server, invokes the agent, streams progress to stderr, and prints the final result as JSON to stdout. This is the fastest way to iterate on an agent — no deployment needed.
+`flue run` builds the project, starts a temporary server, invokes the agent, streams progress to stderr, and prints the final result as JSON to stdout. This is the fastest way to iterate on an agent — no deployment needed.
 
 ### 4. Wire it into GitHub Actions
 
@@ -219,7 +219,7 @@ Given the issue number in the arguments:
 5. If the fix is straightforward, apply it and open a PR
 ```
 
-**`AGENTS.md`** at the root of your workspace is the agent's system prompt — it provides global context about the project:
+**`AGENTS.md`** at your project root is the agent's system prompt — it provides global context about the project:
 
 ```markdown
 You are a helpful assistant working on the my-project codebase.
@@ -314,7 +314,7 @@ This pattern — prompt or skill call, check the result, decide what to do next 
 
 ## Running agents locally
 
-During development, `flue run` is your main tool. It builds the workspace and runs the agent in one step:
+During development, `flue run` is your main tool. It builds the project and runs the agent in one step:
 
 ```bash
 # Run with a payload
@@ -326,4 +326,4 @@ npx flue run triage --target node --id test-2 \
   --payload '{"issueNumber": 42}' | jq '.severity'
 ```
 
-The CLI builds your workspace, starts a temporary server, invokes the agent via SSE, streams progress to stderr, and prints the final result to stdout. The `--id` flag identifies the agent runtime — use a consistent ID to resume the default session, or a unique one for a fresh start.
+The CLI builds your project root, starts a temporary server, invokes the agent via SSE, streams progress to stderr, and prints the final result to stdout. The `--id` flag identifies the agent runtime — use a consistent ID to resume the default session, or a unique one for a fresh start.

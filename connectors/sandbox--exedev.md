@@ -32,8 +32,8 @@ already exists.
 Pick the location based on the user's source layout (analogous to Next.js's
 `src/` folder):
 
-- **If `<workspace>/.flue/` exists**, write to `./.flue/connectors/exedev.ts`.
-- **Otherwise**, write to `./connectors/exedev.ts` at the workspace root.
+- **If `<root>/.flue/` exists**, write to `./.flue/connectors/exedev.ts`.
+- **Otherwise**, write to `./connectors/exedev.ts` at the project root.
 
 If neither feels right (uncommon layout, multiple workspaces, etc.), ask the
 user before writing.

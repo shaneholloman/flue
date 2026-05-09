@@ -16,8 +16,8 @@ when something is genuinely ambiguous (e.g. an unusual project layout).
 
 Wraps an already-initialized Mirage `Workspace` (created with the user's own
 `@struktoai/mirage-node` or `@struktoai/mirage-browser` SDK) into Flue's
-`SandboxFactory` interface. The user owns the workspace and its mounts;
-this connector just adapts the workspace.
+`SandboxFactory` interface. The user owns the root and its mounts;
+this connector just adapts the root.
 
 Things to know before installing:
 
@@ -274,7 +274,7 @@ class MirageSandboxApi implements SandboxApi {
 
 /**
  * Create a Flue sandbox factory from an initialized Mirage Workspace.
- * The user owns the workspace lifecycle; Flue wraps it into a SessionEnv
+ * The user owns the root lifecycle; Flue wraps it into a SessionEnv
  * for agent use.
  */
 export function mirage(

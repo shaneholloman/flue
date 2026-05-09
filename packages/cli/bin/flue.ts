@@ -13,25 +13,25 @@ import { CONNECTORS, CATEGORY_ROOTS } from './_connectors.generated.ts';
  *   1. Build the `inline` overrides from the flags the user actually passed
  *      (an unset flag means `undefined`, so the config file or default wins).
  *   2. Tell `resolveConfig` where to start searching for `flue.config.ts`:
- *      `--workspace` if given (mirrors Vite's `--root`), otherwise cwd.
+ *      `--root` if given (mirrors Vite's `--root`), otherwise cwd.
  *   3. Hand back a fully-resolved {@link FlueConfig} for the rest of the
  *      command to consume.
  */
 async function resolveCliConfig(args: {
 	target?: 'node' | 'cloudflare';
-	explicitWorkspace: string | undefined;
+	explicitRoot: string | undefined;
 	explicitOutput: string | undefined;
 	configFile: string | undefined;
 }): Promise<FlueConfig> {
 	const inline: UserFlueConfig = {};
 	if (args.target) inline.target = args.target;
-	if (args.explicitWorkspace) inline.workspace = args.explicitWorkspace;
+	if (args.explicitRoot) inline.root = args.explicitRoot;
 	if (args.explicitOutput) inline.output = args.explicitOutput;
 
 	try {
 		const { flueConfig, configPath } = await resolveConfig({
 			cwd: process.cwd(),
-			searchFrom: args.explicitWorkspace ?? process.cwd(),
+			searchFrom: args.explicitRoot ?? process.cwd(),
 			configFile: args.configFile,
 			inline,
 		});
@@ -50,9 +50,9 @@ async function resolveCliConfig(args: {
 function printUsage() {
 	console.error(
 		'Usage:\n' +
-			'  flue dev   [--target <node|cloudflare>] [--workspace <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...\n' +
-			'  flue run   <agent> [--target node] --id <id> [--payload <json>] [--workspace <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...\n' +
-			'  flue build [--target <node|cloudflare>] [--workspace <path>] [--output <path>] [--config <path>]\n' +
+			'  flue dev   [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...\n' +
+			'  flue run   <agent> [--target node] --id <id> [--payload <json>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...\n' +
+			'  flue build [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>]\n' +
 			'  flue add   [<name>|<url>] [--category <category>] [--print]\n' +
 			'\n' +
 			'Commands:\n' +
@@ -62,12 +62,12 @@ function printUsage() {
 			'  add    Install a connector. Pipes installation instructions for an AI coding agent to follow.\n' +
 			'\n' +
 			'Flags:\n' +
-			'  --workspace <path>   Workspace root. Default: current working directory.\n' +
-			'                       Source files (agents/, roles/) live at <workspace>/.flue/ if that\n' +
-			'                       directory exists, else at <workspace>/ directly.\n' +
-			'  --output <path>      Where the build artifacts are written. Default: <workspace>/dist.\n' +
+			'  --root <path>        Project root. Default: current working directory.\n' +
+			'                       Source files (agents/, roles/) live at <root>/.flue/ if that\n' +
+			'                       directory exists, else at <root>/ directly.\n' +
+			'  --output <path>      Where the build artifacts are written. Default: <root>/dist.\n' +
 			'  --config <path>      Path to a flue.config.{ts,mts,mjs,js,cjs,cts} file (relative to cwd).\n' +
-			'                       Default: search the workspace dir (or cwd) for `flue.config.*`.\n' +
+			'                       Default: search the root dir (or cwd) for `flue.config.*`.\n' +
 			'                       CLI flags always override values set in the config file.\n' +
 			`  --port <number>      Port for the dev server. Default: ${DEFAULT_DEV_PORT}\n` +
 			'  --env <path>         Load env vars from a .env-format file. Repeatable; later files override earlier on key collision.\n' +
@@ -83,7 +83,7 @@ function printUsage() {
 			'  flue run hello --target node --id test-1\n' +
 			'  flue run hello --target node --id test-1 --payload \'{"name": "World"}\' --env .env\n' +
 			'  flue build --target node\n' +
-			'  flue build --target cloudflare --workspace ./my-app\n' +
+			'  flue build --target cloudflare --root ./my-app\n' +
 			'  flue build --target node --output ./build\n' +
 			'  flue add\n' +
 			'  flue add daytona | claude\n' +
@@ -101,9 +101,9 @@ interface RunArgs {
 	target: 'node' | undefined;
 	id: string;
 	payload: string;
-	/** Explicit --workspace value, or undefined to default to cwd. */
-	explicitWorkspace: string | undefined;
-	/** Explicit --output value, or undefined to default to <workspaceDir>/dist. */
+	/** Explicit --root value, or undefined to default to cwd. */
+	explicitRoot: string | undefined;
+	/** Explicit --output value, or undefined to default to <root>/dist. */
 	explicitOutput: string | undefined;
 	/** Explicit --config value, or undefined to auto-discover. */
 	configFile: string | undefined;
@@ -116,9 +116,9 @@ interface BuildArgs {
 	command: 'build';
 	/** May be undefined if the user is relying on `flue.config.ts` for `target`. */
 	target: 'node' | 'cloudflare' | undefined;
-	/** Explicit --workspace value, or undefined to default to cwd. */
-	explicitWorkspace: string | undefined;
-	/** Explicit --output value, or undefined to default to <workspaceDir>/dist. */
+	/** Explicit --root value, or undefined to default to cwd. */
+	explicitRoot: string | undefined;
+	/** Explicit --output value, or undefined to default to <root>/dist. */
 	explicitOutput: string | undefined;
 	/** Explicit --config value, or undefined to auto-discover. */
 	configFile: string | undefined;
@@ -128,9 +128,9 @@ interface DevArgs {
 	command: 'dev';
 	/** May be undefined if the user is relying on `flue.config.ts` for `target`. */
 	target: 'node' | 'cloudflare' | undefined;
-	/** Explicit --workspace value, or undefined to default to cwd. */
-	explicitWorkspace: string | undefined;
-	/** Explicit --output value, or undefined to default to <workspaceDir>/dist. */
+	/** Explicit --root value, or undefined to default to cwd. */
+	explicitRoot: string | undefined;
+	/** Explicit --output value, or undefined to default to <root>/dist. */
 	explicitOutput: string | undefined;
 	/** Explicit --config value, or undefined to auto-discover. */
 	configFile: string | undefined;
@@ -153,7 +153,7 @@ type ParsedArgs = RunArgs | BuildArgs | DevArgs | AddArgs;
 function parseFlags(flags: string[]): {
 	target?: 'node' | 'cloudflare';
 	id?: string;
-	explicitWorkspace: string | undefined;
+	explicitRoot: string | undefined;
 	explicitOutput: string | undefined;
 	configFile: string | undefined;
 	payload: string;
@@ -162,7 +162,7 @@ function parseFlags(flags: string[]): {
 } {
 	let target: 'node' | 'cloudflare' | undefined;
 	let id: string | undefined;
-	let explicitWorkspace: string | undefined;
+	let explicitRoot: string | undefined;
 	let explicitOutput: string | undefined;
 	let configFile: string | undefined;
 	let payload = '{}';
@@ -194,10 +194,10 @@ function parseFlags(flags: string[]): {
 				console.error('Missing value for --id');
 				process.exit(1);
 			}
-		} else if (arg === '--workspace') {
-			explicitWorkspace = flags[++i] ?? '';
-			if (!explicitWorkspace) {
-				console.error('Missing value for --workspace');
+		} else if (arg === '--root') {
+			explicitRoot = flags[++i] ?? '';
+			if (!explicitRoot) {
+				console.error('Missing value for --root');
 				process.exit(1);
 			}
 		} else if (arg === '--output') {
@@ -236,7 +236,7 @@ function parseFlags(flags: string[]): {
 	return {
 		target,
 		id,
-		explicitWorkspace: explicitWorkspace ? path.resolve(explicitWorkspace) : undefined,
+		explicitRoot: explicitRoot ? path.resolve(explicitRoot) : undefined,
 		explicitOutput: explicitOutput ? path.resolve(explicitOutput) : undefined,
 		// `--config` is intentionally NOT pre-resolved: the SDK resolves it
 		// vs. cwd at load time, mirroring how Vite handles `--config`.
@@ -323,7 +323,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 		return {
 			command: 'build',
 			target: flags.target,
-			explicitWorkspace: flags.explicitWorkspace,
+			explicitRoot: flags.explicitRoot,
 			explicitOutput: flags.explicitOutput,
 			configFile: flags.configFile,
 		};
@@ -334,7 +334,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 		return {
 			command: 'dev',
 			target: flags.target,
-			explicitWorkspace: flags.explicitWorkspace,
+			explicitRoot: flags.explicitRoot,
 			explicitOutput: flags.explicitOutput,
 			configFile: flags.configFile,
 			port: flags.port,
@@ -373,7 +373,7 @@ function parseArgs(argv: string[]): ParsedArgs {
 			target: flags.target as 'node' | undefined,
 			id: flags.id,
 			payload: flags.payload,
-			explicitWorkspace: flags.explicitWorkspace,
+			explicitRoot: flags.explicitRoot,
 			explicitOutput: flags.explicitOutput,
 			configFile: flags.configFile,
 			port: flags.port,
@@ -710,13 +710,13 @@ async function findPort(): Promise<number> {
 async function buildCommand(args: BuildArgs) {
 	const cfg = await resolveCliConfig({
 		target: args.target,
-		explicitWorkspace: args.explicitWorkspace,
+		explicitRoot: args.explicitRoot,
 		explicitOutput: args.explicitOutput,
 		configFile: args.configFile,
 	});
 	try {
 		await build({
-			workspaceDir: cfg.workspace,
+			root: cfg.root,
 			outputDir: cfg.output,
 			target: cfg.target,
 		});
@@ -729,7 +729,7 @@ async function buildCommand(args: BuildArgs) {
 async function devCommand(args: DevArgs) {
 	const cfg = await resolveCliConfig({
 		target: args.target,
-		explicitWorkspace: args.explicitWorkspace,
+		explicitRoot: args.explicitRoot,
 		explicitOutput: args.explicitOutput,
 		configFile: args.configFile,
 	});
@@ -737,7 +737,7 @@ async function devCommand(args: DevArgs) {
 		// dev() blocks until SIGINT/SIGTERM exits the process. We don't expect
 		// it to return; if it ever does, just exit cleanly.
 		await dev({
-			workspaceDir: cfg.workspace,
+			root: cfg.root,
 			outputDir: cfg.output,
 			target: cfg.target,
 			port: args.port || undefined,
@@ -752,7 +752,7 @@ async function devCommand(args: DevArgs) {
 async function run(args: RunArgs) {
 	const cfg = await resolveCliConfig({
 		target: args.target,
-		explicitWorkspace: args.explicitWorkspace,
+		explicitRoot: args.explicitRoot,
 		explicitOutput: args.explicitOutput,
 		configFile: args.configFile,
 	});
@@ -764,18 +764,18 @@ async function run(args: RunArgs) {
 		printCloudflareRunUnsupported(args.agent, args.id, args.payload);
 	}
 
-	const workspaceDir = cfg.workspace;
+	const root = cfg.root;
 	const outputDir = cfg.output;
 	const serverPath = path.join(outputDir, 'server.mjs');
 
 	// 0. Resolve --env paths up front so a typo errors before we kick
-	//    off a build. Resolves relative to workspaceDir (the project root)
+	//    off a build. Resolves relative to root (the project root)
 	//    so users author --env paths the way they think about them, not
 	//    relative to wherever they happened to redirect the build via
 	//    --output.
 	let resolvedEnvFiles: string[];
 	try {
-		resolvedEnvFiles = resolveEnvFiles(args.envFiles, workspaceDir);
+		resolvedEnvFiles = resolveEnvFiles(args.envFiles, root);
 	} catch (err) {
 		console.error(err instanceof Error ? err.message : String(err));
 		process.exit(1);
@@ -787,7 +787,7 @@ async function run(args: RunArgs) {
 
 	// 1. Build
 	try {
-		await build({ workspaceDir, outputDir, target: cfg.target });
+		await build({ root, outputDir, target: cfg.target });
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
 		process.exit(1);
@@ -796,11 +796,11 @@ async function run(args: RunArgs) {
 	// 2. Pick a port
 	const port = args.port || (await findPort());
 
-	// 3. Start server. We launch the child with cwd=workspaceDir so the
+	// 3. Start server. We launch the child with cwd=root so the
 	//    server resolves user dependencies, AGENTS.md, etc. relative to
 	//    the project root regardless of where the build artifacts ended up.
 	console.error(`[flue] Starting server on port ${port}...`);
-	serverProcess = startServer(serverPath, port, fileEnv, workspaceDir);
+	serverProcess = startServer(serverPath, port, fileEnv, root);
 
 	// Pipe server stdout/stderr for visibility
 	const pipeServerOutput = (data: Buffer) => {

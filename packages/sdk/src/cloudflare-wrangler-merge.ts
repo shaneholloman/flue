@@ -105,7 +105,7 @@ interface UserConfigRead {
 }
 
 /**
- * Read and normalize the user's wrangler config from `workspaceDir`.
+ * Read and normalize the user's wrangler config from `root`.
  *
  * Looks for `wrangler.jsonc`, `wrangler.json`, then `wrangler.toml` (jsonc is
  * Cloudflare's recommended format for new projects, but all three work).
@@ -127,11 +127,11 @@ interface UserConfigRead {
  * `dist/wrangler.jsonc` and the benefit is correctness without us reimplementing
  * wrangler's path-resolution logic.
  */
-export async function readUserWranglerConfig(workspaceDir: string): Promise<UserConfigRead> {
+export async function readUserWranglerConfig(root: string): Promise<UserConfigRead> {
 	const candidates = ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml'];
 	let foundPath: string | null = null;
 	for (const name of candidates) {
-		const candidate = path.join(workspaceDir, name);
+		const candidate = path.join(root, name);
 		if (fs.existsSync(candidate)) {
 			foundPath = candidate;
 			break;
@@ -335,7 +335,7 @@ export function mergeFlueAdditions(
 	// should accept this.
 	merged.main = additions.main;
 
-	// name: user wins if set; fall back to the default we derive from workspaceDir.
+	// name: user wins if set; fall back to the default we derive from root.
 	if (typeof merged.name !== 'string' || merged.name.length === 0) {
 		merged.name = additions.defaultName;
 	}
@@ -513,11 +513,11 @@ export function detectSandboxBindings(userConfig: Record<string, unknown>): stri
  */
 export function assertSandboxPackageInstalled(
 	sandboxClassNames: string[],
-	workspaceDir: string,
+	root: string,
 ): void {
 	if (sandboxClassNames.length === 0) return;
 
-	let current = workspaceDir;
+	let current = root;
 	while (current !== path.dirname(current)) {
 		const pkgPath = path.join(current, 'package.json');
 		if (fs.existsSync(pkgPath)) {
@@ -551,20 +551,20 @@ export function assertSandboxPackageInstalled(
 
 /**
  * Write the wrangler deploy-redirect file at
- * `<workspaceDir>/.wrangler/deploy/config.json` so that `wrangler deploy` run
- * from `workspaceDir` automatically picks up the generated wrangler config at
+ * `<root>/.wrangler/deploy/config.json` so that `wrangler deploy` run from
+ * the project root automatically picks up the generated wrangler config at
  * `<outputDir>/wrangler.jsonc`.
  *
  * This is wrangler's own native redirection mechanism (the same one Astro's
  * Cloudflare adapter uses). We only write the file if one doesn't already
  * exist — if the user has set one up, respect their intent.
  *
- * `outputDir` may be anywhere (typically `<workspaceDir>/dist`, but the user
+ * `outputDir` may be anywhere (typically `<root>/dist`, but the user
  * can redirect it via `--output`). We compute a relative path so the
  * redirect file is portable across machines / repos.
  */
-export function writeDeployRedirectIfMissing(workspaceDir: string, outputDir: string): void {
-	const redirectDir = path.join(workspaceDir, '.wrangler', 'deploy');
+export function writeDeployRedirectIfMissing(root: string, outputDir: string): void {
+	const redirectDir = path.join(root, '.wrangler', 'deploy');
 	const redirectPath = path.join(redirectDir, 'config.json');
 
 	if (fs.existsSync(redirectPath)) {
