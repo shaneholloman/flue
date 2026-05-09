@@ -1,12 +1,13 @@
 /** Internal session implementation. Not exported publicly — wrapped by FlueSession. */
 import { Agent } from '@mariozechner/pi-agent-core';
 import type { AgentMessage, AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import type { AssistantMessage, Model } from '@mariozechner/pi-ai';
+import type { AssistantMessage, Model, ToolResultMessage, UserMessage } from '@mariozechner/pi-ai';
 import type * as v from 'valibot';
 import { abortErrorFor, createCallHandle } from './abort.ts';
 import {
 	BUILTIN_TOOL_NAMES,
 	createTools,
+	formatBashResult,
 	type TaskToolParams,
 	type TaskToolResultDetails,
 } from './agent.ts';
@@ -22,13 +23,14 @@ import {
 import {
 	buildPromptText,
 	buildResultFollowUpPrompt,
-	buildSkillPrompt,
+	buildSkillByNamePrompt,
+	buildSkillByPathPrompt,
 	createResultTools,
 	ResultUnavailableError,
 	type ResultToolBundle,
 } from './result.ts';
 import { addUsage, emptyUsage, fromProviderUsage } from './usage.ts';
-import { loadSkillByPath } from './context.ts';
+import { resolveSkillFilePath, skillsDirIn } from './context.ts';
 import { createScopedEnv as scopeSessionEnv, mergeCommands } from './env-utils.ts';
 import {
 	assertRoleExists,
@@ -60,7 +62,6 @@ import type {
 	ToolDef,
 } from './types.ts';
 
-const MAX_SHELL_HISTORY_CHARS = 50 * 1024;
 const MAX_TASK_DEPTH = 4;
 
 export interface CreateTaskSessionOptions {
@@ -294,33 +295,55 @@ export class Session implements FlueSession {
 	skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): CallHandle<any> {
 		return createCallHandle(options?.signal, (signal) =>
 			this.runOperation('skill', signal, async () => {
-				let registeredSkill = this.config.skills[name];
-
-				// Fallback: file-path lookup under .agents/skills/. Only attempted when the
-				// name looks like a path (contains `/` or ends in `.md`/`.markdown`) so that
-				// typos of registered skill names still fail fast with a helpful error.
-				if (!registeredSkill && (name.includes('/') || /\.(md|markdown)$/i.test(name))) {
-					const loaded = await loadSkillByPath(this.env, this.env.cwd, name);
-					if (loaded) registeredSkill = loaded;
-				}
-
-				if (!registeredSkill) {
-					const available = Object.keys(this.config.skills).join(', ') || '(none)';
-					const cwd = this.env.cwd;
-					throw new Error(
-						`Skill "${name}" not registered. Available: ${available}.\n\n` +
-							`Skills are loaded at init() time from ${cwd}/.agents/skills/<name>/SKILL.md ` +
-							`inside the session's sandbox. If you expected "${name}" to be there, make sure ` +
-							`the file exists in your sandbox at that path before calling init() — the default ` +
-							`empty sandbox starts with no files, so it has no skills unless you put them there.\n\n` +
-							`Skills can also be referenced by relative path under .agents/skills/ ` +
-							`(e.g. "triage/reproduce.md").`,
-					);
-				}
-
+				// Skills can be referenced two ways. The shape determines the
+				// per-call user-message format; the model reads the file
+				// itself in both cases.
+				//
+				//   1. By registered name. Looked up in `this.config.skills`,
+				//      populated at init time from `.agents/skills/*/SKILL.md`
+				//      frontmatter. The system prompt's "Available Skills"
+				//      list tells the model name + description + convention,
+				//      so the per-call message just identifies the skill.
+				//
+				//   2. By relative path under `.agents/skills/` (e.g.
+				//      `'triage/reproduce.md'`). The skill isn't in the
+				//      registry, so we hand the model the resolved absolute
+				//      path explicitly. Triggered only when `name` looks
+				//      like a path (contains `/` or ends in `.md`/`.markdown`)
+				//      — otherwise typos of registered names fail fast with
+				//      a helpful error rather than silently fall through to
+				//      a path lookup that's also going to miss.
+				const looksLikePath = name.includes('/') || /\.(md|markdown)$/i.test(name);
 				const schema = options?.result as v.GenericSchema | undefined;
+
+				let promptText: string;
+				if (looksLikePath) {
+					const resolvedPath = await resolveSkillFilePath(this.env, this.env.cwd, name);
+					if (!resolvedPath) {
+						throw new Error(
+							`[flue] Skill file "${name}" not found at ${skillsDirIn(this.env.cwd)}/${name} ` +
+								`inside the session's sandbox. Make sure the file exists at that path.`,
+						);
+					}
+					promptText = buildSkillByPathPrompt(name, resolvedPath, options?.args, schema);
+				} else {
+					if (!this.config.skills[name]) {
+						const available = Object.keys(this.config.skills).join(', ') || '(none)';
+						throw new Error(
+							`[flue] Skill "${name}" not registered. Available: ${available}.\n\n` +
+								`Skills are discovered at init() time from ${skillsDirIn(this.env.cwd)}/<name>/SKILL.md ` +
+								`inside the session's sandbox. If you expected "${name}" to be there, make sure ` +
+								`the SKILL.md file exists at that path before calling init() — the default ` +
+								`empty sandbox starts with no files, so it has no skills unless you put them there.\n\n` +
+								`Skills can also be referenced by relative path under .agents/skills/ ` +
+								`(e.g. "triage/reproduce.md").`,
+						);
+					}
+					promptText = buildSkillByNamePrompt(name, options?.args, schema);
+				}
+
 				return this.runPromptCall({
-					promptText: buildSkillPrompt(registeredSkill.instructions, options?.args, schema),
+					promptText,
 					schema,
 					tools: options?.tools,
 					commands: options?.commands,
@@ -351,23 +374,81 @@ export class Session implements FlueSession {
 	shell(command: string, options?: ShellOptions): CallHandle<ShellResult> {
 		return createCallHandle(options?.signal, (signal) =>
 			this.runOperation('shell', signal, async () => {
+				// session.shell() is an out-of-band tool invocation: the caller
+				// (agent code) decides to run a bash command, but it should
+				// appear in the message history as if the model itself had
+				// called the bash tool. That keeps the transcript readable for
+				// later turns, lets compaction handle it via the same path as
+				// real tool calls, and removes the synthetic-user-message
+				// shape that earlier versions of this method produced.
+				//
+				// Concretely we emit the same tool_start/tool_end events the
+				// harness emits for LLM-driven tool calls, and we append a
+				// (user request, assistant tool_use, toolResult) message
+				// triple to history. The toolCallId we generate here matches
+				// the one referenced by the toolResult, just like a real
+				// tool-use round.
+				const toolCallId = crypto.randomUUID();
+
+				// Per-call cwd/env, when set, are part of the call's identity
+				// and need to be visible in the transcript. Without them the
+				// model can't tell on a later turn that a command ran with
+				// overrides — making questions like "what cwd was that run
+				// from?" unanswerable from history. The bash tool's own
+				// schema (BashParams) doesn't formally declare these, but
+				// pi-ai's ToolCall.arguments is `Record<string, any>` and
+				// providers forward arguments opaquely, so extending the
+				// shape here is safe.
+				const args: Record<string, unknown> = { command };
+				if (options?.cwd !== undefined) args.cwd = options.cwd;
+				if (options?.env !== undefined) args.env = options.env;
+
+				this.emit({ type: 'tool_start', toolName: 'bash', toolCallId, args });
+
 				const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
 				const env = await scopeSessionEnv(this.env, effectiveCommands);
-				const result = await env.exec(command, {
-					env: options?.env,
-					cwd: options?.cwd,
-					signal,
-				});
-				const shellResult = {
-					stdout: result.stdout,
-					stderr: result.stderr,
-					exitCode: result.exitCode,
-				};
-				const message = this.createShellMessage(command, shellResult, options);
-				this.history.appendMessage(message, 'shell');
-				this.harness.state.messages = this.history.buildContext();
-				await this.save();
-				return shellResult;
+
+				try {
+					const result = await env.exec(command, {
+						env: options?.env,
+						cwd: options?.cwd,
+						signal,
+					});
+					const shellResult: ShellResult = {
+						stdout: result.stdout,
+						stderr: result.stderr,
+						exitCode: result.exitCode,
+					};
+					const toolResult = formatBashResult(shellResult, command);
+					await this.appendShellTriple(toolCallId, args, toolResult, false);
+					this.emit({
+						type: 'tool_end',
+						toolName: 'bash',
+						toolCallId,
+						isError: false,
+						result: toolResult,
+					});
+					return shellResult;
+				} catch (error) {
+					// Aligns with formatBashResult's `details: { command, exitCode }`
+					// shape so consumers reading event.result.details.exitCode see a
+					// number on both branches. -1 is the conventional sentinel for
+					// "no exit recorded" (the same one env.exec uses internally for
+					// sandbox-level failures — see sandbox.ts).
+					const errResult: AgentToolResult<any> = {
+						content: [{ type: 'text', text: getErrorMessage(error) }],
+						details: { command, exitCode: -1 },
+					};
+					await this.appendShellTriple(toolCallId, args, errResult, true);
+					this.emit({
+						type: 'tool_end',
+						toolName: 'bash',
+						toolCallId,
+						isError: true,
+						result: errResult,
+					});
+					throw error;
+				}
 			}),
 		);
 	}
@@ -689,7 +770,6 @@ export class Session implements FlueSession {
 				result: getErrorMessage(error),
 				parentSessionId: this.id,
 			});
-			this.emit({ type: 'error', error: getErrorMessage(error) });
 			throw error;
 		} finally {
 			if (signal && abortListener) signal.removeEventListener('abort', abortListener);
@@ -725,9 +805,12 @@ export class Session implements FlueSession {
 			} catch (error) {
 				// After the signal aborts, anything thrown downstream is
 				// post-abort fallout (harness, tools, compaction). Surface
-				// a single AbortError shape to callers.
+				// a single AbortError shape to callers. Failures propagate
+				// to the caller via throw — operation-end events
+				// (task_end isError, tool_end isError) carry the same
+				// information for in-process observers, so we don't emit a
+				// separate 'error' event here.
 				const surfaced = signal?.aborted ? abortErrorFor(signal) : error;
-				this.emit({ type: 'error', error: getErrorMessage(surfaced) });
 				throw surfaced;
 			} finally {
 				signal?.removeEventListener('abort', onAbort);
@@ -762,19 +845,76 @@ export class Session implements FlueSession {
 		}
 	}
 
-	private createShellMessage(
-		command: string,
-		result: ShellResult,
-		options?: ShellOptions,
-	): AgentMessage {
-		const cwdLine = options?.cwd ? `\ncwd: ${options.cwd}` : '';
-		const envLine = options?.env ? `\nenv: ${Object.keys(options.env).sort().join(', ')}` : '';
-		const output = formatShellHistory(command, result, cwdLine, envLine);
-		return {
+	/**
+	 * Append the three-message conversational triple that represents a
+	 * `session.shell()` call in the message history:
+	 *
+	 *   1. user        — out-of-band request to run the command
+	 *   2. assistant   — synthetic turn whose content is a single bash
+	 *                    tool_use block (matching the shape pi-ai's
+	 *                    providers produce when the LLM itself calls bash)
+	 *   3. toolResult  — the bash output, keyed to the same toolCallId
+	 *
+	 * This makes a session.shell() call indistinguishable from an
+	 * LLM-issued bash tool call when later turns read the transcript.
+	 */
+	private async appendShellTriple(
+		toolCallId: string,
+		args: Record<string, unknown>,
+		toolResult: AgentToolResult<any>,
+		isError: boolean,
+	): Promise<void> {
+		const timestamp = Date.now();
+		const command = args.command as string;
+		const userMessage: UserMessage = {
 			role: 'user',
-			content: [{ type: 'text', text: output }],
-			timestamp: Date.now(),
-		} as AgentMessage;
+			content: `Run this shell command:\n\n\`\`\`bash\n${command}\n\`\`\``,
+			timestamp,
+		};
+		const assistantMessage: AssistantMessage = {
+			role: 'assistant',
+			content: [
+				{
+					type: 'toolCall',
+					id: toolCallId,
+					name: 'bash',
+					arguments: args as Record<string, any>,
+				},
+			],
+			// Synthetic provider-bookkeeping fields. No real provider was
+			// involved in producing this turn; we use sentinel values that
+			// don't pretend otherwise. pi-ai's providers don't read these
+			// fields when transforming history for the next turn — they
+			// only inspect content and stopReason.
+			api: 'flue-shell',
+			provider: 'flue',
+			model: '',
+			usage: {
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				totalTokens: 0,
+				cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+			},
+			stopReason: 'toolUse',
+			timestamp,
+		};
+		const toolResultMessage: ToolResultMessage = {
+			role: 'toolResult',
+			toolCallId,
+			toolName: 'bash',
+			content: toolResult.content as ToolResultMessage['content'],
+			details: toolResult.details,
+			isError,
+			timestamp,
+		};
+		this.history.appendMessages(
+			[userMessage, assistantMessage, toolResultMessage],
+			'shell',
+		);
+		this.harness.state.messages = this.history.buildContext();
+		await this.save();
 	}
 
 	private async syncHarnessMessagesSince(index: number, source: MessageSource): Promise<void> {
@@ -1179,31 +1319,6 @@ export async function deleteSessionTree(
 		}
 	}
 	await store.delete(storageKey);
-}
-
-function formatShellHistory(
-	command: string,
-	result: ShellResult,
-	cwdLine: string,
-	envLine: string,
-): string {
-	const sections = [
-		`<shell_command>\n$ ${command}${cwdLine}${envLine}\n</shell_command>`,
-		`<shell_result exitCode="${result.exitCode}">`,
-	];
-	if (result.stdout) sections.push(`<stdout>\n${result.stdout}\n</stdout>`);
-	if (result.stderr) sections.push(`<stderr>\n${result.stderr}\n</stderr>`);
-	sections.push('</shell_result>');
-	return truncateShellHistory(sections.join('\n'));
-}
-
-function truncateShellHistory(text: string): string {
-	if (text.length <= MAX_SHELL_HISTORY_CHARS) return text;
-	const truncated = text.length - MAX_SHELL_HISTORY_CHARS;
-	return (
-		`[Shell output truncated: ${truncated} leading characters omitted]\n` +
-		text.slice(text.length - MAX_SHELL_HISTORY_CHARS)
-	);
 }
 
 function getErrorMessage(error: unknown): string {

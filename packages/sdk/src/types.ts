@@ -6,11 +6,17 @@ export type { ThinkingLevel };
 
 // ─── Skill ──────────────────────────────────────────────────────────────────
 
+/**
+ * A skill registered with the session. The body of the skill (everything
+ * below the frontmatter in `SKILL.md`) is intentionally NOT cached in
+ * memory — at call time, the model reads the file from disk via its
+ * filesystem tools. That keeps relative references inside the skill
+ * resolvable from where they live, and lets users edit skill files
+ * mid-session without re-initialising the agent.
+ */
 export interface Skill {
 	name: string;
 	description: string;
-	/** Markdown body of SKILL.md (below the frontmatter). */
-	instructions: string;
 }
 
 // ─── Role ───────────────────────────────────────────────────────────────────
@@ -593,7 +599,6 @@ export type FlueEvent = (
 	| { type: 'compaction_start'; reason: 'threshold' | 'overflow'; estimatedTokens: number }
 	| { type: 'compaction_end'; messagesBefore: number; messagesAfter: number }
 	| { type: 'idle' }
-	| { type: 'error'; error: string }
 ) & { sessionId?: string; parentSessionId?: string; taskId?: string };
 
 export type FlueEventCallback = (event: FlueEvent) => void;
