@@ -52,30 +52,41 @@ export interface BuildResult {
 /**
  * Build a workspace into a deployable artifact.
  *
- * `options.workspaceDir` is treated as an explicit workspace root — the directory
- * directly containing agents/ and roles/. No .flue/ waterfall is performed here;
- * callers that want waterfall behavior (e.g. the CLI when --workspace is omitted)
- * should use `resolveWorkspaceFromCwd` first.
+ * `options.workspaceDir` is the workspace root — typically the project's cwd.
+ * Source files (agents, roles) are discovered from one of two locations inside
+ * the workspace, with the same precedence rule the CLI uses:
+ *
+ *   - If `<workspaceDir>/.flue/` exists, it is the source root. Look for
+ *     `.flue/agents/` and `.flue/roles/`. The bare `<workspaceDir>/agents/`
+ *     and `<workspaceDir>/roles/` are ignored entirely (no mixing).
+ *   - Otherwise, look at `<workspaceDir>/agents/` and `<workspaceDir>/roles/`.
+ *
+ * Build output lands in `options.outputDir` (defaults to `<workspaceDir>/dist`).
  *
  * AGENTS.md and .agents/skills/ are NOT bundled — discovered at runtime from session cwd.
  */
 export async function build(options: BuildOptions): Promise<BuildResult> {
 	const workspaceDir = path.resolve(options.workspaceDir);
-	const outputDir = path.resolve(options.outputDir);
+	const outputDir = path.resolve(options.outputDir ?? path.join(workspaceDir, 'dist'));
 
 	const plugin = resolvePlugin(options);
 
+	const sourceRoot = resolveSourceRoot(workspaceDir);
+
 	console.log(`[flue] Building workspace: ${workspaceDir}`);
-	console.log(`[flue] Output: ${outputDir}/dist`);
+	if (sourceRoot !== workspaceDir) {
+		console.log(`[flue] Source root: ${sourceRoot}`);
+	}
+	console.log(`[flue] Output: ${outputDir}`);
 	console.log(`[flue] Target: ${plugin.name}`);
 
-	const roles = discoverRoles(workspaceDir);
-	const agents = discoverAgents(workspaceDir);
+	const roles = discoverRoles(sourceRoot);
+	const agents = discoverAgents(sourceRoot);
 
 	if (agents.length === 0) {
 		throw new Error(
 			`[flue] No agent files found.\n\n` +
-				`Expected at: ${path.join(workspaceDir, 'agents')}/\n` +
+				`Expected at: ${path.join(sourceRoot, 'agents')}/\n` +
 				`Add at least one agent file (e.g. hello.ts).`,
 		);
 	}
@@ -103,8 +114,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 		`[flue] AGENTS.md and .agents/skills/ will be discovered at runtime from session cwd`,
 	);
 
-	const distDir = path.join(outputDir, 'dist');
-	fs.mkdirSync(distDir, { recursive: true });
+	fs.mkdirSync(outputDir, { recursive: true });
 
 	const manifest = {
 		agents: agents.map((a) => ({
@@ -112,7 +122,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 			triggers: a.triggers,
 		})),
 	};
-	const manifestPath = path.join(distDir, 'manifest.json');
+	const manifestPath = path.join(outputDir, 'manifest.json');
 	fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8');
 	console.log(`[flue] Generated: ${manifestPath}`);
 
@@ -130,9 +140,9 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
 	if (bundleStrategy === 'esbuild') {
 		// Single-bundle mode: the plugin produces a TS entry, esbuild
-		// inlines/externalizes deps, output is dist/server.mjs.
-		const entryPath = path.join(distDir, '_entry_server.ts');
-		const outPath = path.join(distDir, 'server.mjs');
+		// inlines/externalizes deps, output is server.mjs in the build dir.
+		const entryPath = path.join(outputDir, '_entry_server.ts');
+		const outPath = path.join(outputDir, 'server.mjs');
 
 		fs.writeFileSync(entryPath, serverCode, 'utf-8');
 
@@ -177,7 +187,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 				`[flue] Plugin "${plugin.name}" set bundle: 'none' but did not provide entryFilename.`,
 			);
 		}
-		const outPath = path.join(distDir, plugin.entryFilename);
+		const outPath = path.join(outputDir, plugin.entryFilename);
 		// Skip the write if content is byte-identical to what's already on
 		// disk. This matters for `flue dev`, where downstream watchers (like
 		// wrangler's bundler) may key on file mtime and would otherwise reload
@@ -198,7 +208,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 	if (plugin.additionalOutputs) {
 		const outputs = await plugin.additionalOutputs(ctx);
 		for (const [filename, content] of Object.entries(outputs)) {
-			const filePath = path.join(distDir, filename);
+			const filePath = path.join(outputDir, filename);
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			// As with the entry above: avoid touching the file if content is
 			// unchanged so downstream watchers (e.g. wrangler) don't see
@@ -213,7 +223,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 		}
 	}
 
-	console.log(`[flue] Build complete. Output: ${distDir}`);
+	console.log(`[flue] Build complete. Output: ${outputDir}`);
 	return { changed: anyChanged };
 }
 
@@ -241,27 +251,26 @@ function resolvePlugin(options: BuildOptions): BuildPlugin {
 }
 
 /**
- * Resolve a Flue workspace directory from the current working directory,
- * using the two-layout convention. Intended for the CLI when `--workspace` is
- * not provided — callers that pass an explicit workspace path should skip this
- * and pass the path straight to `build()`.
+ * Resolve the source root for a workspace, using the `.flue/`-as-src
+ * convention (analogous to Next.js's `src/` folder).
  *
- * Two supported layouts, checked in order:
- *   1. `<cwd>/.flue/` — use this when Flue is embedded in an existing project.
- *   2. `<cwd>/` — use this when the project itself is the Flue workspace.
+ * If `<workspaceDir>/.flue/` exists, it is the source root. Otherwise the
+ * source root is the workspace itself. The two layouts never mix — if `.flue/`
+ * exists, the bare layout is ignored entirely (even if a `<workspaceDir>/agents/`
+ * directory also happens to be present).
  *
- * If `.flue/` exists, it wins unconditionally — no mixing with the bare layout.
- * Returns null if neither is present so the caller can produce a helpful error.
+ * The workspace root (cwd) stays the same in both cases — `.flue/` only
+ * shifts where source files are discovered from. The build output directory
+ * is independent (defaults to `<workspaceDir>/dist`, override with `outputDir`).
  */
-export function resolveWorkspaceFromCwd(cwd: string): string | null {
-	const dotFlue = path.join(cwd, '.flue');
+export function resolveSourceRoot(workspaceDir: string): string {
+	const dotFlue = path.join(workspaceDir, '.flue');
 	if (fs.existsSync(dotFlue)) return dotFlue;
-	if (fs.existsSync(path.join(cwd, 'agents'))) return cwd;
-	return null;
+	return workspaceDir;
 }
 
-function discoverRoles(workspaceRoot: string): Record<string, Role> {
-	const rolesDir = path.join(workspaceRoot, 'roles');
+function discoverRoles(sourceRoot: string): Record<string, Role> {
+	const rolesDir = path.join(sourceRoot, 'roles');
 	if (!fs.existsSync(rolesDir)) return {};
 
 	const roles: Record<string, Role> = {};
@@ -289,8 +298,8 @@ function discoverRoles(workspaceRoot: string): Record<string, Role> {
 	return roles;
 }
 
-function discoverAgents(workspaceRoot: string): AgentInfo[] {
-	const agentsDir = path.join(workspaceRoot, 'agents');
+function discoverAgents(sourceRoot: string): AgentInfo[] {
+	const agentsDir = path.join(sourceRoot, 'agents');
 	if (!fs.existsSync(agentsDir)) return [];
 
 	return fs

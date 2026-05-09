@@ -2,51 +2,37 @@
 import { spawn, type ChildProcess } from 'node:child_process';
 import path from 'node:path';
 import { determineAgent } from '@vercel/detect-agent';
-import {
-	build,
-	dev,
-	DEFAULT_DEV_PORT,
-	parseEnvFiles,
-	resolveEnvFiles,
-	resolveWorkspaceFromCwd,
-} from '@flue/sdk';
+import { build, dev, DEFAULT_DEV_PORT, parseEnvFiles, resolveEnvFiles } from '@flue/sdk';
 import { CONNECTORS, CATEGORY_ROOTS } from './_connectors.generated.ts';
 
 /**
  * Resolve the workspace directory for a CLI command.
  *
- * - If `--workspace` was passed, trust it as-is (explicit = deliberate). No
- *   waterfall is applied — if the user picks a path, that's the path.
- * - Otherwise, waterfall from the current working directory: `./.flue/` if it
- *   exists, else `./`. If neither has an `agents/` subdirectory, print a clear
- *   error and exit — the SDK's own "no agents found" error would also catch
- *   this, but stopping here gives the user a friendlier message up front.
+ * - If `--workspace` was passed, trust it as-is (explicit = deliberate).
+ * - Otherwise, the workspace is the current working directory.
+ *
+ * Source files (agents, roles) live at `<workspaceDir>/.flue/` if that
+ * directory exists, else at `<workspaceDir>/` directly — analogous to
+ * Next.js's `src/` folder.
  */
 function resolveWorkspaceDir(explicitWorkspace: string | undefined): string {
-	if (explicitWorkspace) return explicitWorkspace;
-
-	const cwd = process.cwd();
-	const resolved = resolveWorkspaceFromCwd(cwd);
-	if (resolved) return resolved;
-
-	console.error(
-		`[flue] No Flue workspace found in ${cwd}.\n\n` +
-			`Flue looks in two places:\n` +
-			`  1. ${path.join(cwd, '.flue')}/\n` +
-			`  2. ${cwd}/\n\n` +
-			`Create one of these with an agents/ subdirectory, or pass --workspace <path>.`,
-	);
-	process.exit(1);
+	return explicitWorkspace ?? process.cwd();
 }
 
 /**
- * Resolve the output directory (where dist/ goes). Independent of the workspace
- * so the built artifact and platform config (e.g. wrangler.jsonc) land where
- * the deploy tool expects. Defaults to the current working directory — usually
- * the project root, regardless of where the workspace itself ended up.
+ * Resolve the build output directory.
+ *
+ * - If `--output` was passed, use it. Resolved against cwd, not the workspace,
+ *   so `flue build --workspace ./packages/x --output ./build` writes to the
+ *   build dir relative to where the user invoked the CLI.
+ * - Otherwise default to `<workspaceDir>/dist`.
  */
-function resolveOutputDir(explicitOutput: string | undefined): string {
-	return explicitOutput ?? process.cwd();
+function resolveOutputDir(
+	explicitOutput: string | undefined,
+	workspaceDir: string,
+): string {
+	if (explicitOutput) return path.resolve(explicitOutput);
+	return path.join(workspaceDir, 'dist');
 }
 
 // ─── Arg Parsing ────────────────────────────────────────────────────────────
@@ -66,8 +52,10 @@ function printUsage() {
 			'  add    Install a connector. Pipes installation instructions for an AI coding agent to follow.\n' +
 			'\n' +
 			'Flags:\n' +
-			'  --workspace <path>   Workspace root (containing agents/ and roles/). Default: ./.flue/ if it exists, else ./\n' +
-			'  --output <path>      Where dist/ is written. Default: current working directory\n' +
+			'  --workspace <path>   Workspace root. Default: current working directory.\n' +
+			'                       Source files (agents/, roles/) live at <workspace>/.flue/ if that\n' +
+			'                       directory exists, else at <workspace>/ directly.\n' +
+			'  --output <path>      Where the build artifacts are written. Default: <workspace>/dist.\n' +
 			`  --port <number>      Port for the dev server. Default: ${DEFAULT_DEV_PORT}\n` +
 			'  --env <path>         Load env vars from a .env-format file. Repeatable; later files override earlier on key collision.\n' +
 			'                       Works for both Node and Cloudflare targets. Shell-set env vars win over file values.\n' +
@@ -82,7 +70,8 @@ function printUsage() {
 			'  flue run hello --target node --id test-1\n' +
 			'  flue run hello --target node --id test-1 --payload \'{"name": "World"}\' --env .env\n' +
 			'  flue build --target node\n' +
-			'  flue build --target cloudflare --workspace ./.flue --output ./build\n' +
+			'  flue build --target cloudflare --workspace ./my-app\n' +
+			'  flue build --target node --output ./build\n' +
 			'  flue add\n' +
 			'  flue add daytona | claude\n' +
 			'  flue add https://e2b.dev --category sandbox | claude\n' +
@@ -98,9 +87,9 @@ interface RunArgs {
 	target: 'node';
 	id: string;
 	payload: string;
-	/** Explicit --workspace value, or undefined to apply the cwd waterfall. */
+	/** Explicit --workspace value, or undefined to default to cwd. */
 	explicitWorkspace: string | undefined;
-	/** Explicit --output value, or undefined to default to cwd. */
+	/** Explicit --output value, or undefined to default to <workspaceDir>/dist. */
 	explicitOutput: string | undefined;
 	port: number;
 	/** Resolved absolute paths from --env flags (repeatable). */
@@ -110,18 +99,18 @@ interface RunArgs {
 interface BuildArgs {
 	command: 'build';
 	target: 'node' | 'cloudflare';
-	/** Explicit --workspace value, or undefined to apply the cwd waterfall. */
+	/** Explicit --workspace value, or undefined to default to cwd. */
 	explicitWorkspace: string | undefined;
-	/** Explicit --output value, or undefined to default to cwd. */
+	/** Explicit --output value, or undefined to default to <workspaceDir>/dist. */
 	explicitOutput: string | undefined;
 }
 
 interface DevArgs {
 	command: 'dev';
 	target: 'node' | 'cloudflare';
-	/** Explicit --workspace value, or undefined to apply the cwd waterfall. */
+	/** Explicit --workspace value, or undefined to default to cwd. */
 	explicitWorkspace: string | undefined;
-	/** Explicit --output value, or undefined to default to cwd. */
+	/** Explicit --output value, or undefined to default to <workspaceDir>/dist. */
 	explicitOutput: string | undefined;
 	/** 0 = use the SDK default (DEFAULT_DEV_PORT). */
 	port: number;
@@ -693,7 +682,7 @@ async function findPort(): Promise<number> {
 
 async function buildCommand(args: BuildArgs) {
 	const workspaceDir = resolveWorkspaceDir(args.explicitWorkspace);
-	const outputDir = resolveOutputDir(args.explicitOutput);
+	const outputDir = resolveOutputDir(args.explicitOutput, workspaceDir);
 	try {
 		await build({
 			workspaceDir,
@@ -708,7 +697,7 @@ async function buildCommand(args: BuildArgs) {
 
 async function devCommand(args: DevArgs) {
 	const workspaceDir = resolveWorkspaceDir(args.explicitWorkspace);
-	const outputDir = resolveOutputDir(args.explicitOutput);
+	const outputDir = resolveOutputDir(args.explicitOutput, workspaceDir);
 	try {
 		// dev() blocks until SIGINT/SIGTERM exits the process. We don't expect
 		// it to return; if it ever does, just exit cleanly.
@@ -727,14 +716,17 @@ async function devCommand(args: DevArgs) {
 
 async function run(args: RunArgs) {
 	const workspaceDir = resolveWorkspaceDir(args.explicitWorkspace);
-	const outputDir = resolveOutputDir(args.explicitOutput);
-	const serverPath = path.join(outputDir, 'dist', 'server.mjs');
+	const outputDir = resolveOutputDir(args.explicitOutput, workspaceDir);
+	const serverPath = path.join(outputDir, 'server.mjs');
 
 	// 0. Resolve --env paths up front so a typo errors before we kick
-	//    off a build. Resolves relative to outputDir (the project root).
+	//    off a build. Resolves relative to workspaceDir (the project root)
+	//    so users author --env paths the way they think about them, not
+	//    relative to wherever they happened to redirect the build via
+	//    --output.
 	let resolvedEnvFiles: string[];
 	try {
-		resolvedEnvFiles = resolveEnvFiles(args.envFiles, outputDir);
+		resolvedEnvFiles = resolveEnvFiles(args.envFiles, workspaceDir);
 	} catch (err) {
 		console.error(err instanceof Error ? err.message : String(err));
 		process.exit(1);
@@ -755,9 +747,11 @@ async function run(args: RunArgs) {
 	// 2. Pick a port
 	const port = args.port || (await findPort());
 
-	// 3. Start server
+	// 3. Start server. We launch the child with cwd=workspaceDir so the
+	//    server resolves user dependencies, AGENTS.md, etc. relative to
+	//    the project root regardless of where the build artifacts ended up.
 	console.error(`[flue] Starting server on port ${port}...`);
-	serverProcess = startServer(serverPath, port, fileEnv, outputDir);
+	serverProcess = startServer(serverPath, port, fileEnv, workspaceDir);
 
 	// Pipe server stdout/stderr for visibility
 	const pipeServerOutput = (data: Buffer) => {

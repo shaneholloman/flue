@@ -37,14 +37,18 @@ import { randomUUID } from 'node:crypto';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseEnv } from 'node:util';
-import { build } from './build.ts';
+import { build, resolveSourceRoot } from './build.ts';
 import type { BuildOptions } from './types.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
 export interface DevOptions {
 	workspaceDir: string;
-	outputDir: string;
+	/**
+	 * Where the build artifacts are written. Defaults to `<workspaceDir>/dist`.
+	 * See {@link BuildOptions.outputDir} for details.
+	 */
+	outputDir?: string;
 	target: 'node' | 'cloudflare';
 	/** Defaults to 3583 ("FLUE" on a phone keypad). */
 	port?: number;
@@ -112,13 +116,13 @@ interface DevReloader {
  */
 export async function dev(options: DevOptions): Promise<void> {
 	const workspaceDir = path.resolve(options.workspaceDir);
-	const outputDir = path.resolve(options.outputDir);
+	const outputDir = path.resolve(options.outputDir ?? path.join(workspaceDir, 'dist'));
 	const port = options.port ?? DEFAULT_DEV_PORT;
 
 	// Resolve env files up front so a typo errors before we kick off a build.
-	// Resolved against outputDir so relative paths feel natural ("the path
-	// they look like from the project root").
-	const envFiles = resolveEnvFiles(options.envFiles, outputDir);
+	// Resolved against workspaceDir (the project root) so relative paths feel
+	// natural — "the path they look like from where I ran flue".
+	const envFiles = resolveEnvFiles(options.envFiles, workspaceDir);
 	for (const f of envFiles) {
 		console.error(`[flue] Loading env from: ${f}`);
 	}
@@ -145,7 +149,7 @@ export async function dev(options: DevOptions): Promise<void> {
 
 	const reloader: DevReloader =
 		options.target === 'node'
-			? new NodeReloader({ outputDir, port, envFiles })
+			? new NodeReloader({ workspaceDir, outputDir, port, envFiles })
 			: await createCloudflareReloader({ outputDir, port, envFiles });
 
 	await reloader.start();
@@ -287,6 +291,11 @@ function createRebuilder(buildOptions: BuildOptions, reloader: DevReloader): Reb
 
 interface WatcherOptions {
 	workspaceDir: string;
+	/**
+	 * Absolute path to the build output directory. Anything inside this
+	 * directory is ignored by the watcher — otherwise build writes would
+	 * trigger spurious rebuilds (and an infinite loop).
+	 */
 	outputDir: string;
 	target: 'node' | 'cloudflare';
 	/** Absolute paths of env files to watch. Empty means none. */
@@ -302,34 +311,62 @@ interface WatcherHandle {
  * Watch the workspace for changes. Uses `fs.watch` recursive (Node 20+).
  *
  * Watched roots:
- *   - `<workspaceDir>` — agents/, roles/, AGENTS.md, .agents/skills/.
- *   - For Cloudflare: also `<outputDir>/wrangler.jsonc` (and `.json`),
+ *   - `<workspaceDir>` — agents/, roles/, AGENTS.md, .agents/skills/, plus
+ *     `.flue/agents/` and `.flue/roles/` if the workspace uses the .flue/
+ *     source layout.
+ *   - For Cloudflare: also `<workspaceDir>/wrangler.jsonc` (and `.json`),
  *     since changes there require a worker restart.
  *
  * Ignored:
- *   - `dist/`, `node_modules/`, `.git/`, `.turbo/`
- *   - dotfiles other than the ones we explicitly care about (AGENTS.md is
- *     not a dotfile, so it's fine)
- *   - editor backup/swap suffixes
+ *   - The build output directory (`outputDir`, defaults to `<workspaceDir>/dist`).
+ *     Critical to break the build → file-change → rebuild loop.
+ *   - `node_modules/`, `.git/`, `.turbo/`
+ *   - Dotfiles and dotdirs at the workspace root, with one exception: the
+ *     `.flue/` source directory and everything inside it is allowed through
+ *     (since that's a valid source location under the .flue-as-src layout).
+ *   - Editor backup/swap suffixes
  */
 function createWatcher(options: WatcherOptions): WatcherHandle {
 	const { workspaceDir, outputDir, target, envFiles, onChange } = options;
 	const watchers: fs.FSWatcher[] = [];
 
+	// Pre-compute the workspace-relative path of outputDir for fast prefix
+	// checks. If outputDir lives outside workspaceDir, the recursive watcher
+	// won't see writes there at all — but we still ignore any path that
+	// resolves into it, just to be safe across platforms.
+	const outputRelToWorkspace = path
+		.relative(workspaceDir, outputDir)
+		.split(path.sep)
+		.join('/');
+
 	const isIgnoredPath = (relPath: string): boolean => {
 		const normalized = relPath.replace(/\\/g, '/');
+		// `.flue/` and anything beneath it is always allowed — that's the
+		// source-layout directory. Short-circuit before the dotfile check.
+		if (normalized === '.flue' || normalized.startsWith('.flue/')) {
+			return false;
+		}
+		// Anything inside the build output dir — even when the user redirects
+		// it via --output to something other than `dist/` — must be ignored,
+		// or the build's own writes would trigger an infinite rebuild loop.
+		if (
+			outputRelToWorkspace &&
+			!outputRelToWorkspace.startsWith('..') &&
+			(normalized === outputRelToWorkspace ||
+				normalized.startsWith(outputRelToWorkspace + '/'))
+		) {
+			return true;
+		}
 		const parts = normalized.split('/');
 		for (const part of parts) {
 			if (part === 'node_modules') return true;
-			if (part === 'dist') return true;
 			if (part === '.git') return true;
 			if (part === '.turbo') return true;
 		}
 		const base = parts[parts.length - 1] ?? '';
 		if (!base) return true;
-		if (base.startsWith('.') && base !== '.flueignore') return true;
+		if (base.startsWith('.')) return true;
 		if (base.endsWith('~') || base.endsWith('.swp') || base.endsWith('.swx')) return true;
-		if (base === '.DS_Store') return true;
 		return false;
 	};
 
@@ -353,7 +390,7 @@ function createWatcher(options: WatcherOptions): WatcherHandle {
 		// they'll need to restart the dev server. That trade-off keeps the
 		// watcher logic simple and avoids polling for non-existent files.
 		for (const cfgName of ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml']) {
-			const cfgPath = path.join(outputDir, cfgName);
+			const cfgPath = path.join(workspaceDir, cfgName);
 			if (!fs.existsSync(cfgPath)) continue;
 			try {
 				const w = fs.watch(cfgPath, () => onChange(cfgName));
@@ -396,16 +433,21 @@ function createWatcher(options: WatcherOptions): WatcherHandle {
 class NodeReloader implements DevReloader {
 	private child: ChildProcess | null = null;
 	private readonly serverPath: string;
-	private readonly outputDir: string;
+	private readonly workspaceDir: string;
 	private readonly port: number;
 	private readonly envFiles: string[];
 	url: string;
 
-	constructor(opts: { outputDir: string; port: number; envFiles: string[] }) {
-		this.outputDir = opts.outputDir;
+	constructor(opts: {
+		workspaceDir: string;
+		outputDir: string;
+		port: number;
+		envFiles: string[];
+	}) {
+		this.workspaceDir = opts.workspaceDir;
 		this.port = opts.port;
 		this.envFiles = opts.envFiles;
-		this.serverPath = path.join(this.outputDir, 'dist', 'server.mjs');
+		this.serverPath = path.join(opts.outputDir, 'server.mjs');
 		this.url = `http://localhost:${this.port}`;
 	}
 
@@ -454,7 +496,7 @@ class NodeReloader implements DevReloader {
 		const fromFiles = parseEnvFiles(this.envFiles);
 		const child = spawn('node', [this.serverPath], {
 			stdio: ['ignore', 'pipe', 'pipe'],
-			cwd: this.outputDir,
+			cwd: this.workspaceDir,
 			// FLUE_MODE=local lets the dev server invoke trigger-less agents over
 			// HTTP (useful when iterating on CI-only agents locally). Mirrors
 			// the behavior of `flue run`.
@@ -583,7 +625,6 @@ class CloudflareReloader implements DevReloader {
 	private worker: Awaited<ReturnType<typeof import('wrangler').unstable_startWorker>> | null =
 		null;
 	private readonly wrangler: typeof import('wrangler');
-	private readonly outputDir: string;
 	private readonly port: number;
 	private readonly configPath: string;
 	private readonly envFiles: string[];
@@ -617,10 +658,9 @@ class CloudflareReloader implements DevReloader {
 		opts: { outputDir: string; port: number; envFiles: string[] },
 	) {
 		this.wrangler = wrangler;
-		this.outputDir = opts.outputDir;
 		this.port = opts.port;
 		this.envFiles = opts.envFiles;
-		this.configPath = path.join(this.outputDir, 'dist', 'wrangler.jsonc');
+		this.configPath = path.join(opts.outputDir, 'wrangler.jsonc');
 		this.containerBuildId = randomUUID().slice(0, 8);
 	}
 
@@ -662,8 +702,12 @@ class CloudflareReloader implements DevReloader {
 		) {
 			return true;
 		}
-		if (normalized.startsWith('agents/')) return true;
-		if (normalized.startsWith('roles/')) return true;
+		// Source files can live under either layout: bare (`agents/foo.ts`)
+		// or `.flue/`-as-src (`.flue/agents/foo.ts`). Match both prefixes —
+		// only one is ever in use for a given workspace, so accepting both
+		// is harmless.
+		if (normalized.startsWith('agents/') || normalized.startsWith('.flue/agents/')) return true;
+		if (normalized.startsWith('roles/') || normalized.startsWith('.flue/roles/')) return true;
 		return false;
 	}
 
@@ -880,15 +924,15 @@ async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolea
  * Pick a webhook agent name to print in the friendly curl example. Falls back
  * to any agent if none have webhook triggers (the example would 404 on the
  * dev server in that case, but it's still a hint at the URL shape). Reads the
- * manifest written by the build, with a directory-scan fallback in case the
- * manifest is somehow missing.
+ * manifest written by the build at `<outputDir>/manifest.json`, with a
+ * source-tree scan fallback in case the manifest is somehow missing.
  *
  * Best-effort — silently returns null if anything goes wrong.
  */
 function pickExampleAgentName(outputDir: string, workspaceDir: string): string | null {
 	type ManifestEntry = { name: string; triggers?: { webhook?: boolean } };
 	try {
-		const manifestPath = path.join(outputDir, 'dist', 'manifest.json');
+		const manifestPath = path.join(outputDir, 'manifest.json');
 		if (fs.existsSync(manifestPath)) {
 			const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
 				agents?: ManifestEntry[];
@@ -902,8 +946,10 @@ function pickExampleAgentName(outputDir: string, workspaceDir: string): string |
 		// Fall through to filesystem scan.
 	}
 
+	// Resolve the source root the same way build() does so this works for both
+	// the bare layout and the .flue/-as-src layout.
 	try {
-		const agentsDir = path.join(workspaceDir, 'agents');
+		const agentsDir = path.join(resolveSourceRoot(workspaceDir), 'agents');
 		if (!fs.existsSync(agentsDir)) return null;
 		for (const e of fs.readdirSync(agentsDir)) {
 			const m = e.match(/^([a-zA-Z0-9_-]+)\.(ts|js|mts|mjs)$/);
