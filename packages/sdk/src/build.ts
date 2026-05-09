@@ -61,13 +61,13 @@ export interface BuildResult {
  *     `<root>/roles/` are ignored entirely (no mixing).
  *   - Otherwise, look at `<root>/agents/` and `<root>/roles/`.
  *
- * Build output lands in `options.outputDir` (defaults to `<root>/dist`).
+ * Build output lands in `options.output` (defaults to `<root>/dist`).
  *
  * AGENTS.md and .agents/skills/ are NOT bundled — discovered at runtime from session cwd.
  */
 export async function build(options: BuildOptions): Promise<BuildResult> {
 	const root = path.resolve(options.root);
-	const outputDir = path.resolve(options.outputDir ?? path.join(root, 'dist'));
+	const output = path.resolve(options.output ?? path.join(root, 'dist'));
 
 	const plugin = resolvePlugin(options);
 
@@ -77,7 +77,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 	if (sourceRoot !== root) {
 		console.log(`[flue] Source root: ${sourceRoot}`);
 	}
-	console.log(`[flue] Output: ${outputDir}`);
+	console.log(`[flue] Output: ${output}`);
 	console.log(`[flue] Target: ${plugin.name}`);
 
 	const roles = discoverRoles(sourceRoot);
@@ -114,7 +114,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 		`[flue] AGENTS.md and .agents/skills/ will be discovered at runtime from session cwd`,
 	);
 
-	fs.mkdirSync(outputDir, { recursive: true });
+	fs.mkdirSync(output, { recursive: true });
 
 	const manifest = {
 		agents: agents.map((a) => ({
@@ -122,7 +122,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 			triggers: a.triggers,
 		})),
 	};
-	const manifestPath = path.join(outputDir, 'manifest.json');
+	const manifestPath = path.join(output, 'manifest.json');
 	fs.writeFileSync(manifestPath, JSON.stringify(manifest, null, 2), 'utf-8');
 	console.log(`[flue] Generated: ${manifestPath}`);
 
@@ -130,7 +130,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 		agents,
 		roles,
 		root,
-		outputDir,
+		output,
 		options,
 	};
 
@@ -141,8 +141,8 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 	if (bundleStrategy === 'esbuild') {
 		// Single-bundle mode: the plugin produces a TS entry, esbuild
 		// inlines/externalizes deps, output is server.mjs in the build dir.
-		const entryPath = path.join(outputDir, '_entry_server.ts');
-		const outPath = path.join(outputDir, 'server.mjs');
+		const entryPath = path.join(output, '_entry_server.ts');
+		const outPath = path.join(output, 'server.mjs');
 
 		fs.writeFileSync(entryPath, serverCode, 'utf-8');
 
@@ -187,7 +187,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 				`[flue] Plugin "${plugin.name}" set bundle: 'none' but did not provide entryFilename.`,
 			);
 		}
-		const outPath = path.join(outputDir, plugin.entryFilename);
+		const outPath = path.join(output, plugin.entryFilename);
 		// Skip the write if content is byte-identical to what's already on
 		// disk. This matters for `flue dev`, where downstream watchers (like
 		// wrangler's bundler) may key on file mtime and would otherwise reload
@@ -208,7 +208,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 	if (plugin.additionalOutputs) {
 		const outputs = await plugin.additionalOutputs(ctx);
 		for (const [filename, content] of Object.entries(outputs)) {
-			const filePath = path.join(outputDir, filename);
+			const filePath = path.join(output, filename);
 			fs.mkdirSync(path.dirname(filePath), { recursive: true });
 			// As with the entry above: avoid touching the file if content is
 			// unchanged so downstream watchers (e.g. wrangler) don't see
@@ -223,7 +223,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 		}
 	}
 
-	console.log(`[flue] Build complete. Output: ${outputDir}`);
+	console.log(`[flue] Build complete. Output: ${output}`);
 	return { changed: anyChanged };
 }
 
@@ -261,7 +261,7 @@ function resolvePlugin(options: BuildOptions): BuildPlugin {
  *
  * The project root (cwd) stays the same in both cases — `.flue/` only shifts
  * where source files are discovered from. The build output directory is
- * independent (defaults to `<root>/dist`, override with `outputDir`).
+ * independent (defaults to `<root>/dist`, override with `output`).
  */
 export function resolveSourceRoot(root: string): string {
 	const dotFlue = path.join(root, '.flue');

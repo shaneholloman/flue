@@ -662,14 +662,14 @@ export interface BuildContext {
 	/**
 	 * Absolute path to the directory the build writes its artifacts into.
 	 * Defaults to `<root>/dist`; users can override with `--output`
-	 * (CLI) or `outputDir` (programmatic) to redirect the build elsewhere.
+	 * (CLI) or `output` (programmatic) to redirect the build elsewhere.
 	 *
 	 * Note that this is the literal output directory — `server.mjs`,
 	 * `wrangler.jsonc`, etc. are written directly inside it. The user's
 	 * `wrangler.jsonc` and the wrangler deploy-redirect file still anchor
 	 * on `root`, regardless of this value.
 	 */
-	outputDir: string;
+	output: string;
 	options: BuildOptions;
 }
 
@@ -710,8 +710,8 @@ export interface BuildPlugin {
 	/** esbuild options. Only consulted when `bundle === 'esbuild'`. */
 	esbuildOptions?(ctx: BuildContext): Record<string, any>;
 	/**
-	 * Additional files to write to the output directory (`ctx.outputDir`).
-	 * Keys are filenames relative to `outputDir` (e.g. `wrangler.jsonc`,
+	 * Additional files to write to the output directory (`ctx.output`).
+	 * Keys are filenames relative to `output` (e.g. `wrangler.jsonc`,
 	 * `Dockerfile`). Values are file contents. May be async.
 	 */
 	additionalOutputs?(ctx: BuildContext): Record<string, string> | Promise<Record<string, string>>;
@@ -733,7 +733,7 @@ export interface BuildOptions {
 	 * expects a specific directory). Resolved relative to the cwd at call
 	 * time, not `root`.
 	 */
-	outputDir?: string;
+	output?: string;
 	target?: 'node' | 'cloudflare';
 	/** Overrides `target` when provided. */
 	plugin?: BuildPlugin;

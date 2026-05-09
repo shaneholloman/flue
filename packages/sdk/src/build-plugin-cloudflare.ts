@@ -36,7 +36,7 @@ export class CloudflarePlugin implements BuildPlugin {
 	/**
 	 * Read the user's wrangler config from `root`. The user's config always
 	 * lives at the project root, regardless of where the build artifacts get
-	 * written via `outputDir`. We only re-locate the *generated*
+	 * written via `output`. We only re-locate the *generated*
 	 * `wrangler.jsonc` (the merged one) — never the source one.
 	 */
 	private async getUserConfig(root: string) {
@@ -597,11 +597,11 @@ export default {
 		// Side effect: write the wrangler deploy-redirect file at
 		// <root>/.wrangler/deploy/config.json so `wrangler deploy` run from the
 		// project root automatically picks up our generated
-		// `<outputDir>/wrangler.jsonc`. Only written if not already present,
+		// `<output>/wrangler.jsonc`. Only written if not already present,
 		// to respect user intent. This lives outside the build output, so
 		// it's handled here rather than through the additionalOutputs return
-		// value (which writes relative to outputDir).
-		writeDeployRedirectIfMissing(ctx.root, ctx.outputDir);
+		// value (which writes relative to output).
+		writeDeployRedirectIfMissing(ctx.root, ctx.output);
 
 		return outputs;
 	}

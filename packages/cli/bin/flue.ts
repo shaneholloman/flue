@@ -717,7 +717,7 @@ async function buildCommand(args: BuildArgs) {
 	try {
 		await build({
 			root: cfg.root,
-			outputDir: cfg.output,
+			output: cfg.output,
 			target: cfg.target,
 		});
 	} catch (err) {
@@ -738,7 +738,7 @@ async function devCommand(args: DevArgs) {
 		// it to return; if it ever does, just exit cleanly.
 		await dev({
 			root: cfg.root,
-			outputDir: cfg.output,
+			output: cfg.output,
 			target: cfg.target,
 			port: args.port || undefined,
 			envFiles: args.envFiles,
@@ -765,8 +765,8 @@ async function run(args: RunArgs) {
 	}
 
 	const root = cfg.root;
-	const outputDir = cfg.output;
-	const serverPath = path.join(outputDir, 'server.mjs');
+	const output = cfg.output;
+	const serverPath = path.join(output, 'server.mjs');
 
 	// 0. Resolve --env paths up front so a typo errors before we kick
 	//    off a build. Resolves relative to root (the project root)
@@ -787,7 +787,7 @@ async function run(args: RunArgs) {
 
 	// 1. Build
 	try {
-		await build({ root, outputDir, target: cfg.target });
+		await build({ root, output, target: cfg.target });
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
 		process.exit(1);

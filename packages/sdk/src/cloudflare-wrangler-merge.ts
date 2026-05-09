@@ -553,17 +553,17 @@ export function assertSandboxPackageInstalled(
  * Write the wrangler deploy-redirect file at
  * `<root>/.wrangler/deploy/config.json` so that `wrangler deploy` run from
  * the project root automatically picks up the generated wrangler config at
- * `<outputDir>/wrangler.jsonc`.
+ * `<output>/wrangler.jsonc`.
  *
  * This is wrangler's own native redirection mechanism (the same one Astro's
  * Cloudflare adapter uses). We only write the file if one doesn't already
  * exist — if the user has set one up, respect their intent.
  *
- * `outputDir` may be anywhere (typically `<root>/dist`, but the user
+ * `output` may be anywhere (typically `<root>/dist`, but the user
  * can redirect it via `--output`). We compute a relative path so the
  * redirect file is portable across machines / repos.
  */
-export function writeDeployRedirectIfMissing(root: string, outputDir: string): void {
+export function writeDeployRedirectIfMissing(root: string, output: string): void {
 	const redirectDir = path.join(root, '.wrangler', 'deploy');
 	const redirectPath = path.join(redirectDir, 'config.json');
 
@@ -575,7 +575,7 @@ export function writeDeployRedirectIfMissing(root: string, outputDir: string): v
 	// `configPath` is resolved relative to the redirect file's own directory.
 	// Compute a relative path from there to the actual generated config so
 	// the redirect tracks `--output` overrides correctly.
-	const targetPath = path.join(outputDir, 'wrangler.jsonc');
+	const targetPath = path.join(output, 'wrangler.jsonc');
 	const relConfigPath = path.relative(redirectDir, targetPath).split(path.sep).join('/');
 	fs.writeFileSync(
 		redirectPath,

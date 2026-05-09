@@ -46,9 +46,9 @@ export interface DevOptions {
 	root: string;
 	/**
 	 * Where the build artifacts are written. Defaults to `<root>/dist`.
-	 * See {@link BuildOptions.outputDir} for details.
+	 * See {@link BuildOptions.output} for details.
 	 */
-	outputDir?: string;
+	output?: string;
 	target: 'node' | 'cloudflare';
 	/** Defaults to 3583 ("FLUE" on a phone keypad). */
 	port?: number;
@@ -116,7 +116,7 @@ interface DevReloader {
  */
 export async function dev(options: DevOptions): Promise<void> {
 	const root = path.resolve(options.root);
-	const outputDir = path.resolve(options.outputDir ?? path.join(root, 'dist'));
+	const output = path.resolve(options.output ?? path.join(root, 'dist'));
 	const port = options.port ?? DEFAULT_DEV_PORT;
 
 	// Resolve env files up front so a typo errors before we kick off a build.
@@ -129,7 +129,7 @@ export async function dev(options: DevOptions): Promise<void> {
 
 	const buildOptions: BuildOptions = {
 		root,
-		outputDir,
+		output,
 		target: options.target,
 	};
 
@@ -149,14 +149,14 @@ export async function dev(options: DevOptions): Promise<void> {
 
 	const reloader: DevReloader =
 		options.target === 'node'
-			? new NodeReloader({ root, outputDir, port, envFiles })
-			: await createCloudflareReloader({ outputDir, port, envFiles });
+			? new NodeReloader({ root, output, port, envFiles })
+			: await createCloudflareReloader({ output, port, envFiles });
 
 	await reloader.start();
 
 	if (reloader.url) {
 		console.error(`[flue] Server: ${reloader.url}`);
-		const exampleAgent = pickExampleAgentName(outputDir, root);
+		const exampleAgent = pickExampleAgentName(output, root);
 		if (exampleAgent) {
 			console.error(`[flue] Try: curl -X POST ${reloader.url}/agents/${exampleAgent}/test-1 \\`);
 			console.error(`         -H 'Content-Type: application/json' -d '{}'`);
@@ -170,7 +170,7 @@ export async function dev(options: DevOptions): Promise<void> {
 	const envFileSet = new Set(envFiles);
 	const watcher = createWatcher({
 		root,
-		outputDir,
+		output,
 		target: options.target,
 		envFiles,
 		onChange: (relPath) => {
@@ -296,7 +296,7 @@ interface WatcherOptions {
 	 * directory is ignored by the watcher — otherwise build writes would
 	 * trigger spurious rebuilds (and an infinite loop).
 	 */
-	outputDir: string;
+	output: string;
 	target: 'node' | 'cloudflare';
 	/** Absolute paths of env files to watch. Empty means none. */
 	envFiles: string[];
@@ -318,7 +318,7 @@ interface WatcherHandle {
  *     since changes there require a worker restart.
  *
  * Ignored:
- *   - The build output directory (`outputDir`, defaults to `<root>/dist`).
+ *   - The build output directory (`output`, defaults to `<root>/dist`).
  *     Critical to break the build → file-change → rebuild loop.
  *   - `node_modules/`, `.git/`, `.turbo/`
  *   - Dotfiles and dotdirs at the project root, with one exception: the
@@ -327,15 +327,15 @@ interface WatcherHandle {
  *   - Editor backup/swap suffixes
  */
 function createWatcher(options: WatcherOptions): WatcherHandle {
-	const { root, outputDir, target, envFiles, onChange } = options;
+	const { root, output, target, envFiles, onChange } = options;
 	const watchers: fs.FSWatcher[] = [];
 
-	// Pre-compute the root-relative path of outputDir for fast prefix
-	// checks. If outputDir lives outside root, the recursive watcher
+	// Pre-compute the root-relative path of output for fast prefix
+	// checks. If output lives outside root, the recursive watcher
 	// won't see writes there at all — but we still ignore any path that
 	// resolves into it, just to be safe across platforms.
 	const outputRelToRoot = path
-		.relative(root, outputDir)
+		.relative(root, output)
 		.split(path.sep)
 		.join('/');
 
@@ -439,14 +439,14 @@ class NodeReloader implements DevReloader {
 
 	constructor(opts: {
 		root: string;
-		outputDir: string;
+		output: string;
 		port: number;
 		envFiles: string[];
 	}) {
 		this.root = opts.root;
 		this.port = opts.port;
 		this.envFiles = opts.envFiles;
-		this.serverPath = path.join(opts.outputDir, 'server.mjs');
+		this.serverPath = path.join(opts.output, 'server.mjs');
 		this.url = `http://localhost:${this.port}`;
 	}
 
@@ -601,7 +601,7 @@ interface WranglerErrorEvent {
  * If the import fails, surface a friendly message pointing at the peer-dep.
  */
 async function createCloudflareReloader(opts: {
-	outputDir: string;
+	output: string;
 	port: number;
 	envFiles: string[];
 }): Promise<DevReloader> {
@@ -654,12 +654,12 @@ class CloudflareReloader implements DevReloader {
 
 	constructor(
 		wrangler: typeof import('wrangler'),
-		opts: { outputDir: string; port: number; envFiles: string[] },
+		opts: { output: string; port: number; envFiles: string[] },
 	) {
 		this.wrangler = wrangler;
 		this.port = opts.port;
 		this.envFiles = opts.envFiles;
-		this.configPath = path.join(opts.outputDir, 'wrangler.jsonc');
+		this.configPath = path.join(opts.output, 'wrangler.jsonc');
 		this.containerBuildId = randomUUID().slice(0, 8);
 	}
 
@@ -923,15 +923,15 @@ async function waitForHealth(baseUrl: string, timeoutMs: number): Promise<boolea
  * Pick a webhook agent name to print in the friendly curl example. Falls back
  * to any agent if none have webhook triggers (the example would 404 on the
  * dev server in that case, but it's still a hint at the URL shape). Reads the
- * manifest written by the build at `<outputDir>/manifest.json`, with a
+ * manifest written by the build at `<output>/manifest.json`, with a
  * source-tree scan fallback in case the manifest is somehow missing.
  *
  * Best-effort — silently returns null if anything goes wrong.
  */
-function pickExampleAgentName(outputDir: string, root: string): string | null {
+function pickExampleAgentName(output: string, root: string): string | null {
 	type ManifestEntry = { name: string; triggers?: { webhook?: boolean } };
 	try {
-		const manifestPath = path.join(outputDir, 'manifest.json');
+		const manifestPath = path.join(output, 'manifest.json');
 		if (fs.existsSync(manifestPath)) {
 			const manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf-8')) as {
 				agents?: ManifestEntry[];
