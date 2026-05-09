@@ -1,9 +1,15 @@
 #!/usr/bin/env node
 import { spawn, type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs';
 import path from 'node:path';
 import { determineAgent } from '@vercel/detect-agent';
 import { build, dev, DEFAULT_DEV_PORT, parseEnvFiles, resolveEnvFiles } from '@flue/sdk';
-import { resolveConfig, type FlueConfig, type UserFlueConfig } from '@flue/sdk/config';
+import {
+	resolveConfig,
+	resolveConfigPath,
+	type FlueConfig,
+	type UserFlueConfig,
+} from '@flue/sdk/config';
 import { CONNECTORS, CATEGORY_ROOTS } from './_connectors.generated.ts';
 
 /**
@@ -53,12 +59,14 @@ function printUsage() {
 			'  flue dev   [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...\n' +
 			'  flue run   <agent> [--target node] --id <id> [--payload <json>] [--root <path>] [--output <path>] [--config <path>] [--port <number>] [--env <path>]...\n' +
 			'  flue build [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>]\n' +
+			'  flue init  --target <node|cloudflare> [--root <path>] [--force]\n' +
 			'  flue add   [<name>|<url>] [--category <category>] [--print]\n' +
 			'\n' +
 			'Commands:\n' +
 			'  dev    Long-running watch-mode dev server. Rebuilds and reloads on file changes.\n' +
 			'  run    One-shot build + invoke an agent (production-style; use for CI / scripted runs).\n' +
 			'  build  Build a deployable artifact to ./dist (production deploys).\n' +
+			'  init   Scaffold a starter flue.config.ts in the target directory.\n' +
 			'  add    Install a connector. Pipes installation instructions for an AI coding agent to follow.\n' +
 			'\n' +
 			'Flags:\n' +
@@ -75,6 +83,7 @@ function printUsage() {
 			'  --category <name>    (flue add) Fetch the generic instructions for a connector category. Pair with a positional URL/path that\n' +
 			'                       points the agent at the provider\'s docs (e.g. `flue add https://e2b.dev --category sandbox`).\n' +
 			'  --print              (flue add) Print the raw connector markdown to stdout regardless of whether the caller is an agent.\n' +
+			'  --force              (flue init) Overwrite an existing flue.config.* in the target directory.\n' +
 			'\n' +
 			'Examples:\n' +
 			'  flue dev --target node\n' +
@@ -85,6 +94,7 @@ function printUsage() {
 			'  flue build --target node\n' +
 			'  flue build --target cloudflare --root ./my-app\n' +
 			'  flue build --target node --output ./build\n' +
+			'  flue init --target node\n' +
 			'  flue add\n' +
 			'  flue add daytona | claude\n' +
 			'  flue add https://e2b.dev --category sandbox | claude\n' +
@@ -148,7 +158,15 @@ interface AddArgs {
 	print: boolean;
 }
 
-type ParsedArgs = RunArgs | BuildArgs | DevArgs | AddArgs;
+interface InitArgs {
+	command: 'init';
+	target: 'node' | 'cloudflare';
+	/** Explicit --root value, or undefined to default to cwd. Absolute when set. */
+	explicitRoot: string | undefined;
+	force: boolean;
+}
+
+type ParsedArgs = RunArgs | BuildArgs | DevArgs | AddArgs | InitArgs;
 
 function parseFlags(flags: string[]): {
 	target?: 'node' | 'cloudflare';
@@ -308,11 +326,62 @@ function parseAddArgs(rest: string[]): AddArgs {
 	return { command: 'add', name, category, print };
 }
 
+function parseInitArgs(rest: string[]): InitArgs {
+	let target: 'node' | 'cloudflare' | undefined;
+	let explicitRoot: string | undefined;
+	let force = false;
+
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i]!;
+		if (arg === '--target') {
+			const value = rest[++i];
+			if (!value) {
+				console.error('Missing value for --target');
+				process.exit(1);
+			}
+			if (value !== 'node' && value !== 'cloudflare') {
+				console.error(`Invalid target: "${value}". Supported targets: node, cloudflare`);
+				process.exit(1);
+			}
+			target = value;
+		} else if (arg === '--root') {
+			const value = rest[++i];
+			if (!value) {
+				console.error('Missing value for --root');
+				process.exit(1);
+			}
+			explicitRoot = path.resolve(value);
+		} else if (arg === '--force') {
+			force = true;
+		} else if (arg.startsWith('--')) {
+			console.error(`Unknown flag for \`flue init\`: ${arg}`);
+			printUsage();
+			process.exit(1);
+		} else {
+			console.error(`Unexpected argument for \`flue init\`: ${arg}`);
+			printUsage();
+			process.exit(1);
+		}
+	}
+
+	if (!target) {
+		console.error('Missing required --target flag for init command.');
+		printUsage();
+		process.exit(1);
+	}
+
+	return { command: 'init', target, explicitRoot, force };
+}
+
 function parseArgs(argv: string[]): ParsedArgs {
 	const [command, ...rest] = argv;
 
 	if (command === 'add') {
 		return parseAddArgs(rest);
+	}
+
+	if (command === 'init') {
+		return parseInitArgs(rest);
 	}
 
 	// `--target` is optional at parse time — the config file may supply it.
@@ -873,6 +942,76 @@ async function run(args: RunArgs) {
 	stopServer();
 }
 
+// ─── `flue init` ────────────────────────────────────────────────────────────
+
+function renderConfigTemplate(target: 'node' | 'cloudflare'): string {
+	return (
+		`import { defineConfig } from '@flue/sdk/config';\n` +
+		`\n` +
+		`export default defineConfig({\n` +
+		`\ttarget: '${target}',\n` +
+		`});\n`
+	);
+}
+
+function initCommand(args: InitArgs) {
+	const targetDir = args.explicitRoot ?? process.cwd();
+
+	if (!fs.existsSync(targetDir)) {
+		console.error(`[flue] Target directory does not exist: ${targetDir}`);
+		process.exit(1);
+	}
+
+	// Detect any existing flue.config.* in the target dir, using the same
+	// discovery rule the rest of the CLI uses. This catches `.mts`, `.js`,
+	// etc. — not just `.ts`.
+	let existing: string | undefined;
+	try {
+		existing = resolveConfigPath({ cwd: targetDir, configFile: undefined });
+	} catch (err) {
+		console.error(err instanceof Error ? err.message : String(err));
+		process.exit(1);
+	}
+
+	if (existing && !args.force) {
+		const rel = path.relative(process.cwd(), existing) || existing;
+		console.error(
+			`[flue] A Flue config already exists at ${rel}.\n` +
+				`  Re-run with --force to overwrite.`,
+		);
+		process.exit(1);
+	}
+
+	const outPath = path.join(targetDir, 'flue.config.ts');
+	const content = renderConfigTemplate(args.target);
+
+	try {
+		fs.writeFileSync(outPath, content);
+	} catch (err) {
+		console.error(`[flue] Failed to write ${outPath}: ${err instanceof Error ? err.message : String(err)}`);
+		process.exit(1);
+	}
+
+	const relOut = path.relative(process.cwd(), outPath) || outPath;
+	console.error(`[flue] Wrote ${relOut}`);
+
+	// If --force overwrote a non-`.ts` variant, the new flue.config.ts will
+	// take precedence (CONFIG_BASENAMES priority), but the old file still
+	// sits on disk. Surface that so the user isn't surprised later.
+	if (existing && path.basename(existing) !== 'flue.config.ts') {
+		const relExisting = path.relative(process.cwd(), existing) || existing;
+		console.error(
+			`[flue] Note: ${relExisting} is still on disk. ` +
+				`flue.config.ts now takes precedence; delete the old file if you no longer need it.`,
+		);
+	}
+
+	console.error('');
+	console.error('Next step:');
+	console.error('');
+	console.error('  fetch https://flueframework.com/start.md to create a new agent');
+}
+
 // ─── `flue add` ─────────────────────────────────────────────────────────────
 
 // Default registry base. Can be overridden via FLUE_REGISTRY_URL for local
@@ -1090,6 +1229,8 @@ if (args.command === 'build') {
 	devCommand(args);
 } else if (args.command === 'add') {
 	addCommand(args);
+} else if (args.command === 'init') {
+	initCommand(args);
 } else {
 	run(args);
 }
