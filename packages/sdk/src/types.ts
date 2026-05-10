@@ -1,9 +1,16 @@
-import type { Model, TSchema } from '@mariozechner/pi-ai';
 import type { AgentMessage, ThinkingLevel } from '@mariozechner/pi-agent-core';
+import type { ImageContent, Model, TSchema } from '@mariozechner/pi-ai';
 import type * as v from 'valibot';
 import type { FlueModelDefinition } from './config.ts';
 
 export type { ThinkingLevel };
+
+/**
+ * Inline image content attached to a `prompt()`, `skill()`, or `task()` call.
+ * Re-exports pi-ai's `ImageContent` shape: `{ type: 'image', data: base64, mimeType }`.
+ * The selected model must support vision input.
+ */
+export type PromptImage = ImageContent;
 
 // ─── Skill ──────────────────────────────────────────────────────────────────
 
@@ -222,7 +229,10 @@ export interface AgentConfig {
 	/** Provider runtime settings applied when resolving models. */
 	providers?: ProvidersConfig;
 	/** Resolve model config to a Model instance. Throws on invalid model strings. */
-	resolveModel: (model: ModelConfig | undefined, providers?: ProvidersConfig) => Model<any> | undefined;
+	resolveModel: (
+		model: ModelConfig | undefined,
+		providers?: ProvidersConfig,
+	) => Model<any> | undefined;
 	/**
 	 * Agent-wide default reasoning effort. Per-call and role-level values
 	 * override this. The harness substitutes `"medium"` when unset; see
@@ -546,6 +556,8 @@ export interface PromptOptions<S extends v.GenericSchema | undefined = undefined
 	thinkingLevel?: ThinkingLevel;
 	/** Cancel this call. See `CallHandle`. */
 	signal?: AbortSignal;
+	/** Images attached to this user message. Requires a vision-capable model. */
+	images?: PromptImage[];
 }
 
 export interface SkillOptions<S extends v.GenericSchema | undefined = undefined> {
@@ -559,6 +571,8 @@ export interface SkillOptions<S extends v.GenericSchema | undefined = undefined>
 	thinkingLevel?: ThinkingLevel;
 	/** Cancel this call. See `CallHandle`. */
 	signal?: AbortSignal;
+	/** Images attached to the skill's user message. Requires a vision-capable model. */
+	images?: PromptImage[];
 }
 
 export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> {
@@ -573,6 +587,8 @@ export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> 
 	cwd?: string;
 	/** Cancel this task. See `CallHandle`. */
 	signal?: AbortSignal;
+	/** Images attached to the task's initial user message. Requires a vision-capable model. */
+	images?: PromptImage[];
 }
 
 export interface ShellOptions {
