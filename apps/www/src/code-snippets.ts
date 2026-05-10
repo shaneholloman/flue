@@ -10,7 +10,7 @@ export const HERO = `export default async function ({ init, payload, env }) {
   // Call skills as reusable workflows with structured output:
   const { data } = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    schema: v.object({ fixApplied: v.boolean() }),
+    schema: v.object({ fixApplied: v.boolean(), summary: v.string() }),
   });
 
   // Keep track of work in the session, just like Claude Code or Codex:
