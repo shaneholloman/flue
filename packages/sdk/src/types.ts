@@ -151,6 +151,58 @@ export interface SessionEnv {
 	resolvePath(p: string): string;
 }
 
+/**
+ * Filesystem surface for the agent sandbox, exposed on `FlueAgent.fs` and
+ * `FlueSession.fs`. Reads and writes happen inside whatever the sandbox
+ * connector points at (a remote container, microVM, in-process FS, etc.).
+ *
+ * Operations are out-of-band — they don't appear in the conversation
+ * transcript. The model has its own `read`/`write`/`edit` tools for
+ * filesystem work it should reason about. Use `fs` for plumbing (staging
+ * files, capturing artifacts, managing scratch space) the model shouldn't
+ * see. If a write should feed into the model's next turn, prompt the model
+ * to read the file itself.
+ *
+ * Paths can be absolute or relative. Relative paths are resolved against
+ * the agent's cwd, which comes from `init({ cwd })` if set, otherwise from
+ * the sandbox connector's default (varies by provider). Use absolute paths
+ * for portability across connectors.
+ */
+export interface FlueFs {
+	/** Read a UTF-8 file. Throws if the path doesn't exist or isn't a file. */
+	readFile(path: string): Promise<string>;
+
+	/** Read a file as raw bytes. Use this for binary content. */
+	readFileBuffer(path: string): Promise<Uint8Array>;
+
+	/**
+	 * Write content to a file. Creates the file if it doesn't exist; replaces
+	 * it if it does. Accepts both UTF-8 strings and raw bytes.
+	 */
+	writeFile(path: string, content: string | Uint8Array): Promise<void>;
+
+	/** Get file metadata (size, mtime, type). Throws if the path doesn't exist. */
+	stat(path: string): Promise<FileStat>;
+
+	/** List directory entries (names only, no paths). Throws if not a directory. */
+	readdir(path: string): Promise<string[]>;
+
+	/** True if a file or directory exists at `path`. Never throws. */
+	exists(path: string): Promise<boolean>;
+
+	/**
+	 * Create a directory. Pass `{ recursive: true }` to create parent
+	 * directories as needed (mkdir -p semantics).
+	 */
+	mkdir(path: string, options?: { recursive?: boolean }): Promise<void>;
+
+	/**
+	 * Remove a file or directory. Pass `{ recursive: true }` to remove
+	 * directory trees, `{ force: true }` to suppress missing-path errors.
+	 */
+	rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
+}
+
 // ─── Compaction ─────────────────────────────────────────────────────────────
 
 export interface CompactionConfig {
@@ -319,6 +371,12 @@ export interface FlueAgent {
 
 	/** Run a shell command in the agent sandbox without recording it in a conversation. */
 	shell(command: string, options?: ShellOptions): CallHandle<ShellResult>;
+
+	/**
+	 * Read and write files in the agent sandbox without recording in a
+	 * conversation. See {@link FlueFs}.
+	 */
+	readonly fs: FlueFs;
 }
 
 export interface FlueSessions {
@@ -360,6 +418,13 @@ export interface FlueSession {
 	prompt(text: string, options?: PromptOptions): CallHandle<PromptResponse>;
 
 	shell(command: string, options?: ShellOptions): CallHandle<ShellResult>;
+
+	/**
+	 * Read and write files in the session's sandbox. See {@link FlueFs}.
+	 * Unlike {@link FlueSession.shell}, fs operations are not recorded in
+	 * the conversation transcript.
+	 */
+	readonly fs: FlueFs;
 
 	skill<S extends v.GenericSchema>(
 		name: string,

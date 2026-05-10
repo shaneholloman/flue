@@ -2,12 +2,37 @@
  * Sandbox adapters: wraps BashFactory or SandboxApi into SessionEnv.
  * Remote sandboxes don't use just-bash — commands go directly to the sandbox shell.
  */
-import type { BashFactory, BashLike, Command, FileStat, SessionEnv, ShellResult } from './types.ts';
+import type {
+	BashFactory,
+	BashLike,
+	Command,
+	FileStat,
+	FlueFs,
+	SessionEnv,
+	ShellResult,
+} from './types.ts';
 import { abortErrorFor } from './abort.ts';
 import { normalizePath } from './session.ts';
 import { createScopedEnv } from './env-utils.ts';
 
 export type { SandboxFactory, SessionEnv, CommandDef, FileStat } from './types.ts';
+
+/**
+ * Adapt a SessionEnv to the public {@link FlueFs} surface. Thin pass-through:
+ * the env handles cwd resolution and any sandbox-specific path semantics.
+ */
+export function createFlueFs(env: SessionEnv): FlueFs {
+	return {
+		readFile: (path) => env.readFile(path),
+		readFileBuffer: (path) => env.readFileBuffer(path),
+		writeFile: (path, content) => env.writeFile(path, content),
+		stat: (path) => env.stat(path),
+		readdir: (path) => env.readdir(path),
+		exists: (path) => env.exists(path),
+		mkdir: (path, options) => env.mkdir(path, options),
+		rm: (path, options) => env.rm(path, options),
+	};
+}
 
 export function createCwdSessionEnv(parentEnv: SessionEnv, cwd: string): SessionEnv {
 	const scopedCwd = normalizePath(cwd);

@@ -29,6 +29,7 @@ import {
 } from './compaction.ts';
 import { resolveSkillFilePath, skillsDirIn } from './context.ts';
 import { mergeCommands, createScopedEnv as scopeSessionEnv } from './env-utils.ts';
+import { createFlueFs } from './sandbox.ts';
 import {
 	buildPromptText,
 	buildResultFollowUpPrompt,
@@ -52,6 +53,7 @@ import type {
 	Command,
 	FlueEvent,
 	FlueEventCallback,
+	FlueFs,
 	FlueSession,
 	PromptModel,
 	PromptOptions,
@@ -149,6 +151,7 @@ export class InMemorySessionStore implements SessionStore {
 
 export class Session implements FlueSession {
 	readonly id: string;
+	readonly fs: FlueFs;
 	metadata: Record<string, any>;
 	get role(): string | undefined {
 		return this.sessionRole;
@@ -180,6 +183,7 @@ export class Session implements FlueSession {
 		this.storageKey = options.storageKey;
 		this.config = options.config;
 		this.env = options.env;
+		this.fs = createFlueFs(options.env);
 		this.store = options.store;
 		this.agentCommands = options.agentCommands ?? [];
 		this.agentTools = options.agentTools ?? [];

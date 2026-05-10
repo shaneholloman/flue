@@ -1,6 +1,6 @@
 import { createCallHandle } from './abort.ts';
 import { discoverSessionContext } from './context.ts';
-import { createCwdSessionEnv } from './sandbox.ts';
+import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
 import { deleteSessionTree, Session, type CreateTaskSessionOptions } from './session.ts';
 import { createScopedEnv, mergeCommands } from './env-utils.ts';
 import { assertRoleExists } from './roles.ts';
@@ -9,6 +9,7 @@ import type {
 	CallHandle,
 	Command,
 	FlueAgent,
+	FlueFs,
 	FlueSessions,
 	FlueSession,
 	FlueEventCallback,
@@ -32,6 +33,8 @@ export class AgentClient implements FlueAgent {
 		delete: (id?: string) => this.deleteSession(id),
 	};
 
+	readonly fs: FlueFs;
+
 	private openSessions = new Map<string, Session>();
 
 	constructor(
@@ -42,7 +45,9 @@ export class AgentClient implements FlueAgent {
 		private eventCallback?: FlueEventCallback,
 		private agentCommands: Command[] = [],
 		private agentTools: ToolDef[] = [],
-	) {}
+	) {
+		this.fs = createFlueFs(env);
+	}
 
 	async session(id?: string, options?: SessionOptions): Promise<FlueSession> {
 		return this.openSession(id, 'get-or-create', options);

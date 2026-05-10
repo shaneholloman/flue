@@ -193,6 +193,7 @@ export type { McpServerConnection, McpServerOptions, McpTransport } from './mcp.
 export type {
 	FlueContext,
 	FlueAgent,
+	FlueFs,
 	FlueSessions,
 	FlueSession,
 	AgentInit,

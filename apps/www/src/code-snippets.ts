@@ -18,12 +18,12 @@ export const HERO = `export default async function ({ init, payload, env }) {
 
   // Keep absolute control over the agent's most critical decisions:
   if (triage.fixApplied) {
-    await session.shell('git add -A && git commit --file -', { stdin: \`fix: \${triage.summary}\` });
+    await session.shell(\`git add -A && git commit -m \${JSON.stringify(\`fix: \${triage.summary}\`)}\`);
   }
 
   // Protect your sensitive tokens and API keys with fine-grained control:
-  await session.shell(\`gh issue comment \${Number(payload.issueNumber)} --body-file -\`, { 
-    stdin: comment,
+  await session.fs.writeFile('/tmp/comment.md', comment.text);
+  await session.shell(\`gh issue comment \${Number(payload.issueNumber)} --body-file /tmp/comment.md\`, { 
     env: { GITHUB_TOKEN: env.GITHUB_TOKEN },
   });
 }`;
