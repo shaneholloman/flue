@@ -1,5 +1,4 @@
 export { getVirtualSandbox } from './virtual-sandbox.ts';
-export { defineCommand } from './define-command.ts';
 export type { VirtualSandboxOptions } from './virtual-sandbox.ts';
 
 export { cfSandboxToSessionEnv } from './cf-sandbox.ts';

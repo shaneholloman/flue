@@ -2,12 +2,10 @@ import { createCallHandle } from './abort.ts';
 import { discoverSessionContext } from './context.ts';
 import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
 import { deleteSessionTree, Session, type CreateTaskSessionOptions } from './session.ts';
-import { createScopedEnv, mergeCommands } from './sandbox.ts';
 import { assertRoleExists } from './roles.ts';
 import type {
 	AgentConfig,
 	CallHandle,
-	Command,
 	FlueAgent,
 	FlueFs,
 	FlueSessions,
@@ -43,7 +41,6 @@ export class AgentClient implements FlueAgent {
 		private env: SessionEnv,
 		private store: SessionStore,
 		private eventCallback?: FlueEventCallback,
-		private agentCommands: Command[] = [],
 		private agentTools: ToolDef[] = [],
 	) {
 		this.fs = createFlueFs(env);
@@ -55,9 +52,7 @@ export class AgentClient implements FlueAgent {
 
 	shell(command: string, options?: ShellOptions): CallHandle<ShellResult> {
 		return createCallHandle(options?.signal, async (signal) => {
-			const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-			const env = await createScopedEnv(this.env, effectiveCommands);
-			const result = await env.exec(command, {
+			const result = await this.env.exec(command, {
 				env: options?.env,
 				cwd: options?.cwd,
 				signal,
@@ -110,7 +105,6 @@ export class AgentClient implements FlueAgent {
 			store: this.store,
 			existingData: data,
 			onAgentEvent: this.eventCallback,
-			agentCommands: this.agentCommands,
 			agentTools: this.agentTools,
 			sessionRole: options?.role,
 			taskDepth: 0,
@@ -173,7 +167,6 @@ export class AgentClient implements FlueAgent {
 			store: this.store,
 			existingData: data,
 			onAgentEvent: eventCallback,
-			agentCommands: options.commands,
 			agentTools: this.agentTools,
 			sessionRole: options.role,
 			taskDepth: options.depth,

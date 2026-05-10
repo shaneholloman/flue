@@ -2,7 +2,7 @@
 
 Build and run Flue agents in GitLab CI/CD pipelines. This guide walks you through creating your first agent, running it locally with the CLI, and wiring it into a pipeline.
 
-By the end, you will have a Flue agent running inside GitLab CI/CD, and you will know how to use local sandbox context, commands, roles, skills, and typed results to build CI workflows.
+By the end, you will have a Flue agent running inside GitLab CI/CD, and you will know how to use local sandbox context, external CLIs, roles, skills, and typed results to build CI workflows.
 
 ## Hello World
 
@@ -49,7 +49,7 @@ A few things to note:
 
 - **`triggers = {}`** — This agent has no HTTP trigger. It's designed to be run from the CLI, which is perfect for CI.
 - **`model`** — Every session needs a model. If you do not pass one to `init()` or a specific `prompt()` / `skill()` call, no model is chosen.
-- **`sandbox: 'local'`** — The `"local"` sandbox mounts the host filesystem at `/workspace`. In CI, this is the checked-out repo. Skills and `AGENTS.md` are discovered automatically from the project root.
+- **`sandbox: 'local'`** — The `"local"` sandbox runs the agent directly against the host filesystem and shell. In CI, that's the checked-out repo plus whatever binaries are on `$PATH` (`glab`, `git`, `npm`, etc.). Skills and `AGENTS.md` are discovered automatically from the project root. Use `"local"` only when the runner itself provides the isolation boundary.
 - **Result schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns a typed object.
 
 ### 3. Test it locally
@@ -151,45 +151,33 @@ const diagnosis = await session.skill('triage', {
 });
 ```
 
-### Connecting external CLIs with commands
+### Connecting external CLIs
 
-In CI, your agent often needs to interact with external tools. But you don't want to hand the agent your raw API keys. **Commands** solve this — they let you connect privileged CLIs to the agent without leaking secrets.
+Your agent often needs to interact with external tools. With `sandbox: 'local'`, the agent's bash tool runs against the host shell directly — anything on `$PATH` is reachable, and any env var set on the runner is visible to the binaries it runs.
 
-Secrets are hooked up inside the command definition, so the agent never sees them. Commands are granted per-prompt or per-skill, so you can be as granular with access as you need. Here's a triage agent that puts it all together:
+In GitLab CI, this means you set the secrets you want the agent's CLIs to see in the job's `variables:` block (or as masked CI/CD variables). The runner is your isolation boundary; flue inherits it.
 
 `.flue/agents/triage.ts`:
 
 ```typescript
 import { type FlueContext } from '@flue/sdk/client';
-import { defineCommand } from '@flue/sdk/node';
 import * as v from 'valibot';
 
 export const triggers = {};
-
-// Connect privileged CLIs to your agent without leaking sensitive keys.
-// Secrets are hooked up inside the command definition here, so the agent
-// never sees them. The default env forwards safe vars like PATH and HOME —
-// anything else (tokens, keys) must be opted in explicitly.
-//
-// `glab` is the official GitLab CLI — scoped to GitLab's API, so the token
-// can only reach GitLab. Prefer purpose-built CLIs over general-purpose
-// HTTP clients like `curl` for this exact reason.
-const glab = defineCommand('glab', {
-  env: { GITLAB_TOKEN: process.env.GITLAB_API_TOKEN },
-});
-const npm = defineCommand('npm');
 
 export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ sandbox: 'local', model: 'anthropic/claude-opus-4-7' });
   const session = await agent.session();
 
+  // The agent's bash tool can run `glab` directly — whatever GITLAB_TOKEN
+  // is set on the runner is visible to it. Prefer purpose-built CLIs like
+  // `glab` over general-purpose HTTP clients so the token's blast radius
+  // is scoped to that one provider.
   const result = await session.skill('triage', {
     args: {
       issueIid: payload.issueIid,
       projectId: payload.projectId,
     },
-    // Grant access to `glab` and `npm` for the life of this skill.
-    commands: [glab, npm],
     result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
@@ -202,7 +190,7 @@ export default async function ({ init, payload }: FlueContext) {
 }
 ```
 
-The agent can now use `glab` to interact with the GitLab API through the command — but it never has access to the `GITLAB_API_TOKEN` itself. If the agent tries to run `glab` outside of a prompt where it was granted, the command is blocked.
+If you want a tighter boundary — the agent can call a specific operation but never see the underlying token — wrap the operation as a custom tool with `init({ tools: [...] })`. The tool implementation reads the secret from `process.env`; the agent only sees the tool's parameters and result.
 
 ### Roles
 
@@ -300,11 +288,7 @@ Result schemas aren't just for type safety — they're how you orchestrate multi
 
 ```typescript
 import { type FlueContext } from '@flue/sdk/client';
-import { defineCommand } from '@flue/sdk/node';
 import * as v from 'valibot';
-
-const glab = defineCommand('glab', { env: { GITLAB_TOKEN: process.env.GITLAB_API_TOKEN } });
-const npm = defineCommand('npm');
 
 export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
@@ -312,7 +296,6 @@ export default async function ({ init, payload }: FlueContext) {
 
   const diagnosis = await session.skill('triage', {
     args: { issueIid: payload.issueIid },
-    commands: [glab],
     result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
@@ -324,7 +307,6 @@ export default async function ({ init, payload }: FlueContext) {
     // Escalate: attempt an automated fix
     await session.skill('auto-fix', {
       args: { issueIid: payload.issueIid },
-      commands: [glab, npm],
       result: v.object({ fix_applied: v.boolean(), branch: v.optional(v.string()) }),
     });
   }

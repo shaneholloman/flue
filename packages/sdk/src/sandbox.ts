@@ -1,11 +1,9 @@
 /**
  * Sandbox adapters: wraps BashFactory or SandboxApi into SessionEnv.
- * Remote sandboxes don't use just-bash — commands go directly to the sandbox shell.
  */
 import type {
 	BashFactory,
 	BashLike,
-	Command,
 	FileStat,
 	FlueFs,
 	SessionEnv,
@@ -13,28 +11,7 @@ import type {
 } from './types.ts';
 import { abortErrorFor } from './abort.ts';
 import { normalizePath } from './session.ts';
-export type { SandboxFactory, SessionEnv, CommandDef, FileStat } from './types.ts';
-
-export async function createScopedEnv(env: SessionEnv, commands: Command[]): Promise<SessionEnv> {
-	if (env.scope) return env.scope({ commands });
-	if (commands.length > 0) {
-		throw new Error(
-			'[flue] Cannot use commands: this environment does not support scoped command execution. ' +
-				'Commands are only available in BashFactory sandbox mode. ' +
-				'Remote sandboxes handle command execution at the platform level.',
-		);
-	}
-	return env;
-}
-
-export function mergeCommands(defaults: Command[], perCall: Command[] | undefined): Command[] {
-	if (!perCall || perCall.length === 0) return defaults;
-	if (defaults.length === 0) return perCall;
-	const byName = new Map<string, Command>();
-	for (const cmd of defaults) byName.set(cmd.name, cmd);
-	for (const cmd of perCall) byName.set(cmd.name, cmd);
-	return Array.from(byName.values());
-}
+export type { SandboxFactory, SessionEnv, FileStat } from './types.ts';
 
 /** Adapt a SessionEnv to the public FlueFs surface. */
 export function createFlueFs(env: SessionEnv): FlueFs {
@@ -66,8 +43,6 @@ export function createCwdSessionEnv(parentEnv: SessionEnv, cwd: string): Session
 				timeout: opts?.timeout,
 				signal: opts?.signal,
 			}),
-		scope: async (options) =>
-			createCwdSessionEnv(await createScopedEnv(parentEnv, options?.commands ?? []), scopedCwd),
 		readFile: (p) => parentEnv.readFile(resolvePath(p)),
 		readFileBuffer: (p) => parentEnv.readFileBuffer(resolvePath(p)),
 		writeFile: (p, c) => parentEnv.writeFile(resolvePath(p), c),
@@ -82,35 +57,12 @@ export function createCwdSessionEnv(parentEnv: SessionEnv, cwd: string): Session
 }
 
 export async function bashFactoryToSessionEnv(factory: BashFactory): Promise<SessionEnv> {
-	const seen = new WeakSet<object>();
-
-	async function createBash(): Promise<BashLike> {
-		const bash = await factory();
-		assertBashLike(bash);
-		if (seen.has(bash)) {
-			throw new Error(
-				'[flue] BashFactory must return a fresh Bash-like instance for each operation. ' +
-					'Share the filesystem object in the factory closure to persist files across calls.',
-			);
-		}
-		seen.add(bash);
-		return bash;
-	}
-
-	async function createBashScopedEnv(commands: Command[]): Promise<SessionEnv> {
-		const scoped = await createBash();
-		registerCommands(scoped, commands);
-		return createBashSessionEnv(scoped, createBashScopedEnv);
-	}
-
-	const base = await createBash();
-	return createBashSessionEnv(base, createBashScopedEnv);
+	const bash = await factory();
+	assertBashLike(bash);
+	return createBashSessionEnv(bash);
 }
 
-function createBashSessionEnv(
-	bash: BashLike,
-	createScope: (commands: Command[]) => Promise<SessionEnv>,
-): SessionEnv {
+function createBashSessionEnv(bash: BashLike): SessionEnv {
 	const fs = bash.fs;
 	const cwd = bash.getCwd();
 	const resolve = (p: string) => (p.startsWith('/') ? p : fs.resolvePath(cwd, p));
@@ -144,7 +96,6 @@ function createBashSessionEnv(
 			if (opts?.signal?.aborted) throw abortErrorFor(opts.signal);
 			return result;
 		},
-		scope: (options) => createScope(options?.commands ?? []),
 		readFile: (p) => fs.readFile(resolve(p)),
 		readFileBuffer: (p) => fs.readFileBuffer(resolve(p)),
 		writeFile: async (p, content) => {
@@ -167,18 +118,6 @@ function createBashSessionEnv(
 		cwd,
 		resolvePath: resolve,
 	};
-}
-
-function registerCommands(bash: BashLike, commands: Command[]): void {
-	if (commands.length === 0) return;
-	if (typeof bash.registerCommand !== 'function') {
-		throw new Error(
-			'[flue] Cannot use commands: this Bash-like sandbox does not support command registration.',
-		);
-	}
-	for (const cmd of commands) {
-		bash.registerCommand({ name: cmd.name, execute: cmd.execute });
-	}
 }
 
 function assertBashLike(value: unknown): asserts value is BashLike {

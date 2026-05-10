@@ -91,28 +91,21 @@ export default async function ({ init, payload, env }: FlueContext) {
 
 ### Issue Triage (CI)
 
-A triage agent that runs in CI whenever an issue is opened on GitHub. The `"local"` sandbox mounts the host filesystem and lets you connect privileged CLIs (`gh`, `npm`, `git`) to the agent without leaking secrets.
+A triage agent that runs in CI whenever an issue is opened on GitHub. The `"local"` sandbox gives the agent direct access to the host filesystem and shell — perfect for CI runners, where `gh`, `git`, and `npm` are already on `$PATH` and the runner itself is your isolation boundary.
 
 ```ts
 // .flue/agents/triage.ts
 import { type FlueContext } from '@flue/sdk/client';
-import { defineCommand } from '@flue/sdk/node';
 import * as v from 'valibot';
 
 // Because we are running this in CI, we don't need to expose this as an HTTP endpoint.
 // The CLI can run any agent from the command line, `flue run triage ...`
 export const triggers = {};
 
-// Connect privileged CLIs to your agent without leaking sensitive keys and secrets.
-// Secrets are hooked up inside the command definition here, so your agent never sees them.
-// Commands are controlled per-prompt, so you can be as granular with access as you need.
-const npm = defineCommand('npm');
-const gh = defineCommand('gh', { env: { GH_TOKEN: process.env.GH_TOKEN } });
-
 export default async function ({ init, payload }: FlueContext) {
-  // 'local' mounts the host filesystem at /workspace — ideal for CI
-  // where the repo is already checked out. Skills and AGENTS.md are
-  // discovered automatically from the project root.
+  // 'local' gives the agent direct access to the host filesystem and
+  // shell. The agent's bash tool can run `gh`, `git`, `npm` directly.
+  // Skills and AGENTS.md are discovered from process.cwd().
   //
   // `model` sets the default model for every prompt/skill call in this
   // agent. Override per-call with `{ model: '...' }` on prompt()/skill().
@@ -129,8 +122,6 @@ export default async function ({ init, payload }: FlueContext) {
   const result = await session.skill('triage', {
     // Pass arguments to any prompt or skill.
     args: { issueNumber: payload.issueNumber },
-    // Grant access to `gh` and `npm` for the life of this skill.
-    commands: [gh, npm],
     // Result schemas are great for being able to act/orchestrate
     // based on the result of your prompt or skill call.
     result: v.object({

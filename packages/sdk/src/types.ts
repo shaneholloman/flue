@@ -44,23 +44,6 @@ export interface Role {
 	thinkingLevel?: ThinkingLevel;
 }
 
-// ─── Commands (per-prompt/shell external CLI access) ────────────────────────
-
-/**
- * An executable command that can be passed to prompt(), skill(), or shell().
- * Registered into just-bash for the duration of the call.
- */
-export interface Command {
-	name: string;
-	execute(args: string[]): Promise<{ stdout: string; stderr: string; exitCode: number }>;
-}
-
-/** @deprecated Use `Command` with `defineCommand()` instead. */
-export interface CommandDef {
-	name: string;
-	env?: Record<string, string>;
-}
-
 // ─── Custom Tools ───────────────────────────────────────────────────────────
 
 export type ToolParameters = TSchema | Record<string, unknown>;
@@ -128,9 +111,6 @@ export interface SessionEnv {
 			signal?: AbortSignal;
 		},
 	): Promise<ShellResult>;
-
-	/** Create an operation-scoped environment, usually backed by a fresh Bash runtime. */
-	scope?(options?: { commands?: Command[] }): Promise<SessionEnv>;
 
 	readFile(path: string): Promise<string>;
 	readFileBuffer(path: string): Promise<Uint8Array>;
@@ -311,7 +291,7 @@ export interface AgentInit {
 	 *   `cwd` defaults to `process.cwd()`. Node target only; throws on Cloudflare.
 	 *   Use this when flue itself is running inside an external sandbox / container
 	 *   / CI runner that already provides the isolation boundary.
-	 * - `BashFactory`: User-configured just-bash factory. Must return a fresh Bash-like instance.
+	 * - `BashFactory`: User-configured just-bash factory. Called once to construct the runtime.
 	 * - `SandboxFactory`: Connector-wrapped external sandbox (Daytona, CF Containers, etc.).
 	 */
 	sandbox?: 'empty' | 'local' | SandboxFactory | BashFactory;
@@ -351,14 +331,6 @@ export interface AgentInit {
 	 * Per-call tools are added on top and must not reuse the same names.
 	 */
 	tools?: ToolDef[];
-
-	/**
-	 * Agent-wide commands. Every prompt(), skill(), and shell() call inherits
-	 * this list. Per-call `commands` are merged on top — if a per-call command
-	 * shares a name with an agent command, the per-call version wins for that
-	 * call.
-	 */
-	commands?: Command[];
 }
 
 // ─── Flue Agent (returned by init()) ────────────────────────────────────────
@@ -557,7 +529,6 @@ export interface SessionStore {
 /** All option fields are scoped to the duration of the call. */
 export interface PromptOptions<S extends v.GenericSchema | undefined = undefined> {
 	result?: S;
-	commands?: Command[];
 	tools?: ToolDef[];
 	role?: string;
 	/** e.g., 'anthropic/claude-sonnet-4-20250514' */
@@ -573,7 +544,6 @@ export interface PromptOptions<S extends v.GenericSchema | undefined = undefined
 export interface SkillOptions<S extends v.GenericSchema | undefined = undefined> {
 	args?: Record<string, unknown>;
 	result?: S;
-	commands?: Command[];
 	tools?: ToolDef[];
 	role?: string;
 	model?: string;
@@ -587,7 +557,6 @@ export interface SkillOptions<S extends v.GenericSchema | undefined = undefined>
 
 export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> {
 	result?: S;
-	commands?: Command[];
 	tools?: ToolDef[];
 	role?: string;
 	model?: string;
@@ -604,7 +573,6 @@ export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> 
 export interface ShellOptions {
 	env?: Record<string, string>;
 	cwd?: string;
-	commands?: Command[];
 	/** Cancel this call. See `CallHandle`. */
 	signal?: AbortSignal;
 }
@@ -643,10 +611,9 @@ export interface BashLike {
 		rm(path: string, options?: { recursive?: boolean; force?: boolean }): Promise<void>;
 		resolvePath(base: string, path: string): string;
 	};
-	registerCommand?(cmd: any): void;
 }
 
-/** Factory for a fresh Bash-like runtime. Share `fs` inside the closure to persist files. */
+/** Factory that constructs the agent's Bash-like runtime. Called once at init. */
 export type BashFactory = () => BashLike | Promise<BashLike>;
 
 export type FlueEvent = (
@@ -658,8 +625,6 @@ export type FlueEvent = (
 	| { type: 'tool_start'; toolName: string; toolCallId: string; args?: any }
 	| { type: 'tool_end'; toolName: string; toolCallId: string; isError: boolean; result?: any }
 	| { type: 'turn_end' }
-	| { type: 'command_start'; command: string; args: string[] }
-	| { type: 'command_end'; command: string; exitCode: number }
 	| { type: 'task_start'; taskId: string; prompt: string; role?: string; cwd?: string }
 	| { type: 'task_end'; taskId: string; isError: boolean; result?: any }
 	| { type: 'compaction_start'; reason: 'threshold' | 'overflow'; estimatedTokens: number }

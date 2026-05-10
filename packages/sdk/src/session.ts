@@ -28,7 +28,6 @@ import {
 	shouldCompact,
 } from './compaction.ts';
 import { resolveSkillFilePath, skillsDirIn } from './context.ts';
-import { mergeCommands, createScopedEnv as scopeSessionEnv } from './sandbox.ts';
 import { createFlueFs } from './sandbox.ts';
 import {
 	buildPromptText,
@@ -51,7 +50,6 @@ import type {
 	AgentConfig,
 	BranchSummaryEntry,
 	CallHandle,
-	Command,
 	CompactionEntry,
 	FlueEvent,
 	FlueEventCallback,
@@ -84,7 +82,6 @@ export interface CreateTaskSessionOptions {
 	parentEnv: SessionEnv;
 	cwd?: string;
 	role?: string;
-	commands: Command[];
 	depth: number;
 }
 
@@ -98,7 +95,6 @@ interface SessionInitOptions {
 	store: SessionStore;
 	existingData: SessionData | null;
 	onAgentEvent?: FlueEventCallback;
-	agentCommands?: Command[];
 	agentTools?: ToolDef[];
 	sessionRole?: string;
 	taskDepth?: number;
@@ -106,8 +102,12 @@ interface SessionInitOptions {
 	onDelete?: () => void;
 }
 
+// TODO: rename `RuntimeScopeOptions` → `CallOverrides` and `withScopedRuntime`
+// → `withCallOverrides`. The "scope" name is a vestige from when this also
+// built a fresh just-bash env with per-call `commands` registered. With
+// `commands` removed, this is just per-call overrides on top of agent-wide
+// defaults — the name no longer reflects what it does.
 interface RuntimeScopeOptions {
-	commands: Command[];
 	tools: ToolDef[];
 	role?: string;
 	model?: string;
@@ -391,7 +391,6 @@ export class Session implements FlueSession {
 	private overflowRecoveryAttempted = false;
 	private compactionAbortController: AbortController | undefined;
 	private eventCallback: FlueEventCallback | undefined;
-	private agentCommands: Command[];
 	private agentTools: ToolDef[];
 	private deleted = false;
 	private activeOperation: string | undefined;
@@ -408,7 +407,6 @@ export class Session implements FlueSession {
 		this.env = options.env;
 		this.fs = createFlueFs(options.env);
 		this.store = options.store;
-		this.agentCommands = options.agentCommands ?? [];
 		this.agentTools = options.agentTools ?? [];
 		this.sessionRole = options.sessionRole;
 		this.taskDepth = options.taskDepth ?? 0;
@@ -433,7 +431,7 @@ export class Session implements FlueSession {
 		assertRoleExists(this.config.roles, this.sessionRole);
 
 		const tools = [
-			...this.createBuiltinTools(this.env, this.agentCommands, []),
+			...this.createBuiltinTools(this.env, []),
 			...this.createCustomTools(this.agentTools),
 		];
 
@@ -510,7 +508,6 @@ export class Session implements FlueSession {
 					promptText: buildPromptText(text, schema),
 					schema,
 					tools: options?.tools,
-					commands: options?.commands,
 					role: options?.role,
 					model: options?.model,
 					thinkingLevel: options?.thinkingLevel,
@@ -583,7 +580,6 @@ export class Session implements FlueSession {
 					promptText,
 					schema,
 					tools: options?.tools,
-					commands: options?.commands,
 					role: options?.role,
 					model: options?.model,
 					thinkingLevel: options?.thinkingLevel,
@@ -643,11 +639,8 @@ export class Session implements FlueSession {
 
 				this.emit({ type: 'tool_start', toolName: 'bash', toolCallId, args });
 
-				const effectiveCommands = mergeCommands(this.agentCommands, options?.commands);
-				const env = await scopeSessionEnv(this.env, effectiveCommands);
-
 				try {
-					const result = await env.exec(command, {
+					const result = await this.env.exec(command, {
 						env: options?.env,
 						cwd: options?.cwd,
 						signal,
@@ -840,7 +833,6 @@ export class Session implements FlueSession {
 
 	private createBuiltinTools(
 		env: SessionEnv,
-		commands: Command[],
 		tools: ToolDef[],
 		role?: string,
 		model?: string,
@@ -849,7 +841,7 @@ export class Session implements FlueSession {
 		return createTools(env, {
 			roles: this.config.roles,
 			task: (params, signal) =>
-				this.runTaskForTool(params, commands, tools, role, model, thinkingLevel, signal),
+				this.runTaskForTool(params, tools, role, model, thinkingLevel, signal),
 		});
 	}
 
@@ -858,7 +850,6 @@ export class Session implements FlueSession {
 		fn: (ctx: { resolvedModel: Model<any> }) => Promise<T>,
 	): Promise<T> {
 		const customTools = this.createCustomTools([...this.agentTools, ...options.tools]);
-		const scopedEnv = await scopeSessionEnv(this.env, options.commands);
 		const previousTools = this.harness.state.tools;
 		const previousModel = this.harness.state.model;
 		const previousSystemPrompt = this.harness.state.systemPrompt;
@@ -873,8 +864,7 @@ export class Session implements FlueSession {
 		);
 		this.harness.state.tools = [
 			...this.createBuiltinTools(
-				scopedEnv,
-				options.commands,
+				this.env,
 				options.tools,
 				options.role,
 				options.model,
@@ -897,7 +887,6 @@ export class Session implements FlueSession {
 
 	private async runTaskForTool(
 		params: TaskToolParams,
-		commands: Command[],
 		tools: ToolDef[],
 		inheritedRole: string | undefined,
 		inheritedModel: string | undefined,
@@ -911,7 +900,6 @@ export class Session implements FlueSession {
 				inheritedModel,
 				inheritedThinkingLevel,
 				cwd: params.cwd,
-				commands,
 				tools,
 			},
 			signal,
@@ -963,7 +951,6 @@ export class Session implements FlueSession {
 
 		try {
 			const role = this.resolveEffectiveRole(options?.role);
-			const commands = mergeCommands(this.agentCommands, options?.commands);
 
 			child = await this.createTaskSession({
 				parentSessionId: this.id,
@@ -971,7 +958,6 @@ export class Session implements FlueSession {
 				parentEnv: this.env,
 				cwd: options?.cwd,
 				role,
-				commands,
 				depth: this.taskDepth + 1,
 			});
 			await this.recordTaskSession(child.id, child.storageKey, taskId);
@@ -1419,7 +1405,6 @@ export class Session implements FlueSession {
 		promptText: string;
 		schema: v.GenericSchema | undefined;
 		tools: ToolDef[] | undefined;
-		commands: Command[] | undefined;
 		role: string | undefined;
 		model: string | undefined;
 		thinkingLevel: ThinkingLevel | undefined;
@@ -1431,11 +1416,9 @@ export class Session implements FlueSession {
 	}): Promise<PromptResponse | PromptResultResponse<unknown>> {
 		const role = this.resolveEffectiveRole(args.role);
 		const resultBundle = args.schema ? createResultTools(args.schema) : undefined;
-		const effectiveCommands = mergeCommands(this.agentCommands, args.commands);
 
 		return this.withScopedRuntime(
 			{
-				commands: effectiveCommands,
 				tools: args.tools ?? [],
 				role,
 				model: args.model,

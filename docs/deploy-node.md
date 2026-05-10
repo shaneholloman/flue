@@ -2,7 +2,7 @@
 
 Build and deploy Flue agents as a Node.js server. This guide walks you through creating your first agent, running it locally, and deploying it anywhere you can run Node.js — a VPS, Docker, Railway, Fly.io, or any cloud platform.
 
-By the end, you will have a Flue agent running as a Node.js server, and you will know how to add roles, sandbox context, commands, remote sandboxes, and durable session storage when your agent needs them.
+By the end, you will have a Flue agent running as a Node.js server, and you will know how to add roles, sandbox context, external CLIs, remote sandboxes, and durable session storage when your agent needs them.
 
 ## Project layout
 
@@ -162,7 +162,9 @@ const summary = await session.skill('summarize', {
 
 ## Using the local sandbox
 
-This is where Node.js really shines compared to other targets. The `'local'` sandbox mounts the host's `process.cwd()` at `/workspace`, giving the agent direct access to the real filesystem. Skills and `AGENTS.md` are discovered automatically from the project root.
+`sandbox: 'local'` is where Node really shines compared to other targets. The agent runs directly against the host filesystem and shell — `cwd` is `process.cwd()`, shell commands go through `child_process` with the host's env, and `AGENTS.md` and skills are discovered from the project root.
+
+Run flue itself inside an isolation boundary you trust — a CI runner, a container, a sandbox VM. There is no second layer of isolation between the agent and the host.
 
 `.flue/agents/reviewer.ts`:
 
@@ -199,86 +201,16 @@ export default async function ({ init, payload }: FlueContext) {
 }
 ```
 
-The agent can read, search, and modify files using its built-in tools — read, write, edit, grep, glob, and bash. Because it's running against the real filesystem, it can do things like run tests, check build output, or inspect config files.
+The agent reads, searches, and modifies files via its built-in tools — read, write, edit, grep, glob, bash. Anything on `$PATH` (`git`, `npm`, `gh`, `docker`) is reachable from the bash tool, and env vars set on the runner are visible to the binaries the agent runs. That's the model: the host environment is the agent's environment.
 
-### When to use the local sandbox
+### When to use it
 
-- **Self-hosted coding agents** — An agent that reviews PRs, fixes bugs, or refactors code against the actual repo.
-- **File processing** — An agent that reads documents, transforms data, or generates reports from local files.
-- **Dev tooling** — An agent that analyzes your project structure, runs linters, or generates boilerplate.
+- **Self-hosted coding agents** — review PRs, fix bugs, refactor against the actual repo.
+- **File processing** — read documents, transform data, generate reports from local files.
+- **Dev tooling** — analyze project structure, run linters, generate boilerplate.
+- **CI** — issue triage, deploy checks, anything where the runner already provides isolation.
 
-The local sandbox is fast (no container startup) and gives the agent real context (your actual project files, `AGENTS.md`, skills). The tradeoff is that the agent shares the host filesystem — there's no isolation between sessions.
-
-## Connecting external CLIs with commands
-
-Your agent may need to interact with tools like `git`, `npm`, or `docker`. **Commands** let you connect privileged CLIs to the agent without leaking secrets.
-
-`.flue/agents/deploy.ts`:
-
-```typescript
-import { type FlueContext } from '@flue/sdk/client';
-import { defineCommand } from '@flue/sdk/node';
-import * as v from 'valibot';
-
-export const triggers = { webhook: true };
-
-// Bare pass-through. Safe, non-sensitive env vars like PATH, HOME, LANG, and TZ
-// are forwarded automatically — API keys and secrets stay on the host.
-const git = defineCommand('git', { env: { GIT_AUTHOR_NAME: 'flue-bot' } });
-
-// Opt the agent into a single privileged env var without exposing the rest
-// of process.env.
-const npm = defineCommand('npm', { env: { NPM_TOKEN: process.env.NPM_TOKEN } });
-
-export default async function ({ init, payload }: FlueContext) {
-  const agent = await init({ sandbox: 'local', model: 'anthropic/claude-opus-4-7' });
-  const session = await agent.session();
-
-  const result = await session.skill('deploy-check', {
-    args: { branch: payload.branch },
-    // Grant access to `git` and `npm` for the life of this skill.
-    commands: [git, npm],
-    result: v.object({
-      ready: v.boolean(),
-      blockers: v.array(v.string()),
-    }),
-  });
-
-  return result;
-}
-```
-
-`defineCommand(name)` and `defineCommand(name, { env })` shell out via `child_process.execFile` with a sensible default env. If you need full control over how the command runs (custom logic, a different binary, fine-grained env scrubbing), use the function form:
-
-```typescript
-const gh = defineCommand('gh', async (args) => {
-  // Your own implementation — return the stdout/stderr/exitCode however you like.
-  // Thrown errors are caught automatically and surfaced as a non-zero exit code.
-  const res = await fetch('https://api.github.com/...');
-  return { stdout: await res.text() };
-});
-```
-
-Commands are granted per-prompt or per-skill, so you can be as granular with access as you need. If the agent tries to run `git` outside of a prompt where it was granted, the command is blocked.
-
-### Agent-wide commands
-
-If every call in an agent needs the same set of commands, pass them to `init()` once instead of to every `prompt()` / `skill()` / `shell()`:
-
-```typescript
-const agent = await init({
-  sandbox: 'local',
-  commands: [git, npm],
-  model: 'openrouter/moonshotai/kimi-k2.6',
-});
-const session = await agent.session();
-
-// `git` and `npm` are available here without repeating `commands: [...]`.
-await session.skill('deploy-check', { args: { branch: payload.branch } });
-await session.shell('git status');
-```
-
-Per-call `commands` still work and are merged on top of the agent list. If a per-call command shares a name with an agent command, the per-call version wins for that call only — the agent command is restored afterward.
+No container startup, real project context, fast iteration. If you need a tighter boundary on a specific operation — agent can call it, never sees the underlying secret — wrap it as a custom tool via `init({ tools: [...] })`. The tool reads `process.env`; the agent only sees the tool's params and result.
 
 ## Connecting a remote sandbox
 
@@ -390,7 +322,7 @@ Here's the progression of sandbox types available on Node.js, from simplest to m
 
 1. **Empty virtual sandbox** — `init({ model: 'openai/gpt-5.5' })`. Fast, cheap, stateless. Good for prompt-and-response agents.
 2. **Virtual sandbox with shell setup** — Use `session.shell()` to write files and configure the workspace. Still fast and cheap, good for agents that need small amounts of static context.
-3. **Local sandbox** — `init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' })`. Mounts the host filesystem at `/workspace`. Ideal for self-hosted agents, CI tasks, and dev tooling.
+3. **Local sandbox** — `init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' })`. Direct host filesystem and shell access. Ideal for self-hosted agents, CI tasks, and dev tooling — anywhere the host environment already provides isolation.
 4. **Remote sandbox** — Full isolated Linux environment via a sandbox connector. For multi-tenant agents, coding sandboxes, and anything that needs per-session isolation.
 
 Start simple. Move up when you need to.

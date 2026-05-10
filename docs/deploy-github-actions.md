@@ -2,7 +2,7 @@
 
 Build and run Flue agents in GitHub Actions. This guide walks you through creating your first agent, running it locally with the CLI, and wiring it into a CI workflow.
 
-By the end, you will have a Flue agent running inside GitHub Actions, and you will know how to use local sandbox context, commands, roles, skills, and typed results to build CI workflows.
+By the end, you will have a Flue agent running inside GitHub Actions, and you will know how to use local sandbox context, external CLIs, roles, skills, and typed results to build CI workflows.
 
 ## Hello World
 
@@ -49,7 +49,7 @@ A few things to note:
 
 - **`triggers = {}`** — This agent has no HTTP trigger. It's designed to be run from the CLI, which is perfect for CI.
 - **`model`** — Every session needs a model. If you do not pass one to `init()` or a specific `prompt()` / `skill()` call, no model is chosen.
-- **`sandbox: 'local'`** — The `"local"` sandbox mounts the host filesystem at `/workspace`. In CI, this is the checked-out repo. Skills and `AGENTS.md` are discovered automatically from the project root.
+- **`sandbox: 'local'`** — The `"local"` sandbox runs the agent directly against the host filesystem and shell. In CI, that's the checked-out repo plus whatever binaries are on `$PATH` (`gh`, `git`, `npm`, etc.). Skills and `AGENTS.md` are discovered automatically from the project root. Use `"local"` only when the runner itself provides the isolation boundary.
 - **Result schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns a typed object.
 
 ### 3. Test it locally
@@ -127,36 +127,29 @@ const diagnosis = await session.skill('triage', {
 });
 ```
 
-### Connecting external CLIs with commands
+### Connecting external CLIs
 
-In CI, your agent often needs to interact with tools like `gh`, `npm`, or `git`. But you don't want to hand the agent your raw API keys. **Commands** solve this — they let you connect privileged CLIs to the agent without leaking secrets.
+Your agent often needs to interact with tools like `gh`, `npm`, or `git`. With `sandbox: 'local'`, the agent's bash tool runs against the host shell directly — anything on `$PATH` is reachable, and any env var set on the runner is visible to the binaries it runs.
 
-Secrets are hooked up inside the command definition, so the agent never sees them. Commands are granted per-prompt or per-skill, so you can be as granular with access as you need. Here's a triage agent that puts it all together:
+In GitHub Actions, this means you set the secrets you want the agent's CLIs to see in the workflow `env:` block. The runner is your isolation boundary; flue inherits it.
 
 `.flue/agents/triage.ts`:
 
 ```typescript
 import { type FlueContext } from '@flue/sdk/client';
-import { defineCommand } from '@flue/sdk/node';
 import * as v from 'valibot';
 
 export const triggers = {};
-
-// Connect privileged CLIs to your agent without leaking sensitive keys.
-// Secrets are hooked up inside the command definition here, so the agent
-// never sees them. The default env forwards safe vars like PATH and HOME —
-// anything else (tokens, keys) must be opted in explicitly.
-const gh = defineCommand('gh', { env: { GH_TOKEN: process.env.GH_TOKEN } });
-const npm = defineCommand('npm');
 
 export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ sandbox: 'local', model: 'anthropic/claude-opus-4-7' });
   const session = await agent.session();
 
+  // The agent's bash tool can run `gh issue view`, `npm install`, `git diff`
+  // etc. directly. Whatever GH_TOKEN / NPM_TOKEN you set in the workflow's
+  // `env:` block is visible to those binaries.
   const result = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    // Grant access to `gh` and `npm` for the life of this skill.
-    commands: [gh, npm],
     result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
@@ -169,7 +162,7 @@ export default async function ({ init, payload }: FlueContext) {
 }
 ```
 
-The agent can now use `gh issue view`, `gh issue comment`, etc. through the command — but it never has access to the `GH_TOKEN` itself. If the agent tries to run `gh` outside of a prompt where it was granted, the command is blocked.
+If you want a tighter boundary — the agent can call a specific operation but never see the underlying token — wrap the operation as a custom tool with `init({ tools: [...] })`. The tool implementation reads the secret from `process.env`; the agent only sees the tool's parameters and result.
 
 ### Roles
 
@@ -277,11 +270,7 @@ Result schemas aren't just for type safety — they're how you orchestrate multi
 
 ```typescript
 import { type FlueContext } from '@flue/sdk/client';
-import { defineCommand } from '@flue/sdk/node';
 import * as v from 'valibot';
-
-const gh = defineCommand('gh', { env: { GH_TOKEN: process.env.GH_TOKEN } });
-const npm = defineCommand('npm');
 
 export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
@@ -289,7 +278,6 @@ export default async function ({ init, payload }: FlueContext) {
 
   const diagnosis = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    commands: [gh],
     result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
@@ -301,7 +289,6 @@ export default async function ({ init, payload }: FlueContext) {
     // Escalate: attempt an automated fix
     await session.skill('auto-fix', {
       args: { issueNumber: payload.issueNumber },
-      commands: [gh, npm],
       result: v.object({ fix_applied: v.boolean(), pr_url: v.optional(v.string()) }),
     });
   }

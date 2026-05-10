@@ -105,7 +105,6 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					env,
 					store,
 					currentEventCallback,
-					options.commands,
 					options.tools,
 				);
 			} catch (error) {
@@ -202,7 +201,6 @@ export type {
 	FlueEventCallback,
 	SessionData,
 	SessionStore,
-	Command,
 	FileStat,
 	SandboxFactory,
 	BashFactory,

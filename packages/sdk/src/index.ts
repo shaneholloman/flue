@@ -10,8 +10,6 @@ export type {
 	SessionData,
 	SessionStore,
 	SessionEnv,
-	Command,
-	CommandDef,
 	FileStat,
 	SandboxFactory,
 	BashFactory,
