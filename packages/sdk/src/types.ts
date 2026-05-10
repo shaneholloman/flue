@@ -1,7 +1,7 @@
 import type { AgentMessage, ThinkingLevel } from '@mariozechner/pi-agent-core';
 import type { ImageContent, Model, TSchema } from '@mariozechner/pi-ai';
 import type * as v from 'valibot';
-import type { FlueModelDefinition } from './config.ts';
+
 
 export type { ThinkingLevel };
 
@@ -163,52 +163,20 @@ export interface CompactionConfig {
 
 // ─── Provider Runtime Settings ──────────────────────────────────────────────
 
+/** Per-provider transport settings configured from `@flue/sdk/app`. */
 export interface ProviderSettings {
-	/**
-	 * Provider endpoint used by built-in models. Useful for API gateways,
-	 * LiteLLM-style proxies, or enterprise-managed provider endpoints.
-	 */
+	/** Provider endpoint used by built-in models or registered providers. */
 	baseUrl?: string;
-	/**
-	 * Headers merged into the resolved model's provider-level headers. Values
-	 * here override headers already defined by the built-in model.
-	 */
+	/** Headers merged into the resolved model's provider-level headers. */
 	headers?: Record<string, string>;
-	/**
-	 * API key returned to the underlying agent runtime for this provider.
-	 * Useful when the gateway requires a dummy key or when credentials should
-	 * come from the agent's runtime env instead of process-global env vars.
-	 */
+	/** API key returned to the underlying agent runtime for this provider. */
 	apiKey?: string;
 	/**
-	 * Sets `store: true` on OpenAI Responses API requests for this provider.
-	 *
-	 * Only applies to providers using the `openai-responses` or
-	 * `azure-openai-responses` API (e.g. `openai`, `azure`); ignored for
-	 * Anthropic, Google, Codex Responses, and other backends. Defaults to
-	 * `false`, matching the underlying pi-ai default.
-	 *
-	 * Enable this only if you need multi-turn conversations with reasoning
-	 * models (e.g. gpt-5, gpt-5.5) **and** explicit `thinkingLevel: "off"`.
-	 * In that combination, pi-ai does not request encrypted reasoning content
-	 * back, and subsequent turns reference per-item ids (`fc_*`, `msg_*`,
-	 * `rs_*`) that OpenAI 404s with `"Items are not persisted when store is
-	 * set to false."`. Setting `store: true` opts those items into OpenAI's
-	 * server-side persistence so the references resolve.
-	 *
-	 * The default `thinkingLevel` of `"medium"` already keeps reasoning models
-	 * on the stateless encrypted-reasoning path and does not require this
-	 * flag. Most agents do not need to set it.
-	 *
-	 * **Data retention:** enabling this opts the conversation into OpenAI's
-	 * server-side storage (subject to your org's retention policy, default
-	 * 30 days). Do not enable on ZDR tiers or when handling data that must
-	 * not leave your control.
+	 * Sends `store: true` for OpenAI Responses API providers. Only enable when
+	 * you need OpenAI-hosted item persistence and accept its retention policy.
 	 */
 	storeResponses?: boolean;
 }
-
-export type ProvidersConfig = Record<string, ProviderSettings>;
 
 // ─── Agent Config (internal, passed to the harness at runtime) ──────────────
 
@@ -226,13 +194,8 @@ export interface AgentConfig {
 	model: Model<any> | undefined;
 	/** Agent-wide default role. Per-session and per-call roles override this. */
 	role?: string;
-	/** Provider runtime settings applied when resolving models. */
-	providers?: ProvidersConfig;
 	/** Resolve model config to a Model instance. Throws on invalid model strings. */
-	resolveModel: (
-		model: ModelConfig | undefined,
-		providers?: ProvidersConfig,
-	) => Model<any> | undefined;
+	resolveModel: (model: ModelConfig | undefined) => Model<any> | undefined;
 	/**
 	 * Agent-wide default reasoning effort. Per-call and role-level values
 	 * override this. The harness substitutes `"medium"` when unset; see
@@ -327,27 +290,6 @@ export interface AgentInit {
 	 * models that support it.
 	 */
 	thinkingLevel?: ThinkingLevel;
-
-	/**
-	 * Provider runtime settings for every model used by this agent, including
-	 * role-level and per-call model selections.
-	 *
-	 * Example:
-	 *
-	 * ```ts
-	 * await init({
-	 *   model: 'anthropic/claude-sonnet-4-6',
-	 *   providers: {
-	 *     anthropic: {
-	 *       baseUrl: env.ANTHROPIC_BASE_URL,
-	 *       headers: { 'X-Custom-Auth': env.GATEWAY_KEY },
-	 *       apiKey: 'dummy',
-	 *     },
-	 *   },
-	 * });
-	 * ```
-	 */
-	providers?: ProvidersConfig;
 
 	/**
 	 * Agent-wide tools. Every prompt(), skill(), and task() call can use these.
@@ -687,6 +629,18 @@ export interface BuildContext {
 	 * on `root`, regardless of this value.
 	 */
 	output: string;
+	/**
+	 * Absolute path to the user's `app.{ts,js,mts,mjs}` entry, if one
+	 * exists in the source root. When set, the generated server entry
+	 * imports the user's app and dispatches all requests through its
+	 * `fetch` method instead of constructing a default Hono app. When
+	 * undefined, the generated entry falls back to a default Hono app
+	 * with Flue's built-in routes mounted via `flue()`.
+	 *
+	 * Discovery follows the same extension priority as agents:
+	 * `app.ts` > `app.mts` > `app.js` > `app.mjs`.
+	 */
+	appEntry?: string;
 	options: BuildOptions;
 }
 
@@ -754,10 +708,4 @@ export interface BuildOptions {
 	target?: 'node' | 'cloudflare';
 	/** Overrides `target` when provided. */
 	plugin?: BuildPlugin;
-	/**
-	 * User-defined model providers from `flue.config.ts`. Inlined into the
-	 * generated server entry at build time. Keys are bare provider names
-	 * (no slash); values come from `defineXxxModel(...)` helpers.
-	 */
-	models?: Record<string, FlueModelDefinition>;
 }

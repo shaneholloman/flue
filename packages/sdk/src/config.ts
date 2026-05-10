@@ -23,6 +23,9 @@
  * The two public types mirror Astro's `AstroUserConfig` / `AstroConfig`
  * split: `UserFlueConfig` is what users author (everything optional);
  * `FlueConfig` is the resolved shape with required defaults filled in.
+ *
+ * Provider/model configuration lives in `app.ts`, where runtime env is
+ * available.
  */
 
 import * as fs from 'node:fs';
@@ -31,47 +34,6 @@ import { pathToFileURL } from 'node:url';
 import * as v from 'valibot';
 
 // ─── Public API ─────────────────────────────────────────────────────────────
-
-/**
- * Brand applied to every value returned from a `defineXxxModel(...)` helper,
- * used as the discriminator inside `resolveModel`. Treat as opaque from
- * userland. The leading underscore + `__` keeps the field unobtrusive in
- * IDE autocomplete on the user-facing object.
- *
- * Bumping this string is a breaking change to the build artifact — old
- * entries in a stale `flue.config.ts` would no longer be recognized. Don't
- * bump it casually.
- */
-const FLUE_MODEL_DEFINITION_BRAND = '__flueModelDefinition' as const;
-const FLUE_MODEL_DEFINITION_VERSION = 1 as const;
-
-/**
- * Discriminated record produced by `defineOpenAICompletionsModel(...)`. The
- * `kind` field gates which branch of the resolver builds the pi-ai `Model`
- * literal. Static-object shape (no closures) so it survives JSON
- * serialization into the build artifact unchanged.
- */
-export interface OpenAICompletionsModelDefinition {
-	[FLUE_MODEL_DEFINITION_BRAND]: typeof FLUE_MODEL_DEFINITION_VERSION;
-	kind: 'openai-completions';
-	/**
-	 * Provider name surfaced on AssistantMessage records and used as the
-	 * `init({ providers: { ... } })` override key. Defaults to the prefix
-	 * the entry was registered under in the `models` map.
-	 */
-	provider?: string;
-	/** Endpoint root, e.g. `http://localhost:11434/v1`. Required. */
-	baseUrl: string;
-	/** Optional default headers merged into every request. */
-	headers?: Record<string, string>;
-}
-
-/**
- * Union of every shape produced by Flue's model-definition helpers. New
- * helpers (e.g. for Anthropic-compatible custom endpoints) extend this
- * union, and `resolveModel` adds a corresponding branch.
- */
-export type FlueModelDefinition = OpenAICompletionsModelDefinition;
 
 /**
  * User-facing config shape — everything optional so `defineConfig({})` is
@@ -95,22 +57,6 @@ export interface UserFlueConfig {
 	 * containing the config file. Defaults to `<root>/dist`.
 	 */
 	output?: string;
-	/**
-	 * User-defined model providers. Keys are bare provider names without
-	 * any slash (e.g. `"ollama"`, `"lmstudio"`); values come from a
-	 * `defineXxxModel(...)` helper.
-	 *
-	 * At resolve time, `init({ model: 'ollama/llama3.1:8b' })` matches
-	 * the `ollama` key; the part after the first slash is forwarded to the
-	 * underlying provider as the model id.
-	 *
-	 * User-defined entries are consulted before any built-in routing
-	 * (including the reserved `cloudflare/` prefix) and before the pi-ai
-	 * catalog. Last-write-wins on collision — same semantics as pi-ai's
-	 * own `registerApiProvider`. Use that to override a built-in if you
-	 * need to.
-	 */
-	models?: Record<string, FlueModelDefinition>;
 }
 
 /**
@@ -123,11 +69,6 @@ export interface FlueConfig {
 	root: string;
 	/** Absolute path. */
 	output: string;
-	/**
-	 * User-defined model providers, keyed by bare provider name (no slash).
-	 * Always present (defaults to `{}`) so consumers don't need to null-check.
-	 */
-	models: Record<string, FlueModelDefinition>;
 }
 
 /**
@@ -143,95 +84,14 @@ export function defineConfig(config: UserFlueConfig): UserFlueConfig {
 	return config;
 }
 
-/**
- * Declare an OpenAI-compatible completions endpoint as a Flue model
- * provider. Use this for Ollama, LM Studio, vLLM, llama.cpp, LiteLLM,
- * any vendor that speaks the OpenAI Chat Completions wire format.
- *
- * ```ts
- * import { defineConfig, defineOpenAICompletionsModel } from '@flue/sdk/config';
- *
- * export default defineConfig({
- *   target: 'node',
- *   models: {
- *     ollama: defineOpenAICompletionsModel({
- *       baseUrl: 'http://localhost:11434/v1',
- *     }),
- *   },
- * });
- * ```
- *
- * Then in agent code: `init({ model: 'ollama/llama3.1:8b' })`.
- *
- * The `provider` defaults to the key the entry is registered under in the
- * `models` map; pass it explicitly if you want a different value to surface
- * on AssistantMessage records or as the `init({ providers: { ... } })`
- * override key.
- *
- * Returned objects are JSON-serializable on purpose — the build inlines
- * them into the generated server entry. Don't put functions or class
- * instances on them.
- */
-export function defineOpenAICompletionsModel(opts: {
-	baseUrl: string;
-	provider?: string;
-	headers?: Record<string, string>;
-}): OpenAICompletionsModelDefinition {
-	if (typeof opts.baseUrl !== 'string' || opts.baseUrl.length === 0) {
-		throw new Error(
-			'[flue] defineOpenAICompletionsModel: `baseUrl` is required (e.g. "http://localhost:11434/v1").',
-		);
-	}
-	// `JSON.stringify` (used by the build plugins to inline this map) drops
-	// undefined-valued keys, so unconditionally assigning the optionals is
-	// equivalent to spreading them in only when set.
-	return {
-		[FLUE_MODEL_DEFINITION_BRAND]: FLUE_MODEL_DEFINITION_VERSION,
-		kind: 'openai-completions',
-		baseUrl: opts.baseUrl,
-		provider: opts.provider,
-		headers: opts.headers,
-	};
-}
-
 // ─── Validation ─────────────────────────────────────────────────────────────
 
 const TargetSchema = v.picklist(['node', 'cloudflare'] as const);
-
-/**
- * Bare provider names. No slashes (slashes appear in the model string AFTER
- * the prefix and are routed to the underlying provider). Lower-kebab-case
- * with leading alphanumeric — matches the rest of pi-ai's provider slugs.
- */
-const PROVIDER_KEY_PATTERN = /^[a-z0-9][a-z0-9-]*$/;
-
-const OpenAICompletionsModelDefinitionSchema = v.strictObject({
-	[FLUE_MODEL_DEFINITION_BRAND]: v.literal(FLUE_MODEL_DEFINITION_VERSION),
-	kind: v.literal('openai-completions'),
-	provider: v.optional(v.string()),
-	baseUrl: v.string(),
-	headers: v.optional(v.record(v.string(), v.string())),
-});
-
-const FlueModelDefinitionSchema = v.variant('kind', [
-	OpenAICompletionsModelDefinitionSchema,
-]);
-
-const ModelsSchema = v.pipe(
-	v.record(v.string(), FlueModelDefinitionSchema),
-	v.check(
-		(models) => Object.keys(models).every((k) => PROVIDER_KEY_PATTERN.test(k)),
-		`Each "models" key must be a bare provider name (e.g. "ollama") — no slashes, lower-kebab-case. ` +
-			`The provider name is matched against the part of \`init({ model: '...' })\` ` +
-			`before the first slash; the rest is forwarded to the provider as the model id.`,
-	),
-);
 
 const UserFlueConfigSchema = v.strictObject({
 	target: v.optional(TargetSchema),
 	root: v.optional(v.string()),
 	output: v.optional(v.string()),
-	models: v.optional(ModelsSchema),
 });
 
 // ─── Discovery ──────────────────────────────────────────────────────────────
@@ -407,14 +267,11 @@ export async function resolveConfig(opts: ResolveConfigOptions): Promise<Resolve
 	const inline = opts.inline ?? {};
 
 	// Merge: per-field, inline > file. We don't merge nested structures because
-	// the surface is flat today. `models` is whole-object replacement (no
-	// shallow merge) — the CLI never sets `models` inline today, so this only
-	// matters as a forward-compat note.
+	// the surface is flat today.
 	const merged: UserFlueConfig = {
 		target: inline.target ?? fileConfig.target,
 		root: inline.root ?? fileConfig.root,
 		output: inline.output ?? fileConfig.output,
-		models: inline.models ?? fileConfig.models,
 	};
 
 	// Resolve target. The one field with no sensible default — surface a clear
@@ -449,7 +306,6 @@ export async function resolveConfig(opts: ResolveConfigOptions): Promise<Resolve
 			target: merged.target,
 			root,
 			output,
-			models: merged.models ?? {},
 		},
 	};
 }

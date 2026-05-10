@@ -3,14 +3,15 @@ import type { FlueContext } from '@flue/sdk';
 export const triggers = { webhook: true };
 
 /**
- * Smoke-test agent for the `models` config field. Verifies that
- * `init({ model: 'ollama/...' })` resolves through the user-defined entry
- * in `flue.config.ts` instead of the pi-ai catalog.
+ * Smoke-test agent for `registerProvider(...)`. Verifies that
+ * `init({ model: 'ollama/...' })` resolves through the runtime registry
+ * populated by the `registerProvider('ollama', ...)` call at the top of
+ * `app.ts`, instead of falling through to the pi-ai catalog and erroring.
  *
  * We don't actually call the model — running this against a live Ollama
  * instance is a separate manual test. The `init()` call is enough to
  * exercise the resolution path and would throw `Unknown model "ollama/..."`
- * pre-feature.
+ * if the registration failed to land.
  */
 export default async function ({ init }: FlueContext) {
 	const agent = await init({ model: 'ollama/llama3.1:8b' });

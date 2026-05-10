@@ -6,6 +6,7 @@
 		"@flue/sdk": "workspace:*",
 		"@daytona/sdk": "*",
 		"agents": "*",
+		"hono": "^4.7.0",
 		"just-bash": "^2.14.2",
 		"valibot": "^1.0.0"
 	}

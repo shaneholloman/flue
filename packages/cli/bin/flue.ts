@@ -731,21 +731,13 @@ function startServer(
 	});
 }
 
-async function waitForServer(port: number, timeoutMs = 30000): Promise<boolean> {
-	const start = Date.now();
-	while (Date.now() - start < timeoutMs) {
-		try {
-			const controller = new AbortController();
-			const timeout = setTimeout(() => controller.abort(), 1000);
-			const res = await fetch(`http://localhost:${port}/health`, { signal: controller.signal });
-			clearTimeout(timeout);
-			if (res.ok) return true;
-		} catch {
-			// Not ready yet
-		}
-		await new Promise((resolve) => setTimeout(resolve, 300));
-	}
-	return false;
+/** True when fetch failed before the child server accepted connections. */
+function isConnectionRefusedError(err: unknown): boolean {
+	if (!(err instanceof Error)) return false;
+	const cause = (err as { cause?: { code?: string; message?: string } }).cause;
+	if (cause?.code === 'ECONNREFUSED') return true;
+	if (typeof cause?.message === 'string' && cause.message.includes('ECONNREFUSED')) return true;
+	return err.message.includes('ECONNREFUSED');
 }
 
 function stopServer() {
@@ -788,7 +780,6 @@ async function buildCommand(args: BuildArgs) {
 			root: cfg.root,
 			output: cfg.output,
 			target: cfg.target,
-			models: cfg.models,
 		});
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
@@ -812,7 +803,6 @@ async function devCommand(args: DevArgs) {
 			target: cfg.target,
 			port: args.port || undefined,
 			envFiles: args.envFiles,
-			models: cfg.models,
 		});
 	} catch (err) {
 		console.error(`[flue] Dev server failed:`, err instanceof Error ? err.message : String(err));
@@ -858,7 +848,7 @@ async function run(args: RunArgs) {
 
 	// 1. Build
 	try {
-		await build({ root, output, target: cfg.target, models: cfg.models });
+		await build({ root, output, target: cfg.target });
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
 		process.exit(1);
@@ -889,43 +879,34 @@ async function run(args: RunArgs) {
 	serverProcess.stdout?.on('data', pipeServerOutput);
 	serverProcess.stderr?.on('data', pipeServerOutput);
 
-	// 4. Wait for server to be ready
-	const ready = await waitForServer(port);
-	if (!ready) {
-		console.error('[flue] Server did not become ready within 30s');
-		stopServer();
-		process.exit(1);
-	}
-	console.error(`[flue] Server ready. Running agent: ${args.agent}`);
-
-	// 5. Verify the agent exists
-	try {
-		const manifestRes = await fetch(`http://localhost:${port}/agents`);
-		const manifest: any = await manifestRes.json();
-		const agentNames = manifest.agents?.map((a: any) => a.name) ?? [];
-		if (!agentNames.includes(args.agent)) {
-			console.error(
-				`[flue] Agent "${args.agent}" not found. Available agents: ${agentNames.join(', ') || '(none)'}`,
-			);
-			stopServer();
-			process.exit(1);
-		}
-	} catch {
-		// Non-fatal — we'll find out when we POST
-	}
-
-	// 6. POST to the agent via SSE
+	// Retry the real request briefly while the child binds its port.
+	console.error(`[flue] Running agent: ${args.agent}`);
 	const sseAbort = new AbortController();
 	let outcome: { result?: any; error?: string };
 
-	try {
-		outcome = await consumeSSE(
-			`http://localhost:${port}/agents/${args.agent}/${args.id}`,
-			args.payload,
-			sseAbort.signal,
-		);
-	} catch (err) {
-		outcome = { error: err instanceof Error ? err.message : String(err) };
+	const startupBudgetMs = 5000;
+	const startupRetryMs = 100;
+	const startedAt = Date.now();
+	while (true) {
+		try {
+			outcome = await consumeSSE(
+				`http://localhost:${port}/agents/${args.agent}/${args.id}`,
+				args.payload,
+				sseAbort.signal,
+			);
+			break;
+		} catch (err) {
+			if (
+				isConnectionRefusedError(err) &&
+				Date.now() - startedAt < startupBudgetMs &&
+				serverProcess?.exitCode === null
+			) {
+				await new Promise((resolve) => setTimeout(resolve, startupRetryMs));
+				continue;
+			}
+			outcome = { error: err instanceof Error ? err.message : String(err) };
+			break;
+		}
 	}
 
 	// 7. Print result and exit

@@ -82,6 +82,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
 	const roles = discoverRoles(sourceRoot);
 	const agents = discoverAgents(sourceRoot);
+	const appEntry = discoverAppEntry(sourceRoot);
 
 	if (agents.length === 0) {
 		throw new Error(
@@ -89,6 +90,10 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 				`Expected at: ${path.join(sourceRoot, 'agents')}/\n` +
 				`Add at least one agent file (e.g. hello.ts).`,
 		);
+	}
+
+	if (appEntry) {
+		console.log(`[flue] Custom app entry: ${path.relative(root, appEntry) || appEntry}`);
 	}
 
 	// NOTE: agents without triggers are valid. They aren't exposed as HTTP
@@ -131,6 +136,7 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 		roles,
 		root,
 		output,
+		appEntry,
 		options,
 	};
 
@@ -314,6 +320,23 @@ function discoverAgents(sourceRoot: string): AgentInfo[] {
 				triggers,
 			};
 		});
+}
+
+/**
+ * Discover an optional `app.{ts,mts,js,mjs}` entry alongside `agents/`
+ * and `roles/`. Returns the absolute path to the first match found, or
+ * undefined when no app entry is present.
+ *
+ * Extension priority matches {@link discoverAgents}: `.ts` > `.mts`
+ * > `.js` > `.mjs`. Source-files-only — we don't probe inside the
+ * `agents/` or `roles/` subdirs.
+ */
+function discoverAppEntry(sourceRoot: string): string | undefined {
+	for (const ext of ['ts', 'mts', 'js', 'mjs']) {
+		const candidate = path.join(sourceRoot, `app.${ext}`);
+		if (fs.existsSync(candidate)) return candidate;
+	}
+	return undefined;
 }
 
 /** Externalize user's direct deps (bare name + subpath wildcard). */

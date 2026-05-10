@@ -1,7 +1,9 @@
 /**
  * Pi-ai provider that dispatches via `env.AI.run()` instead of HTTP.
- * Registered under the `cloudflare-ai-binding` API; binding access goes
- * through `getCloudflareContext()` AsyncLocalStorage.
+ * Registered under the `cloudflare-ai-binding` API.
+ *
+ * Binding access: the generated entry captures `env.AI` at module init and
+ * stores it on the resolved Model as a non-pi-ai `binding` field.
  *
  * Wire format: Workers AI accepts the OpenAI-completions request body, so
  * we translate via pi-ai's `convertMessages` and parse the binding's SSE
@@ -9,6 +11,7 @@
  */
 import type { Ai } from '@cloudflare/workers-types';
 import type {
+	ApiProvider,
 	AssistantMessage,
 	Model,
 	OpenAICompletionsCompat,
@@ -22,19 +25,10 @@ import type {
 import {
 	createAssistantMessageEventStream,
 	parseStreamingJson,
-	registerApiProvider,
 } from '@mariozechner/pi-ai';
 import { convertMessages } from '@mariozechner/pi-ai/openai-completions';
 import { CLOUDFLARE_AI_BINDING_API, type CloudflareAIBindingApi } from '../cloudflare-model.ts';
-import { getCloudflareContext } from './context.ts';
-
-export {
-	CLOUDFLARE_AI_BINDING_API,
-	CLOUDFLARE_AI_BINDING_PROVIDER,
-	CLOUDFLARE_MODEL_PREFIX,
-	createCloudflareAIBindingModel,
-} from '../cloudflare-model.ts';
-export type { CloudflareAIBindingApi } from '../cloudflare-model.ts';
+import { getModelBinding } from '../runtime/providers.ts';
 
 // ─── OpenAI-completions compat profile ──────────────────────────────────────
 
@@ -264,7 +258,7 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, StreamOp
 		};
 
 		try {
-			const ai = resolveBinding();
+			const ai = resolveBinding(model);
 			const messages = convertMessages(
 				// `convertMessages` is typed for `Model<'openai-completions'>` but
 				// only reads provider/id/reasoning, which our model has.
@@ -548,10 +542,12 @@ type RunOverload = (
 	},
 ) => Promise<Response | Record<string, unknown>>;
 
-function resolveBinding(): Ai {
-	const ctx = getCloudflareContext();
-	const ai = ctx.env?.AI as Ai | undefined;
-	if (!ai || typeof (ai as { run?: unknown }).run !== 'function') {
+/**
+ * Read the binding extension carried on the resolved Model.
+ */
+function resolveBinding(model: Model<CloudflareAIBindingApi>): Ai {
+	const ai = getModelBinding(model);
+	if (!ai) {
 		throw new Error(
 			'[flue] Cloudflare AI binding not available. ' +
 				'Models prefixed with "cloudflare/" require running on the Cloudflare ' +
@@ -561,7 +557,7 @@ function resolveBinding(): Ai {
 				'(both require Cloudflare API credentials in env vars).',
 		);
 	}
-	return ai;
+	return ai as Ai;
 }
 
 function pickReasoning(delta: ChatCompletionDelta): { field: string; text: string } | null {
@@ -592,13 +588,14 @@ async function safeReadText(response: Response): Promise<string | undefined> {
 
 // ─── Registration ──────────────────────────────────────────────────────────
 
-let registered = false;
-
-/** Idempotent. Invoked once at startup by the generated Cloudflare entry. */
-export function registerCloudflareAIBindingProvider(): void {
-	if (registered) return;
-	registered = true;
-	registerApiProvider({
+/**
+ * Return the pi-ai `ApiProvider` definition for the Cloudflare AI binding.
+ */
+export function getCloudflareAIBindingApiProvider(): ApiProvider<
+	CloudflareAIBindingApi,
+	StreamOptions
+> {
+	return {
 		api: CLOUDFLARE_AI_BINDING_API,
 		stream: streamCloudflareWorkersAi,
 		// `SimpleStreamOptions` is a superset of `StreamOptions`; reuse is safe
@@ -607,5 +604,5 @@ export function registerCloudflareAIBindingProvider(): void {
 			CloudflareAIBindingApi,
 			SimpleStreamOptions
 		>,
-	});
+	};
 }

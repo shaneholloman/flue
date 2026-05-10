@@ -38,6 +38,7 @@ import {
 	type ResultToolBundle,
 	ResultUnavailableError,
 } from './result.ts';
+import { getProviderConfiguration, getRegisteredApiKey } from './runtime/providers.ts';
 import {
 	assertRoleExists,
 	resolveEffectiveRole as resolveEffectiveRoleName,
@@ -503,11 +504,11 @@ export class Session implements FlueSession {
 
 		const roleModel = resolveRoleModel(this.config.roles, roleName);
 		if (roleModel) {
-			model = this.config.resolveModel(roleModel, this.config.providers);
+			model = this.config.resolveModel(roleModel);
 		}
 
 		if (promptModel) {
-			model = this.config.resolveModel(promptModel, this.config.providers);
+			model = this.config.resolveModel(promptModel);
 		}
 
 		return this.requireModel(model, callSite);
@@ -538,25 +539,22 @@ export class Session implements FlueSession {
 	}
 
 	private getProviderApiKey(provider: string): string | undefined {
-		return this.config.providers?.[provider]?.apiKey;
+		// Explicit provider configuration overrides apiKeys carried by registered
+		// provider templates. Undefined falls through to pi-ai's env-var lookup.
+		const override = getProviderConfiguration(provider)?.apiKey;
+		if (override !== undefined) return override;
+		return getRegisteredApiKey(provider);
 	}
 
 	/**
-	 * Mutate the outgoing provider request payload based on `ProviderSettings`.
-	 *
-	 * Currently only handles `storeResponses` for the OpenAI Responses API
-	 * (`openai-responses` and `azure-openai-responses`), which sets `store: true`
-	 * so multi-turn conversations against reasoning models with
-	 * `thinkingLevel: 'off'` can resolve per-item id references. The Codex
-	 * Responses provider rejects `store: true`, so it is intentionally skipped.
-	 *
-	 * Returning `undefined` keeps the upstream-built payload as-is.
+	 * Provider-specific payload overrides. Returning undefined keeps the
+	 * upstream-built payload as-is.
 	 */
 	private applyProviderPayloadOverrides(payload: unknown, model: Model<any>): unknown {
 		if (model.api !== 'openai-responses' && model.api !== 'azure-openai-responses') {
 			return undefined;
 		}
-		const settings = this.config.providers?.[model.provider];
+		const settings = getProviderConfiguration(model.provider);
 		if (settings?.storeResponses !== true) {
 			return undefined;
 		}
