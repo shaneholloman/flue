@@ -38,6 +38,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { parseEnv } from 'node:util';
 import { build, resolveSourceRoot } from './build.ts';
+import type { FlueModelDefinition } from './config.ts';
 import type { BuildOptions } from './types.ts';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -70,6 +71,11 @@ export interface DevOptions {
 	 * Each path must exist; otherwise dev fails fast with a clear error.
 	 */
 	envFiles?: string[];
+	/**
+	 * User-defined model providers from `flue.config.ts`. Inlined into the
+	 * generated server entry on each rebuild — see {@link BuildOptions.models}.
+	 */
+	models?: Record<string, FlueModelDefinition>;
 }
 
 /** Default port for `flue dev`. F=3, L=5, U=8, E=3 on a phone keypad. */
@@ -131,6 +137,7 @@ export async function dev(options: DevOptions): Promise<void> {
 		root,
 		output,
 		target: options.target,
+		models: options.models,
 	};
 
 	console.error(`[flue] Starting dev server (target: ${options.target})`);

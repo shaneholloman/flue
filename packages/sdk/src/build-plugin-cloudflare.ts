@@ -49,6 +49,9 @@ export class CloudflarePlugin implements BuildPlugin {
 	async generateEntryPoint(ctx: BuildContext): Promise<string> {
 		const { agents, roles } = ctx;
 		const rolesJson = JSON.stringify(roles);
+		// Inline the user-defined models map as a JSON literal. See the Node
+		// plugin for the same pattern + rationale.
+		const userModelsJson = JSON.stringify(ctx.options.models ?? {});
 		validateCloudflareAgentNames(ctx);
 
 		const webhookAgents = agents.filter((a) => a.triggers.webhook);
@@ -141,6 +144,11 @@ const roles = ${rolesJson};
 const skills = {};
 const systemPrompt = '';
 const manifest = ${manifest};
+
+// User-defined model providers from flue.config.ts. Inlined at build time;
+// see the Node plugin for the same pattern + rationale.
+const userModels = ${userModelsJson};
+const resolveModelWithUserModels = (model, providers) => resolveModel(model, providers, userModels);
 
 // Set of webhook-accessible agent names (raw form, as used in URL segments).
 // Used by the worker fetch handler to pre-route requests and reject unknown
@@ -252,7 +260,7 @@ function createContextForRequest(id, payload, doInstance, req) {
     env: doInstance?.env ?? {},
     req,
     agentConfig: {
-      systemPrompt, skills, roles, model: undefined, resolveModel,
+      systemPrompt, skills, roles, model: undefined, resolveModel: resolveModelWithUserModels,
     },
     createDefaultEnv,
     createLocalEnv,

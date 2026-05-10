@@ -788,6 +788,7 @@ async function buildCommand(args: BuildArgs) {
 			root: cfg.root,
 			output: cfg.output,
 			target: cfg.target,
+			models: cfg.models,
 		});
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
@@ -811,6 +812,7 @@ async function devCommand(args: DevArgs) {
 			target: cfg.target,
 			port: args.port || undefined,
 			envFiles: args.envFiles,
+			models: cfg.models,
 		});
 	} catch (err) {
 		console.error(`[flue] Dev server failed:`, err instanceof Error ? err.message : String(err));
@@ -856,7 +858,7 @@ async function run(args: RunArgs) {
 
 	// 1. Build
 	try {
-		await build({ root, output, target: cfg.target });
+		await build({ root, output, target: cfg.target, models: cfg.models });
 	} catch (err) {
 		console.error(`[flue] Build failed:`, err instanceof Error ? err.message : String(err));
 		process.exit(1);
