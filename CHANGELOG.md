@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.4.1
+
+### Fixes & Other Changes
+
+- **`session.shell()` now redacts `env` values in transcript history.** When you pass per-call environment variables to `session.shell(cmd, { env })`, the keys still appear in the recorded tool-call arguments — so the model can reason about *which* variables were set on a later turn — but the values are replaced with `<redacted>`. The real values are still passed to `env.exec()`, so the command itself runs with the actual environment. This prevents API keys and other secrets from leaking into session storage.
+
 ## 0.4.0
 
 Big release! We are working hard to stabilize our APIs and add any missing and essential features to Flue that you need. There are some breaking changes to be aware of, when upgrading from `v0.3` to `v0.4`. Read through the list below to understand what's new and what's changed. Or, point your coding agent to this changelog URL for a more automated upgrade experience).
