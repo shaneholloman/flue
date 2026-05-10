@@ -42,15 +42,15 @@ export default async function ({ init, payload }: FlueContext) {
   const session = await agent.session();
 
   // prompt() sends a message in the session, triggering action.
-  const result = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
-    // Pass a result schema to get typed, schema-validated data back from your agent.
-    result: v.object({
+  const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
+    // Pass a `schema` to get typed, schema-validated data back from your agent.
+    schema: v.object({
       translation: v.string(),
       confidence: v.picklist(['low', 'medium', 'high']),
     }),
   });
 
-  return result;
+  return data;
 }
 ```
 
@@ -119,12 +119,12 @@ export default async function ({ init, payload }: FlueContext) {
   // or by a relative path under `.agents/skills/` — e.g.
   // `session.skill('triage/reproduce.md', ...)`. Path references are handy for
   // skill packs that group multiple stages under one directory.
-  const result = await session.skill('triage', {
+  const { data } = await session.skill('triage', {
     // Pass arguments to any prompt or skill.
     args: { issueNumber: payload.issueNumber },
-    // Result schemas are great for being able to act/orchestrate
-    // based on the result of your prompt or skill call.
-    result: v.object({
+    // Schemas are great for being able to act/orchestrate based on
+    // the structured `data` returned from your prompt or skill call.
+    schema: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),
@@ -132,7 +132,7 @@ export default async function ({ init, payload }: FlueContext) {
     }),
   });
 
-  return result;
+  return data;
 }
 ```
 

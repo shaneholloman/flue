@@ -8,17 +8,17 @@ export const HERO = `export default async function ({ init, payload, env }) {
   const session = await agent.session();
 
   // Call skills as reusable workflows with structured output:
-  const triage = await session.skill('triage', {
+  const { data } = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    result: v.object({ fixApplied: v.boolean() }),
+    schema: v.object({ fixApplied: v.boolean() }),
   });
 
   // Keep track of work in the session, just like Claude Code or Codex:
   const comment = await session.prompt('Write a GitHub comment summarizing the triage.');
 
   // Keep absolute control over the agent's most critical decisions:
-  if (triage.fixApplied) {
-    await session.shell(\`git add -A && git commit -m \${JSON.stringify(\`fix: \${triage.summary}\`)}\`);
+  if (data.fixApplied) {
+    await session.shell(\`git add -A && git commit -m \${JSON.stringify(\`fix: \${data.summary}\`)}\`);
   }
 
   // Protect your sensitive tokens and API keys with fine-grained control:
@@ -65,9 +65,9 @@ export default async function ({ init, payload, env }: FlueContext) {
   const agent = await init({ model: 'anthropic/claude-opus-4-7' });
   const session = await agent.session();
   // Run the 'triage' skill to triage the GitHub issue.
-  const triage = await session.skill('triage', {
+  const { data } = await session.skill('triage', {
     args: { issueNumber },
-    result: v.object({
+    schema: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),
@@ -75,7 +75,7 @@ export default async function ({ init, payload, env }: FlueContext) {
   });
   // Post the triage result back to GitHub.
   // The agent/sandbox never sees your sensitive GITHUB_TOKEN.
-  const body = \`**Severity:** \${triage.severity}\\n**Reproducible:** \${triage.reproducible}\\n\\n\${triage.summary}\`;
+  const body = \`**Severity:** \${data.severity}\\n**Reproducible:** \${data.reproducible}\\n\\n\${data.summary}\`;
   await (new Octokit({ auth: env.GITHUB_TOKEN })).request(
     'POST /repos/{owner}/{repo}/issues/{num}/comments', 
     { owner: 'withastro', repo: 'flue', num: issueNumber, body },

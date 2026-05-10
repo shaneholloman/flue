@@ -20,6 +20,6 @@ export default async function ({ init, id, env, payload }: FlueContext) {
 	const agent = await init({ sandbox, model: 'anthropic/claude-sonnet-4-6' });
 	const session = await agent.session();
 	const message = payload.message ?? '';
-	const response = await session.prompt(message);
-	return { reply: response.text };
+	const { text } = await session.prompt(message);
+	return { reply: text };
 }

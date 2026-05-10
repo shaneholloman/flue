@@ -10,7 +10,7 @@
 //
 // Payload:
 //   { "test": "multiturn" }   — multi-turn memory within one invocation
-//   { "test": "structured" }  — structured output via result: schema
+//   { "test": "structured" }  — structured output via schema option
 //   { "test": "tool" }        — custom tool calling
 //   { "action": "set", "secret": "..." }   — cross-invocation persistence (set)
 //   { "action": "recall" }                  — cross-invocation persistence (recall)
@@ -43,14 +43,14 @@ export default async function ({ init, payload, id }: FlueContext) {
 		return { status: 'secret-set', id, sessionId: session.id, secret };
 	}
 	if (action === 'recall') {
-		const response = await session.prompt(
+		const { text } = await session.prompt(
 			'What was the secret code I told you earlier? Reply with just the code, nothing else.',
 		);
 		return {
 			status: 'recalled',
 			id,
 			sessionId: session.id,
-			recalled: response.text.trim(),
+			recalled: text.trim(),
 		};
 	}
 
@@ -72,7 +72,7 @@ export default async function ({ init, payload, id }: FlueContext) {
 		};
 	}
 
-	// Test 2: structured output via result: schema.
+	// Test 2: structured output via the schema option.
 	if (!test || test === 'structured') {
 		const Answer = v.object({
 			capital: v.string(),
@@ -81,13 +81,13 @@ export default async function ({ init, payload, id }: FlueContext) {
 		try {
 			const structured = await session.prompt(
 				'What is the capital of France? Respond as JSON.',
-				{ result: Answer },
+				{ schema: Answer },
 			);
 			results.structured = {
 				pass:
-					typeof structured.result?.capital === 'string' &&
-					structured.result.capital.toLowerCase().includes('paris'),
-				detail: JSON.stringify(structured.result),
+					typeof structured.data?.capital === 'string' &&
+					structured.data.capital.toLowerCase().includes('paris'),
+				detail: JSON.stringify(structured.data),
 			};
 		} catch (err) {
 			results.structured = {

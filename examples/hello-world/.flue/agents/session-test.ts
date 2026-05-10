@@ -35,11 +35,10 @@ export default async function ({ init, payload, id }: FlueContext) {
 	}
 
 	if (action === 'recall') {
-		const response = await session.prompt(
+		const { text } = await session.prompt(
 			'What was the secret code I told you earlier? Reply with just the code, nothing else.',
 		);
-		const text = response.text.trim();
-		return { status: 'recalled', id, sessionId: session.id, recalled: text };
+		return { status: 'recalled', id, sessionId: session.id, recalled: text.trim() };
 	}
 
 	return {

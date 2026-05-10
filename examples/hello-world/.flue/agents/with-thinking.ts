@@ -22,19 +22,19 @@ export default async function ({ init }: FlueContext) {
 	const Answer = v.object({ answer: v.string() });
 
 	// 1. Agent default applies.
-	const fast = await session.prompt('In one word: capital of France?', { result: Answer });
+	const fast = await session.prompt('In one word: capital of France?', { schema: Answer });
 
 	// 2. Role overrides the agent default.
 	const careful = await session.prompt('Is 1009 prime? Justify briefly.', {
 		role: 'auditor',
-		result: Answer,
+		schema: Answer,
 	});
 
 	// 3. Per-call override beats both agent default and role.
 	const minimal = await session.prompt('Echo back: hello', {
 		role: 'auditor',
 		thinkingLevel: 'minimal',
-		result: Answer,
+		schema: Answer,
 	});
 
 	return { fast, careful, minimal };

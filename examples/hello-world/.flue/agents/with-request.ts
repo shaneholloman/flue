@@ -44,6 +44,6 @@ export default async function ({ req, init }: FlueContext) {
 	console.log('[with-request] authorization header present, proceeding');
 	const agent = await init({ model: 'anthropic/claude-haiku-4-5' });
 	const session = await agent.session();
-	const response = await session.prompt('Say hello in 5 words.');
-	return { skipped: false, text: response.text };
+	const { text } = await session.prompt('Say hello in 5 words.');
+	return { skipped: false, text };
 }

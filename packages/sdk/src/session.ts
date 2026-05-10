@@ -131,6 +131,21 @@ interface InternalTaskResult<T> {
 	cwd?: string;
 }
 
+/**
+ * Read the per-call schema option, accepting both the canonical `schema`
+ * field and the deprecated `result` alias. The deprecated alias is typed
+ * as `never` on the public option interfaces so TypeScript flags new
+ * usage; we still honor it at runtime during the deprecation window so
+ * existing callers keep working without code changes.
+ */
+function resolveSchemaOption(
+	options: { schema?: v.GenericSchema; result?: never } | undefined,
+): v.GenericSchema | undefined {
+	if (!options) return undefined;
+	if (options.schema !== undefined) return options.schema;
+	return (options as { result?: v.GenericSchema }).result;
+}
+
 interface InternalTaskOptions<S extends v.GenericSchema | undefined> extends TaskOptions<S> {
 	inheritedModel?: string;
 	inheritedThinkingLevel?: ThinkingLevel;
@@ -497,13 +512,13 @@ export class Session implements FlueSession {
 
 	prompt<S extends v.GenericSchema>(
 		text: string,
-		options: PromptOptions<S> & { result: S },
+		options: PromptOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	prompt(text: string, options?: PromptOptions): CallHandle<PromptResponse>;
 	prompt(text: string, options?: PromptOptions<v.GenericSchema | undefined>): CallHandle<any> {
 		return createCallHandle(options?.signal, (signal) =>
 			this.runOperation('prompt', signal, async () => {
-				const schema = options?.result as v.GenericSchema | undefined;
+				const schema = resolveSchemaOption(options);
 				return this.runPromptCall({
 					promptText: buildPromptText(text, schema),
 					schema,
@@ -523,7 +538,7 @@ export class Session implements FlueSession {
 
 	skill<S extends v.GenericSchema>(
 		name: string,
-		options: SkillOptions<S> & { result: S },
+		options: SkillOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	skill(name: string, options?: SkillOptions): CallHandle<PromptResponse>;
 	skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): CallHandle<any> {
@@ -548,7 +563,7 @@ export class Session implements FlueSession {
 				//      a helpful error rather than silently fall through to
 				//      a path lookup that's also going to miss.
 				const looksLikePath = name.includes('/') || /\.(md|markdown)$/i.test(name);
-				const schema = options?.result as v.GenericSchema | undefined;
+				const schema = resolveSchemaOption(options);
 
 				let promptText: string;
 				if (looksLikePath) {
@@ -595,7 +610,7 @@ export class Session implements FlueSession {
 
 	task<S extends v.GenericSchema>(
 		text: string,
-		options: TaskOptions<S> & { result: S },
+		options: TaskOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	task(text: string, options?: TaskOptions): CallHandle<PromptResponse>;
 	task(text: string, options?: TaskOptions<v.GenericSchema | undefined>): CallHandle<any> {
@@ -970,7 +985,7 @@ export class Session implements FlueSession {
 				signal.addEventListener('abort', abortListener, { once: true });
 			}
 
-			const schema = options?.result as v.GenericSchema | undefined;
+			const schema = resolveSchemaOption(options);
 			const roleModel = resolveRoleModel(this.config.roles, role);
 			const roleThinkingLevel = resolveRoleThinkingLevel(this.config.roles, role);
 			const childOptions: PromptOptions<v.GenericSchema | undefined> = {
@@ -982,7 +997,7 @@ export class Session implements FlueSession {
 				images: options?.images,
 				signal,
 			};
-			if (schema) childOptions.result = schema;
+			if (schema) childOptions.schema = schema;
 
 			const output: any = await child.prompt(text, childOptions as any);
 			const taskResult: InternalTaskResult<any> = {
@@ -1413,7 +1428,15 @@ export class Session implements FlueSession {
 		errorLabel: string;
 		callSite: string;
 		signal: AbortSignal;
-	}): Promise<PromptResponse | PromptResultResponse<unknown>> {
+		// The schema'd branch returns the public `PromptResultResponse<unknown>`
+		// shape (`data` + `usage` + `model`) plus a deprecated `result` alias
+		// that the public type marks as `never`. We widen the internal return
+		// type with `Omit<…, 'result'> & { result: unknown }` so the runtime
+		// can populate the alias without TS rejecting the assignment.
+	}): Promise<
+		| PromptResponse
+		| (Omit<PromptResultResponse<unknown>, 'result'> & { result: unknown })
+	> {
 		const role = this.resolveEffectiveRole(args.role);
 		const resultBundle = args.schema ? createResultTools(args.schema) : undefined;
 
@@ -1448,7 +1471,12 @@ export class Session implements FlueSession {
 						args.signal,
 						args.images,
 					);
+					// `result` is the deprecated alias for `data`. Both keys carry
+					// the same value during the deprecation window so existing
+					// callers keep working at runtime; the public type marks
+					// `result` as `never` so TypeScript flags new usage.
 					return {
+						data: result,
 						result,
 						usage: this.aggregateUsageSince(beforeLeafId),
 						model,

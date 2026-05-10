@@ -388,7 +388,7 @@ export interface FlueSession {
 
 	prompt<S extends v.GenericSchema>(
 		text: string,
-		options: PromptOptions<S> & { result: S },
+		options: PromptOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	prompt(text: string, options?: PromptOptions): CallHandle<PromptResponse>;
 
@@ -403,13 +403,13 @@ export interface FlueSession {
 
 	skill<S extends v.GenericSchema>(
 		name: string,
-		options: SkillOptions<S> & { result: S },
+		options: SkillOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	skill(name: string, options?: SkillOptions): CallHandle<PromptResponse>;
 
 	task<S extends v.GenericSchema>(
 		text: string,
-		options: TaskOptions<S> & { result: S },
+		options: TaskOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	task(text: string, options?: TaskOptions): CallHandle<PromptResponse>;
 
@@ -420,7 +420,7 @@ export interface FlueSession {
  * Token + cost usage aggregated across every LLM call dispatched by a
  * single prompt(), skill(), or task() invocation, including:
  *   - every assistant turn produced by the call,
- *   - any result-extraction retry triggered by `result: schema` callers,
+ *   - any result-extraction retry triggered by `schema:` callers,
  *   - any compaction summarization (1–2 internal calls) triggered when
  *     context approached the model's window during the call,
  *   - the post-compaction retry assistant turn for overflow recovery.
@@ -465,7 +465,14 @@ export interface PromptResponse {
 }
 
 export interface PromptResultResponse<T> {
-	result: T;
+	data: T;
+	/**
+	 * @deprecated Renamed to `data`; will be removed in a future release.
+	 * The runtime still populates this field, but it is typed as `never` so
+	 * TypeScript flags any usage. Migrate destructures from
+	 * `{ result }` to `{ data }`.
+	 */
+	result?: never;
 	usage: PromptUsage;
 	model: PromptModel;
 }
@@ -528,7 +535,14 @@ export interface SessionStore {
 
 /** All option fields are scoped to the duration of the call. */
 export interface PromptOptions<S extends v.GenericSchema | undefined = undefined> {
-	result?: S;
+	schema?: S;
+	/**
+	 * @deprecated Renamed to `schema`; will be removed in a future release.
+	 * The runtime still accepts this field, but it is typed as `never` so
+	 * TypeScript flags any usage. Migrate `result: <schema>` to
+	 * `schema: <schema>`.
+	 */
+	result?: never;
 	tools?: ToolDef[];
 	role?: string;
 	/** e.g., 'anthropic/claude-sonnet-4-20250514' */
@@ -543,7 +557,14 @@ export interface PromptOptions<S extends v.GenericSchema | undefined = undefined
 
 export interface SkillOptions<S extends v.GenericSchema | undefined = undefined> {
 	args?: Record<string, unknown>;
-	result?: S;
+	schema?: S;
+	/**
+	 * @deprecated Renamed to `schema`; will be removed in a future release.
+	 * The runtime still accepts this field, but it is typed as `never` so
+	 * TypeScript flags any usage. Migrate `result: <schema>` to
+	 * `schema: <schema>`.
+	 */
+	result?: never;
 	tools?: ToolDef[];
 	role?: string;
 	model?: string;
@@ -556,7 +577,14 @@ export interface SkillOptions<S extends v.GenericSchema | undefined = undefined>
 }
 
 export interface TaskOptions<S extends v.GenericSchema | undefined = undefined> {
-	result?: S;
+	schema?: S;
+	/**
+	 * @deprecated Renamed to `schema`; will be removed in a future release.
+	 * The runtime still accepts this field, but it is typed as `never` so
+	 * TypeScript flags any usage. Migrate `result: <schema>` to
+	 * `schema: <schema>`.
+	 */
+	result?: never;
 	tools?: ToolDef[];
 	role?: string;
 	model?: string;

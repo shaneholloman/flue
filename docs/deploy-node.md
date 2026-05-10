@@ -40,14 +40,14 @@ export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ model: 'openai/gpt-5.5' });
   const session = await agent.session();
 
-  const result = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
-    result: v.object({
+  const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
+    schema: v.object({
       translation: v.string(),
       confidence: v.picklist(['low', 'medium', 'high']),
     }),
   });
 
-  return result;
+  return data;
 }
 ```
 
@@ -55,7 +55,7 @@ A few things to note:
 
 - **`triggers = { webhook: true }`** — This agent is invoked via HTTP. Flue creates a route for it automatically.
 - **`init({ model })`** — Every agent needs a model. If you do not pass one, no model is chosen and `prompt()` / `skill()` calls will fail. By default, Flue gives every agent a virtual sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No container needed.
-- **Result schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns a typed object.
+- **Schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed.
 
 ### 3. Add your API key
 
@@ -154,9 +154,9 @@ Call a skill from your agent:
 ```typescript
 import * as v from 'valibot';
 
-const summary = await session.skill('summarize', {
+const { data } = await session.skill('summarize', {
   args: { text: document },
-  result: v.object({ summary: v.string() }),
+  schema: v.object({ summary: v.string() }),
 });
 ```
 
@@ -178,12 +178,12 @@ export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
   const session = await agent.session();
 
-  const result = await session.prompt(
+  const { data } = await session.prompt(
     `Review the codebase and identify potential issues in the area
     related to: ${payload.topic}`,
     {
       role: 'reviewer',
-      result: v.object({
+      schema: v.object({
         issues: v.array(
           v.object({
             file: v.string(),
@@ -197,7 +197,7 @@ export default async function ({ init, payload }: FlueContext) {
     },
   );
 
-  return result;
+  return data;
 }
 ```
 

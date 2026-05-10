@@ -16,9 +16,9 @@ const tabs: Tab[] = [
     badgeLabel: 'Issue Triage',
     code: `export default async function triage(flue, { issueNumber, branch }) {
   const issue = await flue.shell(\`gh issue view \${issueNumber} --json title,body,author,labels,comments\`)
-  const result = await flue.skill('triage/reproduce.md', {
+  const { data: result } = await flue.skill('triage/reproduce.md', {
     args: { issueNumber, issue },
-    result: v.object({ reproducible: v.boolean(), verdict: v.picklist(['bug', 'intended-behavior', 'unclear']) }),
+    schema: v.object({ reproducible: v.boolean(), verdict: v.picklist(['bug', 'intended-behavior', 'unclear']) }),
   })
   if (result.reproducible) {
     const fix = await flue.skill('triage/fix.md', { args: { issue } })
@@ -27,9 +27,9 @@ const tabs: Tab[] = [
       await flue.shell(\`git push -f origin \${branch}\`)
     }
   }
-  const comment = await flue.skill('triage/comment.md', {
+  const { data: comment } = await flue.skill('triage/comment.md', {
     args: { issue, result, branch },
-    result: v.string(),
+    schema: v.string(),
   })
   await postGitHubComment(issueNumber, comment)
   await addGitHubLabels(issueNumber, result.labels)
@@ -43,16 +43,16 @@ const tabs: Tab[] = [
   await flue.shell(\`gh pr checkout \${prNumber}\`)
   const diff = await flue.shell(\`gh pr diff \${prNumber}\`)
   const details = await flue.shell(\`gh pr view \${prNumber} --json body\`)
-  const review = await flue.skill('review/analyze.md', {
+  const { data } = await flue.skill('review/analyze.md', {
     args: { diff, details },
-    result: v.object({
+    schema: v.object({
       verdict: v.picklist(['approve', 'request-changes', 'comment']),
       comments: v.array(v.object({ path: v.string(), line: v.number(), body: v.string() })),
       summary: v.string(),
     }),
   })
   await flue.shell(\`gh api repos/{owner}/{repo}/pulls/\${prNumber}/reviews --method POST --input -\`, {
-    stdin: JSON.stringify({ event: review.verdict.toUpperCase(), body: review.summary, comments: review.comments }),
+    stdin: JSON.stringify({ event: data.verdict.toUpperCase(), body: data.summary, comments: data.comments }),
   })
 }`,
   },
@@ -64,15 +64,15 @@ const tabs: Tab[] = [
   const checks = await flue.shell('ls .agents/skills/security/references/')
   const findings = []
   for (const check of checks) {
-    const result = await flue.skill(\`security/\${check}\`, {
-      result: v.array(v.object({
+    const { data } = await flue.skill(\`security/\${check}\`, {
+      schema: v.array(v.object({
         severity: v.picklist(['critical', 'high', 'medium', 'low']),
         file: v.string(),
         line: v.number(),
         description: v.string(),
       })),
     })
-    findings.push(...result)
+    findings.push(...data)
   }
   if (findings.length > 0) {
     await flue.skill('security/fix.md', { args: { findings } })
@@ -90,16 +90,16 @@ const tabs: Tab[] = [
     code: `export default async function assistant(flue, { issueNumber, commentId, prompt }) {
   const reaction = await flue.shell(\`gh api repos/{owner}/{repo}/issues/comments/\${commentId}/reactions --method POST -f content=eyes\`)
   const runUrl = \`\${process.env.GITHUB_SERVER_URL}/\${process.env.GITHUB_REPOSITORY}/actions/runs/\${process.env.GITHUB_RUN_ID}\`
-  const result = await flue.skill('assistant.md', {
+  const { data } = await flue.skill('assistant.md', {
     args: { issueNumber, prompt },
-    result: v.object({
+    schema: v.object({
       summary: v.string(),
       actions: v.array(v.string()),
     }),
   })
   await flue.shell(\`gh api repos/{owner}/{repo}/issues/comments/\${commentId}/reactions/\${reaction.id} --method DELETE\`)
   await flue.shell(\`gh issue comment \${issueNumber} --body-file -\`, {
-    stdin: \`\${result.summary}\\n\\n\${result.actions.map(a => \`- \${a}\`).join('\\n')}\\n\\n[View run](\${runUrl})\`,
+    stdin: \`\${data.summary}\\n\\n\${data.actions.map(a => \`- \${a}\`).join('\\n')}\\n\\n[View run](\${runUrl})\`,
   })
 }`,
   },

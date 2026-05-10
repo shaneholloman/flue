@@ -42,14 +42,14 @@ export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
   const session = await agent.session();
 
-  const result = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
-    result: v.object({
+  const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
+    schema: v.object({
       translation: v.string(),
       confidence: v.picklist(['low', 'medium', 'high']),
     }),
   });
 
-  return result;
+  return data;
 }
 ```
 
@@ -57,7 +57,7 @@ A few things to note:
 
 - **`triggers = { webhook: true }`** — This agent is invoked via HTTP. Flue creates a route for it automatically.
 - **`init({ model })`** — Every session needs a model. If you do not pass one, no model is chosen and `prompt()` / `skill()` calls will fail. By default, Flue gives every agent a virtual sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No container needed.
-- **Result schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns a typed object.
+- **Schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed.
 
 ### 3. Build and deploy
 
@@ -134,7 +134,7 @@ but concise.
 Use a role by passing its name to `prompt()`:
 
 ```typescript
-const response = await session.prompt('Help me reset my password', {
+await session.prompt('Help me reset my password', {
   role: 'triager',
 });
 ```
@@ -401,9 +401,9 @@ Use the project's existing patterns and conventions.
 Call a skill from your agent:
 
 ```typescript
-const greeting = await session.skill('greet', {
+const { data } = await session.skill('greet', {
   args: { name: 'World' },
-  result: v.object({ greeting: v.string() }),
+  schema: v.object({ greeting: v.string() }),
 });
 ```
 

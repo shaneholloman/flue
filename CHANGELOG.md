@@ -19,7 +19,7 @@ Big release! We are working hard to stabilize our APIs and add any missing and e
   setTimeout(() => handle.abort("user cancelled"), 5000);
   ```
 
-  2. The awaited value is now `{ text | result, usage, model }` instead of a bare string or schema value. Schema-typed calls return `PromptResultResponse<T>`; non-schema calls return `PromptResponse` with the new `usage` and `model` fields. To migrate, read `response.text` or `response.result`:
+  2. The awaited value is now `{ text | data, usage, model }` instead of a bare string or schema value. Schema-typed calls return `PromptResultResponse<T>`; non-schema calls return `PromptResponse` with the new `usage` and `model` fields. To migrate, read `response.text` or `response.data`:
 
   ```ts
   // Before
@@ -28,8 +28,10 @@ Big release! We are working hard to stabilize our APIs and add any missing and e
 
   // After
   const { text } = await session.prompt("…");
-  const { result: user } = await session.prompt("…", { result: UserSchema });
+  const { data: user } = await session.prompt("…", { schema: UserSchema });
   ```
+
+  The schema option was renamed from `result` to `schema`, and the response field from `result` to `data`. The old `result` spellings (both the option and the response field) still work at runtime for backwards compatibility, but are typed as `never` so TypeScript flags new usage. Both names will be removed in a future release.
 
   Schema results are now extracted via injected `finish` / `give_up` model-facing tools instead of `---RESULT_START---` / `---RESULT_END---` text markers. The unused `ResultExtractionError` class is removed; a new `ResultUnavailableError` is thrown when the model invokes `give_up`.
 

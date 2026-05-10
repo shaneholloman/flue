@@ -35,11 +35,11 @@ export default async function ({ init }: FlueContext) {
 		},
 	};
 
-	const response = await session.prompt(
+	const { text } = await session.prompt(
 		'Use the calculator tool to compute 7 * 6. Tell me the result.',
 		{ tools: [calculator] },
 	);
-	results['custom tool works'] = response.text.includes('42');
+	results['custom tool works'] = text.includes('42');
 	console.log('[with-tools] custom tool works:', results['custom tool works'] ? 'PASS' : 'FAIL');
 
 	// ─── Test 2: Inline delegated agent tool ─────────────────────────────────

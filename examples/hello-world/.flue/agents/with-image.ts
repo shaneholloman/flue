@@ -18,12 +18,12 @@ export default async function ({ init }: FlueContext) {
 	const plain = await session.prompt('What color is this image?', { images: [image] });
 	console.log('[with-image] plain:', plain.text);
 
-	// Schema branch — tests runWithResultTools (used by skill() and any prompt with `result`).
+	// Schema branch — tests runWithResultTools (used by skill() and any prompt with `schema`).
 	const structured = await session.prompt('What color is this image?', {
 		images: [image],
-		result: v.object({ sawImage: v.boolean(), color: v.string() }),
+		schema: v.object({ sawImage: v.boolean(), color: v.string() }),
 	});
-	console.log('[with-image] structured:', structured.result);
+	console.log('[with-image] structured:', structured.data);
 
-	return { plain: plain.text, structured: structured.result };
+	return { plain: plain.text, structured: structured.data };
 }

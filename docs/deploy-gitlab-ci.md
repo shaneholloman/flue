@@ -31,17 +31,17 @@ export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
   const session = await agent.session();
 
-  const result = await session.prompt(
+  const { data } = await session.prompt(
     `Say hello to ${payload.name ?? 'the user'} and share an interesting fact.`,
     {
-      result: v.object({
+      schema: v.object({
         greeting: v.string(),
         fact: v.string(),
       }),
     },
   );
 
-  return result;
+  return data;
 }
 ```
 
@@ -50,7 +50,7 @@ A few things to note:
 - **`triggers = {}`** — This agent has no HTTP trigger. It's designed to be run from the CLI, which is perfect for CI.
 - **`model`** — Every session needs a model. If you do not pass one to `init()` or a specific `prompt()` / `skill()` call, no model is chosen.
 - **`sandbox: 'local'`** — The `"local"` sandbox runs the agent directly against the host filesystem and shell. In CI, that's the checked-out repo plus whatever binaries are on `$PATH` (`glab`, `git`, `npm`, etc.). Skills and `AGENTS.md` are discovered automatically from the project root. Use `"local"` only when the runner itself provides the isolation boundary.
-- **Result schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns a typed object.
+- **Schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed.
 
 ### 3. Test it locally
 
@@ -131,20 +131,20 @@ Once you have a session, you have three core methods:
 - **`session.prompt(text, opts)`** — Send a prompt to the agent and get back a result.
 - **`session.skill(name, opts)`** — Run a named skill — a reusable agent task defined by a markdown instruction file.
 
-Both `prompt()` and `skill()` accept a `result` option — a [Valibot](https://valibot.dev) schema that defines the expected output shape. Flue parses the agent's response and returns a typed object:
+Both `prompt()` and `skill()` accept a `schema` option — a [Valibot](https://valibot.dev) schema that defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed:
 
 ```typescript
 import * as v from 'valibot';
 
-// const summary: string
-const summary = await session.prompt(`Summarize this diff:\n${diff}`, {
-  result: v.string(),
+// summary: string
+const { data: summary } = await session.prompt(`Summarize this diff:\n${diff}`, {
+  schema: v.string(),
 });
 
-// const diagnosis: { reproducible: boolean, skipped: boolean }
-const diagnosis = await session.skill('triage', {
+// diagnosis: { reproducible: boolean, skipped: boolean }
+const { data: diagnosis } = await session.skill('triage', {
   args: { issueIid, issue },
-  result: v.object({
+  schema: v.object({
     reproducible: v.boolean(),
     skipped: v.boolean(),
   }),
@@ -173,12 +173,12 @@ export default async function ({ init, payload }: FlueContext) {
   // is set on the runner is visible to it. Prefer purpose-built CLIs like
   // `glab` over general-purpose HTTP clients so the token's blast radius
   // is scoped to that one provider.
-  const result = await session.skill('triage', {
+  const { data } = await session.skill('triage', {
     args: {
       issueIid: payload.issueIid,
       projectId: payload.projectId,
     },
-    result: v.object({
+    schema: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),
@@ -186,7 +186,7 @@ export default async function ({ init, payload }: FlueContext) {
     }),
   });
 
-  return result;
+  return data;
 }
 ```
 
@@ -211,9 +211,9 @@ your feedback.
 Use a role by passing its name to `prompt()`:
 
 ```typescript
-const review = await session.prompt(`Review this MR:\n${diff}`, {
+const { data } = await session.prompt(`Review this MR:\n${diff}`, {
   role: 'reviewer',
-  result: v.object({ approved: v.boolean(), comments: v.array(v.string()) }),
+  schema: v.object({ approved: v.boolean(), comments: v.array(v.string()) }),
 });
 ```
 
@@ -284,7 +284,7 @@ Add these as CI/CD variables (**Settings > CI/CD > Variables**, masked):
 
 ## Typed results and orchestration
 
-Result schemas aren't just for type safety — they're how you orchestrate multi-step workflows. Because you get typed data back from `prompt()` and `skill()`, you can branch on results within a single agent:
+Schemas aren't just for type safety — they're how you orchestrate multi-step workflows. Because you get typed data back from `prompt()` and `skill()`, you can branch on results within a single agent:
 
 ```typescript
 import { type FlueContext } from '@flue/sdk/client';
@@ -294,24 +294,24 @@ export default async function ({ init, payload }: FlueContext) {
   const agent = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
   const session = await agent.session();
 
-  const diagnosis = await session.skill('triage', {
+  const { data } = await session.skill('triage', {
     args: { issueIid: payload.issueIid },
-    result: v.object({
+    schema: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),
     }),
   });
 
-  if (diagnosis.severity === 'critical' && diagnosis.reproducible) {
+  if (data.severity === 'critical' && data.reproducible) {
     // Escalate: attempt an automated fix
     await session.skill('auto-fix', {
       args: { issueIid: payload.issueIid },
-      result: v.object({ fix_applied: v.boolean(), branch: v.optional(v.string()) }),
+      schema: v.object({ fix_applied: v.boolean(), branch: v.optional(v.string()) }),
     });
   }
 
-  return diagnosis;
+  return data;
 }
 ```
 
