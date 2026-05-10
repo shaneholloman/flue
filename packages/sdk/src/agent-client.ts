@@ -2,7 +2,7 @@ import { createCallHandle } from './abort.ts';
 import { discoverSessionContext } from './context.ts';
 import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
 import { deleteSessionTree, Session, type CreateTaskSessionOptions } from './session.ts';
-import { createScopedEnv, mergeCommands } from './env-utils.ts';
+import { createScopedEnv, mergeCommands } from './sandbox.ts';
 import { assertRoleExists } from './roles.ts';
 import type {
 	AgentConfig,

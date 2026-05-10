@@ -1,6 +1,6 @@
 /** Shared per-agent HTTP dispatcher for the Node and Cloudflare targets. */
 
-import { parseJsonBody, toHttpResponse, toSseData } from '../error-utils.ts';
+import { parseJsonBody, toHttpResponse, toSseData } from '../errors.ts';
 import type { FlueContextInternal } from '../client.ts';
 
 /**

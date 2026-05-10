@@ -35,7 +35,7 @@
 
 import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
-import { toHttpResponse, validateAgentRequest } from '../error-utils.ts';
+import { toHttpResponse, validateAgentRequest } from '../errors.ts';
 import { RouteNotFoundError } from '../errors.ts';
 import {
 	handleAgentRequest,
