@@ -15,25 +15,32 @@ import { flue } from '@flue/sdk/app';
 import { Hono } from 'hono';
 
 // ─── Cloudflare AI Gateway (optional) ───────────────────────────────────────
-// The Flue build auto-registers a default `cloudflare` provider that wraps
-// `env.AI`. If you want every `cloudflare/...` model call routed through an
-// AI Gateway (for caching, logging, budgets, etc.), claim the prefix here:
-// because user `app.ts` imports run before the auto-registration (ESM
-// hoisting), your registration wins.
+// By default, every `cloudflare/...` model call is routed through
+// Cloudflare's default AI Gateway, which the binding spins up on demand
+// for your account. To customize the gateway (e.g. point at a named
+// gateway, override caching, attach metadata) — or to opt out entirely —
+// register `cloudflare` yourself. Your registration wins because user
+// `app.ts` imports run before the auto-registration (ESM hoisting).
 //
 //   import { registerProvider } from '@flue/sdk/app';
 //   import { env } from 'cloudflare:workers';
 //
+//   // Custom gateway with cache + metadata.
 //   registerProvider('cloudflare', {
 //     api: 'cloudflare-ai-binding',
 //     binding: env.AI,
 //     gateway: {
 //       id: 'my-gateway',
-//       // skipCache: false,
-//       // cacheTtl: 3360,
-//       // metadata: { tenant: 'acme' },
-//       // collectLog: true,
+//       cacheTtl: 3360,
+//       metadata: { tenant: 'acme' },
 //     },
+//   });
+//
+//   // Opt out of the gateway entirely.
+//   registerProvider('cloudflare', {
+//     api: 'cloudflare-ai-binding',
+//     binding: env.AI,
+//     gateway: false,
 //   });
 //
 // Docs: https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/

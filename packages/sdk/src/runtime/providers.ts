@@ -64,10 +64,17 @@ export interface CloudflareAIBindingRegistration {
 	provider?: string;
 	/**
 	 * AI Gateway options forwarded to every `env.AI.run(...)` call routed
-	 * through this registration. See
-	 * https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/.
+	 * through this registration.
+	 *
+	 * - Omitted: routes through Cloudflare's default AI Gateway, which the
+	 *   binding spins up on demand for the account.
+	 * - Options object: replaces the default. Specify `id` plus any other
+	 *   knobs (cache, metadata, logging).
+	 * - `false`: opts out — no gateway is passed to `ai.run`.
+	 *
+	 * See https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/.
 	 */
-	gateway?: CloudflareGatewayOptions;
+	gateway?: CloudflareGatewayOptions | false;
 }
 
 /**
@@ -196,14 +203,14 @@ export function getProviderConfiguration(
  */
 export type ModelWithBinding<TApi extends Api> = Model<TApi> & {
 	binding: CloudflareAIBinding;
-	gateway?: CloudflareGatewayOptions;
+	gateway?: CloudflareGatewayOptions | false;
 };
 
 /** Attach a Workers AI binding (and optional gateway options) to a Model literal. */
 export function attachModelBinding<TApi extends Api>(
 	model: Model<TApi>,
 	binding: CloudflareAIBinding,
-	gateway?: CloudflareGatewayOptions,
+	gateway?: CloudflareGatewayOptions | false,
 ): ModelWithBinding<TApi> {
 	return { ...model, binding, gateway } as ModelWithBinding<TApi>;
 }

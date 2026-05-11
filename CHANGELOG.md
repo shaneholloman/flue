@@ -1,5 +1,26 @@
 # Changelog
 
+## 0.5.2
+
+### New Features
+
+- **Cloudflare AI Gateway is now enabled by default on the Cloudflare target.** Every `cloudflare/...` model call passes `gateway: { id: 'default' }` to `env.AI.run(...)`, which the Workers AI binding spins up on demand for the account. No setup required — you get caching, logs, and budget controls in the Cloudflare dashboard out of the box. Existing zero-config agents pick this up automatically on rebuild.
+- **Customize or opt out of the AI Gateway from `app.ts`.** Re-register the `cloudflare` prefix with a `gateway` field to target a named gateway and tune its options (`id`, `cacheTtl`, `cacheKey`, `skipCache`, `metadata`, `collectLog`, `eventId`, `requestTimeoutMs`). Pass `gateway: false` to disable the gateway entirely. User registrations always win over the auto-registered default.
+
+  ```ts
+  // app.ts
+  import { registerProvider } from '@flue/sdk/app';
+  import { env } from 'cloudflare:workers';
+
+  registerProvider('cloudflare', {
+    api: 'cloudflare-ai-binding',
+    binding: env.AI,
+    gateway: { id: 'my-gateway', cacheTtl: 3360 },
+  });
+  ```
+
+  See https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/ for the full options reference.
+
 ## 0.5.1
 
 ### Fixes & Other Changes

@@ -133,8 +133,9 @@ ${userAppImport}
 
 // ─── Internal provider registrations ────────────────────────────────────────
 // User \`app.ts\` imports are hoisted above this body, so a user-supplied
-// \`registerProvider('cloudflare', ...)\` runs first and the guard below
-// preserves it (e.g. to attach AI Gateway options).
+// \`registerProvider('cloudflare', ...)\` runs first; the guard below
+// preserves it. The default enables Cloudflare's default AI Gateway,
+// which the binding spins up on demand for the account.
 
 registerApiProvider(getCloudflareAIBindingApiProvider());
 
@@ -142,6 +143,7 @@ if (!hasRegisteredProvider('cloudflare')) {
   registerProvider('cloudflare', {
     api: 'cloudflare-ai-binding',
     binding: env.AI,
+    gateway: { id: 'default' },
   });
 }
 
