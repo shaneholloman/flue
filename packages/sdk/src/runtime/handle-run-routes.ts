@@ -1,6 +1,6 @@
 /** Shared run-history HTTP endpoints for Node and Cloudflare targets. */
 
-import { RunNotFoundError, RunStoreUnavailableError } from '../errors.ts';
+import { InvalidRequestError, RunNotFoundError, RunStoreUnavailableError } from '../errors.ts';
 import type { FlueEvent } from '../types.ts';
 import type { RunRecord, RunStatus, RunStore } from './run-store.ts';
 import type { RunSubscriberRegistry } from './run-subscribers.ts';
@@ -120,9 +120,21 @@ async function streamRunEvents(
 	const fromIndex = lastEventId === undefined ? undefined : lastEventId + 1;
 
 	// If terminal already, no live tailing needed — straight replay.
-	if (isTerminal(run) || !subscribers) {
+	if (isTerminal(run)) {
 		const events = await store.getEvents(runId, fromIndex);
 		return sseResponse(encodeSseEvents(events));
+	}
+
+	// Active runs require a subscriber registry for live tailing. If the
+	// caller didn't wire one up, that's a programmer error in the
+	// target-specific entry — not something a client can recover from.
+	// Fail loudly here instead of silently degrading to replay-only,
+	// which would look like an instantly-completed run to the client.
+	if (!subscribers) {
+		throw new Error(
+			'[flue] Active run streaming requires a run subscriber registry, but none was ' +
+				'configured for this target. Wire one through HandleRunRouteOptions.runSubscribers.',
+		);
 	}
 
 	return streamReplayThenTail({ store, subscribers, runId, fromIndex });
@@ -358,7 +370,15 @@ function sseResponse(body: string | ReadableStream<Uint8Array>): Response {
 }
 
 function requireRunId(runId: string | undefined): string {
-	if (!runId) throw new RunNotFoundError({ runId: '' });
+	// Hono's path-param routing means this branch is normally
+	// unreachable — `:runId` is matched before the handler runs. The
+	// Cloudflare DO dispatcher constructs `HandleRunRouteOptions`
+	// directly though, and a future caller could too, so guard
+	// explicitly. An empty `runId` is a malformed URL (400), not a
+	// missing run (404).
+	if (!runId) {
+		throw new InvalidRequestError({ reason: 'Run id is required for this endpoint.' });
+	}
 	return runId;
 }
 

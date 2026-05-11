@@ -475,6 +475,11 @@ export class Session implements FlueSession {
 		this.harness.subscribe(async (event) => {
 			switch (event.type) {
 				case 'agent_start':
+					// pi-agent-core's agent-start lifecycle event.
+					// Distinct from Flue's run_start (which the runtime
+					// emits directly in handle-agent.ts), and not part
+					// of Flue's wire vocabulary — left here for
+					// exhaustiveness against the harness's event union.
 					break;
 				case 'turn_start':
 					this.turnStartTime = Date.now();

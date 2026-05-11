@@ -221,11 +221,19 @@ function resolveSandbox(sandbox) {
 const memoryStore = new InMemorySessionStore();
 const memoryRunStore = new InMemoryRunStore();
 
-// Per-isolate (i.e. per-DO) in-process subscriber registry for live run-stream
-// tailing. Because Cloudflare's routeAgentRequest pins a run id to the owning
-// Agent DO and the run-route dispatch is forwarded to that same DO, the
-// subscribe-time isolate is always the same isolate that produces the events.
-// Run ids are globally unique (ULID) so cross-DO collisions are impossible.
+// Per-isolate in-process subscriber registry for live run-stream tailing.
+//
+// Cloudflare may co-locate multiple DOs in a single isolate, so this Map
+// can be shared across DOs in the same isolate — but that's safe:
+//   - Run ids are globally unique (ULID), so two DOs can never publish
+//     events to the same bucket.
+//   - routeAgentRequest pins a run id to the owning Agent DO, so a
+//     subscriber for run X arriving via /runs/<X>/stream is forwarded
+//     into the same DO that's producing X's events.
+//
+// In other words: shared Map, isolated keyspace. The "per-DO" property
+// the live-tail path needs is provided by the run-id keyspace, not by
+// the registry itself.
 const runSubscribers = createRunSubscriberRegistry();
 
 // Create a DO-backed session store from the Durable Object's SQL storage.
@@ -361,12 +369,23 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
   });
 }
 
+// Parse run-route URLs against the documented shape:
+//
+//   /agents/<name>/<id>/runs                        → list
+//   /agents/<name>/<id>/runs/<runId>                → get
+//   /agents/<name>/<id>/runs/<runId>/events         → events
+//   /agents/<name>/<id>/runs/<runId>/stream         → stream
+//
+// Strict positional parsing (vs. \`segments.indexOf('runs')\`) so an
+// instance id of "runs" doesn't get reinterpreted as the marker
+// segment and silently misroute.
 function parseRunRoute(request) {
   const segments = new URL(request.url).pathname.split('/').filter(Boolean);
-  const runsIndex = segments.indexOf('runs');
-  if (runsIndex === -1) return null;
-  const runId = segments[runsIndex + 1];
-  const child = segments[runsIndex + 2];
+  if (segments.length < 4) return null;
+  if (segments[0] !== 'agents') return null;
+  if (segments[3] !== 'runs') return null;
+  const runId = segments[4];
+  const child = segments[5];
   if (!runId) return { action: 'list' };
   if (!child) return { action: 'get', runId };
   if (child === 'events') return { action: 'events', runId };

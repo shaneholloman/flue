@@ -728,9 +728,18 @@ function logEvent(event: any) {
 
 		case 'run_start':
 		case 'run_end':
+			// `flue run` extracts the final result/error from `run_end`
+			// in `consumeSSE` before reaching this renderer. `run_start`
+			// is uninteresting in single-run-mode output. Skipped here.
+			break;
+
 		case 'operation_start':
 		case 'operation':
-			// Handled separately by the caller
+			// Structural lifecycle events. `flue run` is a one-shot,
+			// linear consumer that already shows tool I/O and text
+			// streaming inline; operation banners would be noise.
+			// `flue logs --format pretty` renders them via
+			// `logsRenderPretty`.
 			break;
 	}
 }
@@ -1325,20 +1334,34 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 	// snapshot whatever is persisted and exit. Terminal runs are fine
 	// either way (the stream endpoint replays and closes), but events
 	// is simpler for the no-follow path so we use it uniformly.
+	//
+	// Filtering / limit are applied client-side here so the `run_end`
+	// bypass matches the follow path exactly. The server-side `?types=`
+	// and `?limit=` would drop `run_end`, which would silently corrupt
+	// the exit-code contract (errored runs would exit 0).
 	if (!shouldFollow) {
 		const url = new URL(`${agentPath}/runs/${resolvedRunId}/events`);
 		if (args.since !== undefined) url.searchParams.set('after', String(args.since));
-		if (args.types) url.searchParams.set('types', [...args.types].join(','));
-		if (args.limit !== undefined) url.searchParams.set('limit', String(args.limit));
+		// NOTE: intentionally NOT forwarding --types or --limit to the
+		// server — see comment above.
 		const body = await fetchJsonOrExit<{ events: Array<Record<string, unknown>> }>(url.toString());
 		let exitCode = 0;
+		let emittedCount = 0;
 		for (const event of body.events) {
-			if (args.format === 'json' || args.format === 'ndjson') {
-				process.stdout.write(`${JSON.stringify(event)}\n`);
-			} else {
-				logsRenderPretty(event);
+			const passesFilter =
+				!args.types ||
+				(typeof event.type === 'string' && args.types.has(event.type)) ||
+				event.type === 'run_end'; // never silently drop the terminal event
+			if (passesFilter) {
+				if (args.format === 'json' || args.format === 'ndjson') {
+					process.stdout.write(`${JSON.stringify(event)}\n`);
+				} else {
+					logsRenderPretty(event);
+				}
+				emittedCount++;
 			}
 			if (event.type === 'run_end' && event.isError === true) exitCode = 2;
+			if (args.limit !== undefined && emittedCount >= args.limit) break;
 		}
 		if (args.format === 'pretty') flushBuffers();
 		process.exit(exitCode);

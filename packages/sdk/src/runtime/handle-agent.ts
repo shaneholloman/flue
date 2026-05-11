@@ -2,6 +2,7 @@
 
 import type { FlueContextInternal } from '../client.ts';
 import { parseJsonBody, toHttpResponse } from '../errors.ts';
+import type { FlueEvent } from '../types.ts';
 import { generateRunId } from './ids.ts';
 import type { RunStore } from './run-store.ts';
 import type { RunSubscriberRegistry } from './run-subscribers.ts';
@@ -250,22 +251,8 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 		runSubscribers,
 	});
 	const { ctx } = lifecycle;
-	const unsubscribeFanout = subscribeRunFanout(ctx, runStore, runSubscribers, runId);
-	emitRunStart(lifecycle);
-	const run = async (): Promise<unknown> => {
-		try {
-			const result = await handler(ctx);
-			await emitRunEnd(lifecycle, { result, isError: false });
-			return result;
-		} catch (error) {
-			await emitRunEnd(lifecycle, { isError: true, error });
-			throw error;
-		} finally {
-			ctx.setEventCallback(undefined);
-			unsubscribeFanout();
-			runSubscribers?.complete(runId);
-		}
-	};
+	const run = async (): Promise<unknown> =>
+		withRunLifecycle(lifecycle, () => handler(ctx));
 
 	startWebhook(runId, run).then(
 		(result) => {
@@ -312,7 +299,6 @@ function runSseMode(opts: ModeOptions): Response {
 	const { readable, writable } = new TransformStream();
 	const writer = writable.getWriter();
 	const encoder = new TextEncoder();
-	let nextSseId = 0;
 	let isIdle = false;
 	let closed = false;
 
@@ -323,14 +309,16 @@ function runSseMode(opts: ModeOptions): Response {
 	// `error`-event recovery write inside the catch block would itself
 	// throw — making cleanup unreliable. Swallowing here lets the handler
 	// finish naturally; events written after disconnect are simply dropped.
-	const writeSSE = async (data: unknown, event: string): Promise<void> => {
+	//
+	// `eventIndex` is non-optional on decorated events (see `client.ts`),
+	// so the SSE `id:` field always reflects the durable position — which
+	// is what `Last-Event-ID` reconnects depend on.
+	const writeSSE = async (data: unknown, eventType: string): Promise<void> => {
 		if (closed) return;
-		const eventIndex = getEventIndex(data);
-		const id = eventIndex ?? nextSseId++;
-		if (eventIndex !== undefined) nextSseId = Math.max(nextSseId, eventIndex + 1);
+		const eventIndex = getEventIndex(data) ?? 0;
 		const lines: string[] = [];
-		lines.push(`event: ${event}`);
-		lines.push(`id: ${id}`);
+		lines.push(`event: ${eventType}`);
+		lines.push(`id: ${eventIndex}`);
 		lines.push(`data: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
 		lines.push('', '');
 		try {
@@ -376,24 +364,26 @@ function runSseMode(opts: ModeOptions): Response {
 			if (event.type === 'idle') isIdle = true;
 			writeSSE(event, event.type).catch(() => {});
 		});
-		const unsubscribeFanout = subscribeRunFanout(ctx, runStore, runSubscribers, runId);
-		emitRunStart(lifecycle);
+
 		try {
-			const result = await runHandler(ctx, handler);
-			if (!isIdle) {
-				ctx.emitEvent({ type: 'idle' });
-			}
-			await emitRunEnd(lifecycle, { result, isError: false });
-		} catch (err) {
-			if (!isIdle) {
-				ctx.emitEvent({ type: 'idle' });
-			}
-			await emitRunEnd(lifecycle, { isError: true, error: err });
+			await withRunLifecycle(lifecycle, async () => {
+				try {
+					return await runHandler(ctx, handler);
+				} finally {
+					// `idle` always fires before `run_end` (which the
+					// wrapper emits) so the wire order matches what
+					// in-process consumers saw before Phase 6.
+					if (!isIdle) ctx.emitEvent({ type: 'idle' });
+				}
+			});
+		} catch {
+			// `withRunLifecycle` already emitted `run_end` with the error
+			// envelope and persisted it durably. The body's errors are
+			// already visible to the SSE client via the `setEventCallback`
+			// above; we swallow here so the IIFE doesn't reject.
 		} finally {
 			clearInterval(heartbeat);
 			ctx.setEventCallback(undefined);
-			unsubscribeFanout();
-			runSubscribers?.complete(runId);
 			closed = true;
 			try {
 				await writer.close();
@@ -437,27 +427,14 @@ async function runSyncMode(opts: ModeOptions): Promise<Response> {
 		runSubscribers,
 	});
 	const { ctx } = lifecycle;
-	const unsubscribeFanout = subscribeRunFanout(ctx, runStore, runSubscribers, runId);
-	let terminalResult: unknown = null;
-	const unsubscribeTerminal = ctx.subscribeEvent((event) => {
-		if (event.type === 'run_end' && !event.isError) terminalResult = event.result ?? null;
-	});
-	emitRunStart(lifecycle);
 	try {
-		const result = await runHandler(ctx, handler);
-		await emitRunEnd(lifecycle, { result, isError: false });
+		const result = await withRunLifecycle(lifecycle, () => runHandler(ctx, handler));
 		return new Response(
-			JSON.stringify({ result: terminalResult, _meta: { runId } }),
+			JSON.stringify({ result: result === undefined ? null : result, _meta: { runId } }),
 			{ headers: { 'content-type': 'application/json', 'X-Flue-Run-Id': runId } },
 		);
-	} catch (error) {
-		await emitRunEnd(lifecycle, { isError: true, error });
-		throw error;
 	} finally {
 		ctx.setEventCallback(undefined);
-		unsubscribeTerminal();
-		unsubscribeFanout();
-		runSubscribers?.complete(runId);
 	}
 }
 
@@ -496,6 +473,37 @@ async function createRunLifecycle(options: RunLifecycleOptions): Promise<RunLife
 	return { ...options, ctx, startedAt, startedAtMs };
 }
 
+/**
+ * Wrap the per-mode body with the run lifecycle:
+ *
+ *   1. Subscribe the durable + live fan-out (all events except `run_end`).
+ *   2. Emit `run_start`.
+ *   3. Run the body.
+ *   4. Emit `run_end` durably-before-live (see {@link emitRunEnd}).
+ *   5. Tear down the fan-out subscription.
+ *
+ * Centralizing this eliminates three near-identical envelopes in the
+ * mode functions and — critically — guarantees the run-end ordering
+ * invariant holds for every mode.
+ */
+async function withRunLifecycle<T>(
+	lifecycle: RunLifecycle,
+	body: () => T | Promise<T>,
+): Promise<T> {
+	const unsubscribeFanout = subscribeRunFanout(lifecycle);
+	emitRunStart(lifecycle);
+	try {
+		const result = await body();
+		await emitRunEnd(lifecycle, { result, isError: false });
+		return result;
+	} catch (error) {
+		await emitRunEnd(lifecycle, { isError: true, error });
+		throw error;
+	} finally {
+		unsubscribeFanout();
+	}
+}
+
 function emitRunStart(lifecycle: RunLifecycle): void {
 	lifecycle.ctx.emitEvent({
 		type: 'run_start',
@@ -507,25 +515,74 @@ function emitRunStart(lifecycle: RunLifecycle): void {
 	});
 }
 
+/**
+ * Emit `run_end` and finalize the run.
+ *
+ * Ordering invariant — "durable terminal state happens before observable
+ * terminal state":
+ *
+ *   1. `appendEvent(run_end)` durably. We intercept `run_end` in
+ *      {@link subscribeRunFanout} so the generic fan-out does NOT
+ *      double-persist it — that path can't await the write, which is
+ *      exactly what we need to control here.
+ *   2. `publish(run_end)` to live subscribers. Any client subscribed
+ *      before this fires sees `run_end` and closes naturally.
+ *   3. `endRun` durably, flipping the run row to `completed`/`errored`.
+ *      Only after this point does `getRun` report terminal status; any
+ *      client connecting from now takes the pure-replay path.
+ *   4. `complete(runId)` releases the live subscriber registry bucket.
+ *
+ * This closes the race where a client opens `/runs/<runId>/stream`
+ * between `publish(run_end)` and `endRun`: under the old order the
+ * stream would take the live path, miss the already-published
+ * `run_end`, and hang. Now the durable-snapshot path always sees
+ * `run_end` first.
+ *
+ * `ctx.emitEvent` is still called for `run_end` so in-process consumers
+ * (other `ctx.subscribeEvent` listeners, the SSE-mode write callback)
+ * receive it on the same channel as every other event. The fan-out's
+ * `run_end` filter prevents double-persistence / double-publish.
+ */
 async function emitRunEnd(
 	lifecycle: RunLifecycle,
 	input: { result?: unknown; isError: false } | { isError: true; error: unknown },
 ): Promise<void> {
-	const endedAt = new Date().toISOString();
-	const durationMs = Date.now() - lifecycle.startedAtMs;
+	const endedAtMs = Date.now();
+	const endedAt = new Date(endedAtMs).toISOString();
+	const durationMs = endedAtMs - lifecycle.startedAtMs;
 	const result = input.isError ? undefined : input.result;
 	const error = input.isError ? serializeError(input.error) : undefined;
-	lifecycle.ctx.emitEvent({
+	const normalizedResult = result === undefined ? null : result;
+
+	const { runStore, runSubscribers, runId } = lifecycle;
+
+	// Construct the event and decorate it through the same channel as
+	// every other event so eventIndex/timestamp are continuous.
+	// `subscribeRunFanout` will see this through `subscribeEvent` and
+	// skip it (run_end is handled here, not in the fan-out).
+	const decorated = lifecycle.ctx.emitEvent({
 		type: 'run_end',
-		runId: lifecycle.runId,
-		result: result === undefined ? null : result,
+		runId,
+		result: normalizedResult,
 		isError: input.isError,
 		error,
 		durationMs,
 	});
+
+	// 1. Durable append BEFORE any observer can react to terminal state.
+	await safeRunStore('appendEvent(run_end)', () =>
+		runStore?.appendEvent(runId, decorated),
+	);
+
+	// 2. Notify live subscribers. They get the same decorated event the
+	//    durable snapshot now has.
+	runSubscribers?.publish(runId, decorated);
+
+	// 3. Flip the run row to terminal. After this, every `/stream` call
+	//    takes the pure-replay path.
 	await safeRunStore('endRun', () =>
-		lifecycle.runStore?.endRun({
-			runId: lifecycle.runId,
+		runStore?.endRun({
+			runId,
 			endedAt,
 			isError: input.isError,
 			durationMs,
@@ -533,34 +590,50 @@ async function emitRunEnd(
 			error,
 		}),
 	);
+
+	// 4. Release the registry bucket. No new subscribers should arrive
+	//    after (3), but any that did during the (2)→(3) gap have already
+	//    received `run_end` and closed.
+	runSubscribers?.complete(runId);
 }
 
 /**
- * Fan-out decorator: when an event is emitted on the context's internal
- * subscriber channel, persist it durably (if a store is configured) AND
- * publish it to the in-process subscriber registry (if one is configured)
- * so live tail subscribers receive it.
+ * Fan-out: durable-before-live for every event EXCEPT `run_end`.
  *
- * Both sinks are best-effort and isolated — neither one's failure affects
- * the other or the run itself.
+ * Non-`run_end` events:
+ *   - `await runStore.appendEvent(...)` first.
+ *   - Then `runSubscribers.publish(...)` synchronously.
+ *
+ * `run_end` is intentionally skipped here; {@link emitRunEnd} handles
+ * its durable-append, publish, and the terminal `endRun` transition in
+ * a single controlled sequence (see emitRunEnd's doc for the
+ * invariant).
+ *
+ * Both sinks are best-effort: errors are logged but never propagated.
  */
-function subscribeRunFanout(
-	ctx: FlueContextInternal,
+function subscribeRunFanout(lifecycle: RunLifecycle): () => void {
+	const { ctx, runStore, runSubscribers, runId } = lifecycle;
+	if (!runStore && !runSubscribers) return () => {};
+	return ctx.subscribeEvent((event) => {
+		if (event.type === 'run_end') return;
+		void fanOutEvent(runStore, runSubscribers, runId, event);
+	});
+}
+
+async function fanOutEvent(
 	runStore: RunStore | undefined,
 	runSubscribers: RunSubscriberRegistry | undefined,
 	runId: string,
-): () => void {
-	if (!runStore && !runSubscribers) return () => {};
-	return ctx.subscribeEvent((event) => {
-		if (runStore) {
-			runStore.appendEvent(runId, event).catch((error) => {
-				console.error('[flue:run-store] appendEvent failed:', error);
-			});
+	event: FlueEvent,
+): Promise<void> {
+	if (runStore) {
+		try {
+			await runStore.appendEvent(runId, event);
+		} catch (error) {
+			console.error('[flue:run-store] appendEvent failed:', error);
 		}
-		if (runSubscribers) {
-			runSubscribers.publish(runId, event);
-		}
-	});
+	}
+	runSubscribers?.publish(runId, event);
 }
 
 async function safeRunStore(label: string, fn: () => Promise<void> | undefined): Promise<void> {

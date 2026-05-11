@@ -126,6 +126,18 @@ export interface FlueRuntime {
 	) => Promise<Response | null>;
 }
 
+/**
+ * Map from Hono mount path to the run-route action it dispatches. Kept as
+ * a table rather than four `app.all(...)` calls so adding a new run-route
+ * is a one-line change in the route schema and the action union together.
+ */
+const RUN_ROUTES: ReadonlyArray<readonly [string, HandleRunRouteOptions['action']]> = [
+	['/agents/:name/:id/runs', 'list'],
+	['/agents/:name/:id/runs/:runId', 'get'],
+	['/agents/:name/:id/runs/:runId/events', 'events'],
+	['/agents/:name/:id/runs/:runId/stream', 'stream'],
+];
+
 /** Module-scoped runtime config seeded by the generated server entry. */
 let runtimeConfig: FlueRuntime | undefined;
 
@@ -172,10 +184,9 @@ export function flue(): Hono {
 	// what produces the actual 405 / 404 / 400 envelopes; this just
 	// makes sure those paths get reached.
 	app.all('/agents/:name/:id', agentRouteHandler);
-	app.all('/agents/:name/:id/runs', runRouteHandler('list'));
-	app.all('/agents/:name/:id/runs/:runId', runRouteHandler('get'));
-	app.all('/agents/:name/:id/runs/:runId/events', runRouteHandler('events'));
-	app.all('/agents/:name/:id/runs/:runId/stream', runRouteHandler('stream'));
+	for (const [routePath, action] of RUN_ROUTES) {
+		app.all(routePath, runRouteHandler(action));
+	}
 
 	// Sub-app's `onError` catches throws from `agentRouteHandler` and
 	// renders the canonical Flue envelope. Because Hono mounts treat

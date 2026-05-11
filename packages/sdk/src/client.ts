@@ -40,7 +40,13 @@ export interface FlueContextConfig {
 
 /** Extends FlueContext with server-only methods. Agent handlers only see FlueContext. */
 export interface FlueContextInternal extends FlueContext {
-	emitEvent(event: FlueEvent): void;
+	/**
+	 * Decorate and dispatch an event. Returns the decorated event so
+	 * callers that need the post-decoration form (eventIndex, timestamp,
+	 * runId) — e.g. `emitRunEnd` controlling its own durable-append
+	 * order — don't have to re-derive it.
+	 */
+	emitEvent(event: FlueEvent): FlueEvent;
 	subscribeEvent(callback: FlueEventCallback): () => void;
 	setEventCallback(callback: FlueEventCallback | undefined): void;
 }
@@ -51,8 +57,8 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 	let eventIndex = 0;
 	const initializedHarnessNames = new Set<string>();
 
-	const emitEvent: FlueEventCallback = (event) => {
-		const decorated = {
+	const emitEvent = (event: FlueEvent): FlueEvent => {
+		const decorated: FlueEvent = {
 			...event,
 			runId: config.runId,
 			eventIndex: eventIndex++,
@@ -67,6 +73,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 				console.error('[flue:subscriber] Event subscriber failed:', error);
 			}
 		}
+		return decorated;
 	};
 
 	const ctx: FlueContextInternal = {
@@ -145,7 +152,12 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					agentConfig,
 					env,
 					store,
-					emitEvent,
+					// Harness's callback signature is `void`-returning;
+					// wrap to discard the decorated event the new
+					// `emitEvent` returns.
+					(event) => {
+						emitEvent(event);
+					},
 					options.tools,
 				);
 			} catch (error) {
