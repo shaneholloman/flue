@@ -318,6 +318,30 @@ export class RouteNotFoundError extends FlueHttpError {
 	}
 }
 
+export class RunNotFoundError extends FlueHttpError {
+	constructor({ runId }: { runId: string }) {
+		super({
+			type: 'run_not_found',
+			message: `Run "${runId}" was not found.`,
+			details: 'Verify the run id is correct and still within retention.',
+			dev: '',
+			status: 404,
+		});
+	}
+}
+
+export class RunStoreUnavailableError extends FlueHttpError {
+	constructor() {
+		super({
+			type: 'run_store_unavailable',
+			message: 'Run history is not available in this runtime.',
+			details: 'This endpoint requires the generated runtime to be configured with a run store.',
+			dev: '',
+			status: 501,
+		});
+	}
+}
+
 export class InvalidRequestError extends FlueHttpError {
 	constructor({ reason }: { reason: string }) {
 		super({
@@ -603,6 +627,17 @@ export function validateAgentRequest(opts: ValidateAgentRequestOptions): void {
 	if (opts.method !== 'POST') {
 		throw new MethodNotAllowedError({ method: opts.method, allowed: ['POST'] });
 	}
+	validateAgentIdentity(opts);
+}
+
+export function validateAgentRunRequest(opts: ValidateAgentRequestOptions): void {
+	if (opts.method !== 'GET') {
+		throw new MethodNotAllowedError({ method: opts.method, allowed: ['GET'] });
+	}
+	validateAgentIdentity(opts);
+}
+
+function validateAgentIdentity(opts: ValidateAgentRequestOptions): void {
 	if (opts.name.trim() === '' || opts.id.trim() === '') {
 		throw new InvalidRequestError({
 			reason: 'Webhook URLs must have the shape /agents/<name>/<id> with non-empty segments.',

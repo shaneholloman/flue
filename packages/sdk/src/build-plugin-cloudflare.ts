@@ -114,6 +114,7 @@ import {
   bashFactoryToSessionEnv,
   resolveModel,
   handleAgentRequest,
+  handleRunRouteRequest,
   configureFlueRuntime,
   createDefaultFlueApp,
 } from '@flue/sdk/internal';
@@ -309,6 +310,16 @@ async function handleFlueFiberRecovered(ctx, _doInstance, agentName) {
  */
 async function dispatchAgent(request, doInstance, agentName, handler) {
   const id = doInstance.name; // DO room name set by routeAgentRequest
+  const runRoute = parseRunRoute(request);
+  if (runRoute) {
+    return handleRunRouteRequest({
+      request,
+      agentName,
+      id,
+      runStore: createRunStoreForRequest(doInstance),
+      ...runRoute,
+    });
+  }
 
   return handleAgentRequest({
     request,
@@ -338,6 +349,19 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
       return doInstance.keepAliveWhile(() => h(ctx));
     }),
   });
+}
+
+function parseRunRoute(request) {
+  const segments = new URL(request.url).pathname.split('/').filter(Boolean);
+  const runsIndex = segments.indexOf('runs');
+  if (runsIndex === -1) return null;
+  const runId = segments[runsIndex + 1];
+  const child = segments[runsIndex + 2];
+  if (!runId) return { action: 'list' };
+  if (!child) return { action: 'get', runId };
+  if (child === 'events') return { action: 'events', runId };
+  if (child === 'stream') return { action: 'stream', runId };
+  return null;
 }
 
 // ─── Per-Agent Durable Object Classes ──────────────────────────────────────

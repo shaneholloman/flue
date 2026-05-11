@@ -35,7 +35,12 @@
 
 import type { MiddlewareHandler } from 'hono';
 import { Hono } from 'hono';
-import { RouteNotFoundError, toHttpResponse, validateAgentRequest } from '../errors.ts';
+import {
+	RouteNotFoundError,
+	toHttpResponse,
+	validateAgentRequest,
+	validateAgentRunRequest,
+} from '../errors.ts';
 import {
 	type AgentHandler,
 	type CreateContextFn,
@@ -43,6 +48,7 @@ import {
 	type RunHandlerFn,
 	type StartWebhookFn,
 } from './handle-agent.ts';
+import { type HandleRunRouteOptions, handleRunRouteRequest } from './handle-run-routes.ts';
 import type { RunStore } from './run-store.ts';
 
 /**
@@ -158,6 +164,10 @@ export function flue(): Hono {
 	// what produces the actual 405 / 404 / 400 envelopes; this just
 	// makes sure those paths get reached.
 	app.all('/agents/:name/:id', agentRouteHandler);
+	app.all('/agents/:name/:id/runs', runRouteHandler('list'));
+	app.all('/agents/:name/:id/runs/:runId', runRouteHandler('get'));
+	app.all('/agents/:name/:id/runs/:runId/events', runRouteHandler('events'));
+	app.all('/agents/:name/:id/runs/:runId/stream', runRouteHandler('stream'));
 
 	// Sub-app's `onError` catches throws from `agentRouteHandler` and
 	// renders the canonical Flue envelope. Because Hono mounts treat
@@ -259,6 +269,50 @@ const agentRouteHandler: MiddlewareHandler = async (c) => {
 		path: new URL(c.req.url).pathname,
 	});
 };
+
+function runRouteHandler(action: HandleRunRouteOptions['action']): MiddlewareHandler {
+	return async (c) => {
+		const rt = runtimeConfig;
+		if (!rt) {
+			throw new Error(
+				'[flue] flue() route invoked before runtime was configured. ' +
+					'This usually means flue() was used outside a Flue-built server entry.',
+			);
+		}
+
+		const name = c.req.param('name') ?? '';
+		const id = c.req.param('id') ?? '';
+		const runId = c.req.param('runId') || undefined;
+
+		validateAgentRunRequest({
+			method: c.req.method,
+			name,
+			id,
+			registeredAgents: registeredAgentsFor(rt),
+			webhookAgents: rt.webhookAgents,
+			allowNonWebhook: rt.allowNonWebhook,
+		});
+
+		if (rt.target === 'node') {
+			return handleRunRouteRequest({
+				request: c.req.raw,
+				runStore: rt.runStore,
+				agentName: name,
+				id,
+				runId,
+				action,
+			});
+		}
+
+		const response = await rt.routeAgentRequest!(c.req.raw, c.env);
+		if (response) return response;
+
+		throw new RouteNotFoundError({
+			method: c.req.method,
+			path: new URL(c.req.url).pathname,
+		});
+	};
+}
 
 /**
  * Compute the set of agent names considered "registered" for purposes

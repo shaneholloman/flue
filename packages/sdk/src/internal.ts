@@ -44,6 +44,8 @@ export type {
 //
 // The user-facing `flue()` itself is re-exported from `@flue/sdk/app`, not here.
 export { handleAgentRequest } from './runtime/handle-agent.ts';
+export type { HandleRunRouteOptions } from './runtime/handle-run-routes.ts';
+export { handleRunRouteRequest } from './runtime/handle-run-routes.ts';
 export type { RunRecord, RunStatus, RunStore } from './runtime/run-store.ts';
 export { bashFactoryToSessionEnv } from './sandbox.ts';
 export { InMemorySessionStore } from './session.ts';
