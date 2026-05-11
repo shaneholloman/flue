@@ -54,6 +54,7 @@ import {
   createFlueContext,
   InMemorySessionStore,
   InMemoryRunStore,
+  createRunSubscriberRegistry,
   bashFactoryToSessionEnv,
   resolveModel,
   configureFlueRuntime,
@@ -113,6 +114,7 @@ async function createLocalEnv() {
 // Default persistence store for Node — in-memory, process lifetime.
 const defaultStore = new InMemorySessionStore();
 const runStore = new InMemoryRunStore();
+const runSubscribers = createRunSubscriberRegistry();
 
 function createContextForRequest(id, runId, payload, req) {
   return createFlueContext({
@@ -145,6 +147,7 @@ configureFlueRuntime({
   handlers,
   createContext: createContextForRequest,
   runStore,
+  runSubscribers,
 });
 
 // ─── App composition ────────────────────────────────────────────────────────

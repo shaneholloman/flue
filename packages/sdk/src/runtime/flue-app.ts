@@ -50,6 +50,7 @@ import {
 } from './handle-agent.ts';
 import { type HandleRunRouteOptions, handleRunRouteRequest } from './handle-run-routes.ts';
 import type { RunStore } from './run-store.ts';
+import type { RunSubscriberRegistry } from './run-subscribers.ts';
 
 /**
  * Runtime configuration for {@link flue}, seeded by the generated server
@@ -101,6 +102,13 @@ export interface FlueRuntime {
 
 	/** Node run history store. Optional so existing generated entries fail soft. */
 	runStore?: RunStore;
+
+	/**
+	 * Node in-process per-run subscriber registry, paired with the run
+	 * store and used by the run-stream route for live tailing. Optional
+	 * — if omitted, run-stream falls back to durable replay only.
+	 */
+	runSubscribers?: RunSubscriberRegistry;
 
 	// ─── Cloudflare-only ────────────────────────────────────────────────────
 
@@ -249,6 +257,7 @@ const agentRouteHandler: MiddlewareHandler = async (c) => {
 			startWebhook: rt.startWebhook,
 			runHandler: rt.runHandler,
 			runStore: rt.runStore,
+			runSubscribers: rt.runSubscribers,
 		});
 	}
 
@@ -297,6 +306,7 @@ function runRouteHandler(action: HandleRunRouteOptions['action']): MiddlewareHan
 			return handleRunRouteRequest({
 				request: c.req.raw,
 				runStore: rt.runStore,
+				runSubscribers: rt.runSubscribers,
 				agentName: name,
 				id,
 				runId,

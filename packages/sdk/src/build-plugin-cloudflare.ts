@@ -111,6 +111,7 @@ import {
   InMemorySessionStore,
   InMemoryRunStore,
   createDurableRunStore,
+  createRunSubscriberRegistry,
   bashFactoryToSessionEnv,
   resolveModel,
   handleAgentRequest,
@@ -220,6 +221,13 @@ function resolveSandbox(sandbox) {
 const memoryStore = new InMemorySessionStore();
 const memoryRunStore = new InMemoryRunStore();
 
+// Per-isolate (i.e. per-DO) in-process subscriber registry for live run-stream
+// tailing. Because Cloudflare's routeAgentRequest pins a run id to the owning
+// Agent DO and the run-route dispatch is forwarded to that same DO, the
+// subscribe-time isolate is always the same isolate that produces the events.
+// Run ids are globally unique (ULID) so cross-DO collisions are impossible.
+const runSubscribers = createRunSubscriberRegistry();
+
 // Create a DO-backed session store from the Durable Object's SQL storage.
 function createDOStore(sql) {
   // Ensure the table exists
@@ -317,6 +325,7 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
       agentName,
       id,
       runStore: createRunStoreForRequest(doInstance),
+      runSubscribers,
       ...runRoute,
     });
   }
@@ -327,6 +336,7 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
     id,
     handler,
     runStore: createRunStoreForRequest(doInstance),
+    runSubscribers,
     createContext: (id_, runId, payload, req) => createContextForRequest(id_, runId, payload, doInstance, req),
     startWebhook: (runId, run) => {
       const wrapped = (fiber) => {
