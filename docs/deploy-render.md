@@ -226,7 +226,7 @@ Pass the store to the `assistant` agent's `init()`:
 ```typescript
 import { sessionStore } from '../session-store';
 
-const agent = await init({
+const harness = await init({
   model: 'anthropic/claude-sonnet-4-6',
   persist: sessionStore,
 });

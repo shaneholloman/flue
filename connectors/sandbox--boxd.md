@@ -55,8 +55,8 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *
  * const client = new Compute({ apiKey: process.env.BOXD_API_KEY });
  * const box = await client.box.create({ name: 'my-agent' });
- * const agent = await init({ sandbox: boxd(box), model: 'anthropic/claude-sonnet-4-6' });
- * const session = await agent.session();
+ * const harness = await init({ sandbox: boxd(box), model: 'anthropic/claude-sonnet-4-6' });
+ * const session = await harness.session();
  * ```
  */
 import { createSandboxSessionEnv } from '@flue/sdk/sandbox';
@@ -295,11 +295,11 @@ export default async function ({ init, env }: FlueContext) {
   const box = await client.box.create({ name: `agent-${Date.now()}` });
 
   try {
-    const agent = await init({
+    const harness = await init({
       sandbox: boxd(box),
       model: 'anthropic/claude-sonnet-4-6',
     });
-    const session = await agent.session();
+    const session = await harness.session();
     return await session.shell('uname -a');
   } finally {
     await client.close();

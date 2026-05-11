@@ -28,8 +28,8 @@ import * as v from 'valibot';
 export const triggers = {};
 
 export default async function ({ init, payload }: FlueContext) {
-  const agent = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
-  const session = await agent.session();
+  const harness = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
 
   const { data } = await session.prompt(
     `Say hello to ${payload.name ?? 'the user'} and share an interesting fact.`,
@@ -166,8 +166,8 @@ import * as v from 'valibot';
 export const triggers = {};
 
 export default async function ({ init, payload }: FlueContext) {
-  const agent = await init({ sandbox: 'local', model: 'anthropic/claude-opus-4-7' });
-  const session = await agent.session();
+  const harness = await init({ sandbox: 'local', model: 'anthropic/claude-opus-4-7' });
+  const session = await harness.session();
 
   // The agent's bash tool can run `glab` directly — whatever GITLAB_TOKEN
   // is set on the runner is visible to it. Prefer purpose-built CLIs like
@@ -291,8 +291,8 @@ import { type FlueContext } from '@flue/sdk/client';
 import * as v from 'valibot';
 
 export default async function ({ init, payload }: FlueContext) {
-  const agent = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
-  const session = await agent.session();
+  const harness = await init({ sandbox: 'local', model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
 
   const { data } = await session.skill('triage', {
     args: { issueIid: payload.issueIid },
@@ -331,4 +331,4 @@ npx flue run triage --target node --id test-2 \
   --payload '{"issueIid": 42}' | jq '.severity'
 ```
 
-The CLI builds your project root, starts a temporary server, invokes the agent via SSE, streams progress to stderr, and prints the final result to stdout. The `--id` flag identifies the agent runtime — use a consistent ID to resume the default session, or a unique one for a fresh start.
+The CLI builds your project root, starts a temporary server, invokes the agent via SSE, streams progress to stderr, and prints the final result to stdout. The `--id` flag identifies the agent instance — use a consistent ID to resume the default harness/session, or a unique one for a fresh start.

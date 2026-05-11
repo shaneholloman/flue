@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+- **Terminology cleanup: `FlueAgent` becomes `FlueHarness`.** The value returned from `init()` is now called a harness: a configured handle for model defaults, tools, sandbox, filesystem, and sessions. Rename imports/usages from `FlueAgent` to `FlueHarness`, and prefer `const harness = await init(...)` in agent files.
+- **Harnesses and sessions are named, not id'd.** `init({ id })` becomes `init({ name })`, defaulting to `"default"`. The returned harness exposes `.name` instead of `.id`. `harness.session(id?)`, `harness.sessions.get/create/delete(id?)`, and `FlueSession.id` become name-based APIs (`name?`, `.name`).
+- **Session storage keys now include the agent instance id, harness name, and session name.** Existing persisted sessions under the old two-part key shape are not migrated. Cloudflare Durable Object session history from earlier builds will not be read by this release.
+- **Runs are named explicitly.** Every HTTP invocation gets a generated `run_<ulid>` exposed to handlers as `ctx.runId`. Webhook mode now returns `{ status: 'accepted', runId }` instead of `{ status: 'accepted', requestId }`.
+- **Session events include the harness name.** `FlueEvent` payloads emitted from sessions now carry `harnessName` so future run logs can distinguish multiple harnesses used in one run.
+
 ## 0.4.1
 
 ### Fixes & Other Changes
@@ -118,4 +128,3 @@ Big release! We are working hard to stabilize our APIs and add any missing and e
 - **Skills are now read from disk on demand.** `session.skill()` references the skill by name and the system prompt's "Available Skills" registry tells the model where to find it (`.agents/skills/<name>/SKILL.md`). Relative references inside a skill (sibling markdown files, scripts) now resolve from where they live, and edits to `SKILL.md` are picked up mid-session without re-init. Path-based references produce a distinct prompt naming the file path explicitly.
 
 - **`createLocalSessionEnv()` helper** exported from `@flue/sdk/node`. A pure-Node `SessionEnv` backed directly by `node:fs/promises` and `node:child_process`. Configurable `cwd` via `LocalSessionEnvOptions`. `exec` honors `timeout` + `signal` and lifts the default output buffer cap to 64 MB. This is what powers the new `sandbox: 'local'` behavior.
-

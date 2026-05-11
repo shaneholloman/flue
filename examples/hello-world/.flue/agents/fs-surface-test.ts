@@ -13,8 +13,8 @@ export default async function ({ init }: FlueContext) {
 	const sandbox = () => new Bash({ fs });
 	// `model` is required by init(), but this test never makes an LLM call
 	// — pick the cheapest model so accidental invocation isn't expensive.
-	const agent = await init({ sandbox, model: 'anthropic/claude-haiku-4-5' });
-	const session = await agent.session();
+	const harness = await init({ sandbox, model: 'anthropic/claude-haiku-4-5' });
+	const session = await harness.session();
 
 	const results: Record<string, boolean> = {};
 	const check = (name: string, ok: boolean) => {

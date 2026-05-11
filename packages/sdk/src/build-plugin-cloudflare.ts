@@ -241,7 +241,7 @@ function createDOStore(sql) {
   };
 }
 
-function createContextForRequest(id, payload, doInstance, req) {
+function createContextForRequest(id, runId, payload, doInstance, req) {
   // Use DO SQLite storage by default, fall back to in-memory
   const defaultStore = doInstance?.ctx?.storage?.sql
     ? createDOStore(doInstance.ctx.storage.sql)
@@ -249,6 +249,7 @@ function createContextForRequest(id, payload, doInstance, req) {
 
   return createFlueContext({
     id,
+    runId,
     payload,
     env: doInstance?.env ?? {},
     req,
@@ -305,22 +306,22 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
     agentName,
     id,
     handler,
-    createContext: (id_, payload, req) => createContextForRequest(id_, payload, doInstance, req),
-    startWebhook: (requestId, run) => {
+    createContext: (id_, runId, payload, req) => createContextForRequest(id_, runId, payload, doInstance, req),
+    startWebhook: (runId, run) => {
       const wrapped = (fiber) => {
         fiber?.stash?.({
           version: 1,
           kind: 'webhook',
           agentName,
           id,
-          requestId,
+          runId,
           phase: 'running',
           startedAt: Date.now(),
         });
         return runWithInstanceContext(doInstance, run);
       };
       assertAgentsDurabilityApi(doInstance, 'runFiber');
-      return doInstance.runFiber('flue:webhook:' + requestId, wrapped);
+      return doInstance.runFiber('flue:webhook:' + runId, wrapped);
     },
     runHandler: (ctx, h) => runWithInstanceContext(doInstance, () => {
       assertAgentsDurabilityApi(doInstance, 'keepAliveWhile');

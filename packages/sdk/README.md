@@ -37,9 +37,9 @@ export const triggers = { webhook: true };
 
 // The agent handler. Where the orchestration of the agent lives.
 export default async function ({ init, payload }: FlueContext) {
-  // `agent` -- Your initialized agent runtime including sandbox, tools, skills, etc.
-  const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
-  const session = await agent.session();
+  // `harness` -- Your initialized harness including sandbox, tools, skills, etc.
+  const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
 
   // prompt() sends a message in the session, triggering action.
   const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
@@ -56,7 +56,7 @@ export default async function ({ init, payload }: FlueContext) {
 
 ### Support Agent
 
-A support agent can also run in a virtual sandbox, but we now add a file-system using an R2 bucket. The knowledge base is stored in R2 and mounted directly into the agent's filesystem — the agent searches it with its built-in tools (grep, glob, read). Skills are also defined in the bucket that help the agent perform its task.
+A support agent can also run in a virtual sandbox, but we now add a file-system using an R2 bucket. The knowledge base is stored in R2 and mounted directly into the harness filesystem — the agent searches it with its built-in tools (grep, glob, read). Skills are also defined in the bucket that help the agent perform its task.
 
 Because this agent is deployed to Cloudflare, message history and session state are automatically persisted for you. So you (or your customer) can revisit this support session days, weeks, or years later and pick up exactly where you left off.
 
@@ -69,12 +69,12 @@ import * as v from 'valibot';
 export const triggers = { webhook: true };
 
 export default async function ({ init, payload, env }: FlueContext) {
-  // Mount the R2 knowledge base bucket as the agent's filesystem.
+  // Mount the R2 knowledge base bucket as the harness filesystem.
   // The agent can grep, glob, and read articles with bash, but
   // without needing to spin up an entire container sandbox.
   const sandbox = await getVirtualSandbox(env.KNOWLEDGE_BASE);
-  const agent = await init({ sandbox, model: 'openrouter/moonshotai/kimi-k2.6' });
-  const session = await agent.session();
+  const harness = await init({ sandbox, model: 'openrouter/moonshotai/kimi-k2.6' });
+  const session = await harness.session();
 
   return await session.prompt(
     `You are a support agent. Search the knowledge base for articles
@@ -109,11 +109,11 @@ export default async function ({ init, payload }: FlueContext) {
   //
   // `model` sets the default model for every prompt/skill call in this
   // agent. Override per-call with `{ model: '...' }` on prompt()/skill().
-  const agent = await init({
+  const harness = await init({
     sandbox: 'local',
     model: 'anthropic/claude-opus-4-7',
   });
-  const session = await agent.session();
+  const session = await harness.session();
 
   // Skills can be referenced either by their frontmatter `name:` (shown below)
   // or by a relative path under `.agents/skills/` — e.g.
@@ -157,15 +157,15 @@ export default async function ({ init, payload, env }: FlueContext) {
   // a full Linux environment with persistent filesystem and shell.
   //
   // For simplicity, we always create a new sandbox here. You could also
-  // first check for an existing sandbox for the agent id, and reuse that
+  // first check for an existing sandbox for the agent instance id, and reuse that
   // instead to best pick up where you last left off in the conversation.
   const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
   const sandbox = await client.create();
-  const setupAgent = await init({
+  const setupHarness = await init({
     sandbox: daytona(sandbox),
     model: 'openai/gpt-5.5',
   });
-  const setup = await setupAgent.session();
+  const setup = await setupHarness.session();
 
   // For simplicity, we clone the target repo into the sandbox here.
   // You could also bake these into the container image snapshot for a
@@ -173,15 +173,15 @@ export default async function ({ init, payload, env }: FlueContext) {
   await setup.shell(`git clone ${payload.repo} /workspace/project`);
   await setup.shell('npm install', { cwd: '/workspace/project' });
 
-  // Start a second agent in the cloned repo. It shares the same sandbox, but
+  // Start a second harness in the cloned repo. It shares the same sandbox, but
   // discovers AGENTS.md and skills from /workspace/project.
-  const projectAgent = await init({
-    id: 'project',
+  const projectHarness = await init({
+    name: 'project',
     sandbox: daytona(sandbox),
     cwd: '/workspace/project',
     model: 'openai/gpt-5.5',
   });
-  const session = await projectAgent.session();
+  const session = await projectHarness.session();
 
   // Coding agents don't hide the agent DX from the user, so no need to
   // wrap the user's prompt in anything. Just send it to the agent directly
@@ -209,11 +209,11 @@ export default async function ({ init, payload, env }: FlueContext) {
   });
 
   try {
-    const agent = await init({
+    const harness = await init({
       model: 'anthropic/claude-sonnet-4-6',
       tools: github.tools,
     });
-    const session = await agent.session();
+    const session = await harness.session();
     return await session.prompt(payload.prompt);
   } finally {
     await github.close();
@@ -223,15 +223,17 @@ export default async function ({ init, payload, env }: FlueContext) {
 
 `connectMcpServer()` defaults to modern streamable HTTP. For legacy SSE servers, pass `transport: 'sse'`. Flue does not auto-detect transports, spawn local stdio MCP servers, or handle OAuth callbacks in this first version.
 
-## Agents And Sessions
+## Agents, Harnesses, And Sessions
 
-Every agent invocation runs inside an initialized agent runtime. For HTTP agents, the agent ID is the last path segment:
+An agent is the source file in `agents/<name>.ts`. For HTTP agents, the URL `<id>` segment identifies the agent instance: the durable runtime scope for one customer, repo, conversation space, or other caller-defined boundary.
 
 ```txt
 POST /agents/<agent-name>/<id>
 ```
 
-By default, `agent.session()` opens the default session for that agent ID. Reuse the same agent ID to continue the same default conversation. Use a new agent ID to start fresh.
+Inside a run, `init()` creates a harness: a configured handle for model defaults, tools, sandbox, filesystem, and sessions. The default harness is named `"default"`; pass `init({ name })` when one run needs multiple isolated harness scopes.
+
+By default, `harness.session()` opens the default session inside the default harness for that agent instance. Reuse the same URL `<id>` to continue the same agent instance. Use a new URL `<id>` to start fresh.
 
 ```bash
 # Start a conversation (port 3583 is `flue dev`'s default)
@@ -250,16 +252,16 @@ curl http://localhost:3583/agents/hello/session-xyz \
   -d '{"name": "Alice"}'
 ```
 
-Agents own sandbox state such as files written during a run. Sessions persist message history and conversation metadata inside an agent. On Cloudflare, session data is backed by Durable Objects and survives across requests. On Node.js, sessions are stored in memory by default unless you provide a custom store.
+Agent instances own sandbox state such as files written during a run. Harnesses group related session state within an instance. Sessions persist message history and conversation metadata inside a harness. On Cloudflare, session data is backed by Durable Objects and survives across requests. On Node.js, sessions are stored in memory by default unless you provide a custom store.
 
-In production, generate a stable agent ID for the sandbox/runtime scope you want to preserve. Use `agent.session(threadId)` when you need multiple conversations inside the same agent.
+In production, generate a stable URL `<id>` for the agent instance you want to preserve. Use `harness.session(threadName)` when you need multiple conversations inside the same harness.
 
 ### Tasks
 
 Use `session.task()` to run a focused, one-shot child agent in a detached session. Tasks share the same sandbox/filesystem, but get their own message history and discover `AGENTS.md` plus `.agents/skills/` from their working directory. The same `task` tool is also available to the LLM during `prompt()` and `skill()` calls, so the agent can delegate parallel research or exploration work itself.
 
 ```ts
-const session = await agent.session();
+const session = await harness.session();
 
 const research = await session.task('Research the auth flow and summarize the key files.', {
   cwd: '/workspace/project',
@@ -271,11 +273,11 @@ const answer = await session.prompt(
 );
 ```
 
-Roles can be set at the agent, session, or call level. Precedence is `call role > session role > agent role`. Role instructions are applied as call-scoped system prompt overlays, not injected into the persisted user message history.
+Roles can be set at the harness, session, or call level. Precedence is `call role > session role > harness role`. Role instructions are applied as call-scoped system prompt overlays, not injected into the persisted user message history.
 
 ```ts
-const agent = await init({ model: 'anthropic/claude-sonnet-4-6', role: 'coder' });
-const session = await agent.session('review-thread', { role: 'reviewer' });
+const harness = await init({ model: 'anthropic/claude-sonnet-4-6', role: 'coder' });
+const session = await harness.session('review-thread', { role: 'reviewer' });
 
 await session.prompt('Review the latest changes.'); // uses reviewer
 await session.task('Research related issues.', { role: 'researcher' }); // uses researcher
@@ -288,25 +290,25 @@ such as an enterprise API gateway, provider-compatible proxy, custom endpoint,
 or gateway-specific credentials. This is common for managed credentials, audit
 logging, traffic routing, or self-hosted OpenAI-compatible providers.
 
-Configure these settings in `init()` instead of mutating global model state. They
-are runtime-scoped to that agent and apply to every model it resolves, including
-agent defaults, role-level models, per-call model selections, tasks, and context
-compaction.
+Configure these settings in `app.ts` instead of mutating global model state. They
+apply to every harness and session that resolves models through that provider.
 
 ```ts
-const agent = await init({
-  model: 'anthropic/claude-sonnet-4-6',
-  providers: {
-    anthropic: {
+// .flue/app.ts
+import { configureProvider, flue } from '@flue/sdk/app';
+
+export default {
+  fetch(req, env, ctx) {
+    configureProvider('anthropic', {
       baseUrl: env.ANTHROPIC_BASE_URL,
-      headers: {
-        'X-Custom-Auth': env.GATEWAY_KEY,
-      },
+      headers: { 'X-Custom-Auth': env.GATEWAY_KEY },
       // Use this when the proxy expects a synthetic or gateway-specific key.
       apiKey: 'dummy',
-    },
+    });
+
+    return flue().fetch(req, env, ctx);
   },
-});
+};
 ```
 
 ### Custom Virtual Sandboxes
@@ -318,11 +320,11 @@ import { Bash, InMemoryFs } from 'just-bash';
 
 const fs = new InMemoryFs();
 
-const agent = await init({
+const harness = await init({
   sandbox: () => new Bash({ fs, cwd: '/workspace', python: true }),
   model: 'anthropic/claude-sonnet-4-6',
 });
-const session = await agent.session();
+const session = await harness.session();
 ```
 
 ## Connectors

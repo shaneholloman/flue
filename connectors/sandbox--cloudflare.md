@@ -114,8 +114,8 @@ The short version, for your reference:
 
    export default async function ({ init, id, env, payload }: FlueContext) {
      const sandbox = getSandbox(env.Sandbox, id);
-     const agent = await init({ sandbox, model: 'anthropic/claude-opus-4-7' });
-     const session = await agent.session();
+     const harness = await init({ sandbox, model: 'anthropic/claude-opus-4-7' });
+     const session = await harness.session();
 
      return await session.prompt(payload.message);
    }

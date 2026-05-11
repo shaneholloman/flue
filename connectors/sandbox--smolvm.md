@@ -68,7 +68,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * import { smolvm } from './connectors/smolvm';
  *
  * const machine = await Machine.create({ name: 'my-flue-vm' });
- * const agent = await init({
+ * const harness = await init({
  *   sandbox: smolvm(machine),
  *   model: 'anthropic/claude-sonnet-4-6',
  * });
@@ -260,11 +260,11 @@ export const triggers = { webhook: true };
 export default async function ({ init }: FlueContext) {
   const machine = await Machine.create({ name: `flue-${Date.now()}` });
 
-  const agent = await init({
+  const harness = await init({
     sandbox: smolvm(machine),
     model: 'anthropic/claude-sonnet-4-6',
   });
-  const session = await agent.session();
+  const session = await harness.session();
 
   return await session.shell('uname -a');
 }

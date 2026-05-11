@@ -56,7 +56,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * ```ts
  * import { islo } from './connectors/islo';
  *
- * const agent = await init({
+ * const harness = await init({
  *   sandbox: islo('my-sandbox'),
  *   model: 'anthropic/claude-sonnet-4-6',
  * });
@@ -278,11 +278,11 @@ import { islo } from '../connectors/islo'; // adjust path to match the user's la
 export const triggers = { webhook: true };
 
 export default async function ({ init }: FlueContext) {
-  const agent = await init({
+  const harness = await init({
     sandbox: islo('my-sandbox'),
     model: 'anthropic/claude-sonnet-4-6',
   });
-  const session = await agent.session();
+  const session = await harness.session();
 
   return await session.shell('uname -a');
 }

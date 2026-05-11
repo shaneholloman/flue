@@ -4,8 +4,8 @@ export const COPY_PROMPT = `fetch https://flueframework.com/start.md to create a
 export const HERO = `export default async function ({ init, payload, env }) {
   // Initialize a new agent. 
   // Provide a hosted sandbox, or use Flue's built-in virtual sandbox.
-  const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
-  const session = await agent.session();
+  const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
 
   // Call skills as reusable workflows with structured output:
   const { data } = await session.skill('triage', {
@@ -41,8 +41,8 @@ export default async function ({ init, payload, env }: FlueContext) {
   // SQLite + R2 under the hood. The agent searches it with bash —
   // grep, glob, read — without spinning up a container.
   const sandbox = await getVirtualSandbox(env.KNOWLEDGE_BASE_BUCKET);
-  const agent = await init({ sandbox, model: 'openrouter/moonshotai/kimi-k2.6' });
-  const session = await agent.session();
+  const harness = await init({ sandbox, model: 'openrouter/moonshotai/kimi-k2.6' });
+  const session = await harness.session();
   // Prompt! The agent harness includes your workspace AGENTS.md,
   // skills, and roles (aka subagents) to complete your task as 
   // desired. Use \`session.skill()\` to call a skill directly.
@@ -62,8 +62,8 @@ export const triggers = {};
 // Built for: Node, GitHub Actions
 export default async function ({ init, payload, env }: FlueContext) {
   const { issueNumber } = payload;
-  const agent = await init({ model: 'anthropic/claude-opus-4-7' });
-  const session = await agent.session();
+  const harness = await init({ model: 'anthropic/claude-opus-4-7' });
+  const session = await harness.session();
   // Run the 'triage' skill to triage the GitHub issue.
   const { data } = await session.skill('triage', {
     args: { issueNumber },
@@ -94,8 +94,8 @@ export default async function ({ init, payload, env }: FlueContext) {
   // Each agent gets a real container via Daytona.
   const client = new Daytona({ apiKey: env.DAYTONA_API_KEY });
   const sandbox = await client.create();
-  const agent = await init({ sandbox: daytona(sandbox), model: 'openai/gpt-5.5' });
-  const session = await agent.session();
+  const harness = await init({ sandbox: daytona(sandbox), model: 'openai/gpt-5.5' });
+  const session = await harness.session();
   // Setup the sandbox (for illustrative purposes only). 
   // In production, you'd want to bake setup into the container image,
   // or use a snapshot (if available from your sandbox provider).
@@ -119,11 +119,11 @@ export default async function ({ init, payload }: FlueContext) {
 
   // Create a custom virtual sandbox with 'just-bash'. Enable Python use
   // so the agent can write code to analyze data, generate reports, etc.
-  const agent = await init({
+  const harness = await init({
     sandbox: () => new Bash({ fs, cwd: '/workspace', python: true }),
     model: 'anthropic/claude-sonnet-4-6',
   });
-  const session = await agent.session();
+  const session = await harness.session();
   // Prompt! The agent harness includes your workspace AGENTS.md,
   // skills, and roles (aka subagents) to analyze the data and
   // complete your task as desired.

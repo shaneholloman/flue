@@ -132,7 +132,7 @@ export interface SessionEnv {
 }
 
 /**
- * Filesystem surface for the agent sandbox, exposed on `FlueAgent.fs` and
+ * Filesystem surface for the harness sandbox, exposed on `FlueHarness.fs` and
  * `FlueSession.fs`. Reads and writes happen inside whatever the sandbox
  * connector points at (a remote container, microVM, in-process FS, etc.).
  *
@@ -201,7 +201,7 @@ export interface ProviderSettings {
 	baseUrl?: string;
 	/** Headers merged into the resolved model's provider-level headers. */
 	headers?: Record<string, string>;
-	/** API key returned to the underlying agent runtime for this provider. */
+	/** API key returned to the underlying harness runtime for this provider. */
 	apiKey?: string;
 	/**
 	 * Sends `store: true` for OpenAI Responses API providers. Only enable when
@@ -247,7 +247,10 @@ export type ModelConfig = string | false;
  * `wrangler types`). Compile-time only — no runtime validation of `payload`.
  */
 export interface FlueContext<TPayload = any, TEnv = Record<string, any>> {
+	/** Agent instance id from the URL `<id>` segment. */
 	readonly id: string;
+	/** Server-minted id for this HTTP invocation. */
+	readonly runId: string;
 	readonly payload: TPayload;
 	/** Platform env bindings (process.env on Node, Worker env on Cloudflare). */
 	readonly env: TEnv;
@@ -273,14 +276,14 @@ export interface FlueContext<TPayload = any, TEnv = Record<string, any>> {
 	 * trusted proxy on Node. Don't trust headers you don't control.
 	 */
 	readonly req: Request | undefined;
-	/** Initialize an agent runtime with sandbox + persistence. */
-	init(options: AgentInit): Promise<FlueAgent>;
+	/** Initialize a harness with sandbox + persistence. */
+	init(options: AgentInit): Promise<FlueHarness>;
 }
 
-/** Agent runtime options. A default model is required unless explicitly disabled with `model: false`. */
+/** Harness options. A default model is required unless explicitly disabled with `model: false`. */
 export interface AgentInit {
-	/** Agent/sandbox scope id. Defaults to the route/context id. */
-	id?: string;
+	/** Harness name. Defaults to `"default"`. */
+	name?: string;
 
 	/** Working directory for context discovery, tools, and shell calls. Defaults to the sandbox cwd. */
 	cwd?: string;
@@ -300,17 +303,17 @@ export interface AgentInit {
 	persist?: SessionStore;
 
 	/**
-	 * Default model for this agent. Applies to all prompt(), skill(), and task()
+	 * Default model for this harness. Applies to all prompt(), skill(), and task()
 	 * calls unless overridden by a role or at the call site. Pass `false` to require every
 	 * model-using call to resolve a model from a role or call-site override.
 	 *
 	 * Format: `'provider/modelId'` (e.g. `'anthropic/claude-opus-4-20250514'`).
 	 *
-	 * Precedence (highest wins): per-call `model` > role `model` > agent `model`.
+	 * Precedence (highest wins): per-call `model` > role `model` > harness `model`.
 	 */
 	model: ModelConfig;
 
-	/** Agent-wide default role. Overridden by session-level or per-call roles. */
+	/** Harness-wide default role. Overridden by session-level or per-call roles. */
 	role?: string;
 
 	/**
@@ -320,35 +323,35 @@ export interface AgentInit {
 	 * models effectively run with reasoning off after clamping.
 	 *
 	 * Precedence (highest wins): per-call `thinkingLevel` > role
-	 * `thinkingLevel` > agent `thinkingLevel`. When nothing is set, the harness
+	 * `thinkingLevel` > harness `thinkingLevel`. When nothing is set, the harness
 	 * defaults to `"medium"`. Use `"off"` to explicitly disable reasoning on
 	 * models that support it.
 	 */
 	thinkingLevel?: ThinkingLevel;
 
 	/**
-	 * Agent-wide tools. Every prompt(), skill(), and task() call can use these.
+	 * Harness-wide tools. Every prompt(), skill(), and task() call can use these.
 	 * Per-call tools are added on top and must not reuse the same names.
 	 */
 	tools?: ToolDef[];
 }
 
-// ─── Flue Agent (returned by init()) ────────────────────────────────────────
+// ─── Flue Harness (returned by init()) ──────────────────────────────────────
 
-export interface FlueAgent {
-	readonly id: string;
+export interface FlueHarness {
+	readonly name: string;
 
-	/** Get or create a session in this agent. Defaults to the "default" session. */
-	session(id?: string, options?: SessionOptions): Promise<FlueSession>;
+	/** Get or create a session in this harness. Defaults to the "default" session. */
+	session(name?: string, options?: SessionOptions): Promise<FlueSession>;
 
 	/** Explicit session management helpers. */
 	readonly sessions: FlueSessions;
 
-	/** Run a shell command in the agent sandbox without recording it in a conversation. */
+	/** Run a shell command in the harness sandbox without recording it in a conversation. */
 	shell(command: string, options?: ShellOptions): CallHandle<ShellResult>;
 
 	/**
-	 * Read and write files in the agent sandbox without recording in a
+	 * Read and write files in the harness sandbox without recording in a
 	 * conversation. See {@link FlueFs}.
 	 */
 	readonly fs: FlueFs;
@@ -356,11 +359,11 @@ export interface FlueAgent {
 
 export interface FlueSessions {
 	/** Load an existing session. Throws if it does not exist. */
-	get(id?: string, options?: SessionOptions): Promise<FlueSession>;
+	get(name?: string, options?: SessionOptions): Promise<FlueSession>;
 	/** Create a new session. Throws if it already exists. */
-	create(id?: string, options?: SessionOptions): Promise<FlueSession>;
+	create(name?: string, options?: SessionOptions): Promise<FlueSession>;
 	/** Delete a session's stored conversation state. No-op when missing. */
-	delete(id?: string): Promise<void>;
+	delete(name?: string): Promise<void>;
 }
 
 export interface SessionOptions {
@@ -384,7 +387,7 @@ export interface CallHandle<T> extends PromiseLike<T> {
 }
 
 export interface FlueSession {
-	readonly id: string;
+	readonly name: string;
 
 	prompt<S extends v.GenericSchema>(
 		text: string,
@@ -480,7 +483,7 @@ export interface PromptResultResponse<T> {
 // ─── Session Store ──────────────────────────────────────────────────────────
 
 export interface SessionData {
-	version: 2;
+	version: 3;
 	entries: SessionEntry[];
 	leafId: string | null;
 	metadata: Record<string, any>;
@@ -658,7 +661,7 @@ export type FlueEvent = (
 	| { type: 'compaction_start'; reason: 'threshold' | 'overflow'; estimatedTokens: number }
 	| { type: 'compaction_end'; messagesBefore: number; messagesAfter: number }
 	| { type: 'idle' }
-) & { sessionId?: string; parentSessionId?: string; taskId?: string };
+) & { sessionId?: string; parentSessionId?: string; taskId?: string; harnessName?: string };
 
 export type FlueEventCallback = (event: FlueEvent) => void;
 

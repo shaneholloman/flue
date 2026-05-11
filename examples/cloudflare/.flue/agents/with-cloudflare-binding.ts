@@ -28,11 +28,11 @@ export default async function ({ init, payload, id }: FlueContext) {
 	const action = (payload as { action?: string } | undefined)?.action;
 	const test = (payload as { test?: string } | undefined)?.test;
 
-	const agent = await init({ model: MODEL });
-	const session = await agent.session();
+	const harness = await init({ model: MODEL });
+	const session = await harness.session();
 
 	// ─── Cross-invocation persistence (set/recall) ──────────────────────────
-	// Two requests to the same agent ID share the default session history.
+	// Two requests to the same agent instance id share the default harness/session history.
 	// Verifies the binding-backed provider doesn't lose context across
 	// process boundaries (DO storage round-trip).
 	if (action === 'set') {
@@ -40,7 +40,7 @@ export default async function ({ init, payload, id }: FlueContext) {
 		await session.prompt(
 			`Remember this secret code: ${secret}. I will ask you about it later.`,
 		);
-		return { status: 'secret-set', id, sessionId: session.id, secret };
+		return { status: 'secret-set', id, sessionName: session.name, secret };
 	}
 	if (action === 'recall') {
 		const { text } = await session.prompt(
@@ -49,7 +49,7 @@ export default async function ({ init, payload, id }: FlueContext) {
 		return {
 			status: 'recalled',
 			id,
-			sessionId: session.id,
+			sessionName: session.name,
 			recalled: text.trim(),
 		};
 	}

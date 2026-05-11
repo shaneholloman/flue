@@ -9,8 +9,8 @@ const TEST_PNG_BASE64 =
 
 export default async function ({ init }: FlueContext) {
 	// Sonnet has more reliable vision than Haiku for tiny test images.
-	const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
-	const session = await agent.session();
+	const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+	const session = await harness.session();
 
 	const image = { type: 'image' as const, data: TEST_PNG_BASE64, mimeType: 'image/png' };
 

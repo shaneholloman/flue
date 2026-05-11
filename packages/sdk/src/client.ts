@@ -1,6 +1,6 @@
 import { discoverSessionContext } from './context.ts';
 import { bashFactoryToSessionEnv, createCwdSessionEnv } from './sandbox.ts';
-import { AgentClient } from './agent-client.ts';
+import { Harness } from './harness.ts';
 import { assertRoleExists } from './roles.ts';
 import type {
 	AgentConfig,
@@ -9,7 +9,7 @@ import type {
 	BashLike,
 	FlueContext,
 	FlueEventCallback,
-	FlueAgent,
+	FlueHarness,
 	SandboxFactory,
 	SessionEnv,
 	SessionStore,
@@ -17,6 +17,7 @@ import type {
 
 export interface FlueContextConfig {
 	id: string;
+	runId: string;
 	payload: any;
 	env: Record<string, any>;
 	agentConfig: AgentConfig;
@@ -43,11 +44,15 @@ export interface FlueContextInternal extends FlueContext {
 
 export function createFlueContext(config: FlueContextConfig): FlueContextInternal {
 	let currentEventCallback: FlueEventCallback | undefined;
-	const initializedAgentIds = new Set<string>();
+	const initializedHarnessNames = new Set<string>();
 
 	const ctx: FlueContextInternal = {
 		get id() {
 			return config.id;
+		},
+
+		get runId() {
+			return config.runId;
 		},
 
 		get payload() {
@@ -62,7 +67,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 			return config.req;
 		},
 
-		async init(options?: AgentInit): Promise<FlueAgent> {
+		async init(options?: AgentInit): Promise<FlueHarness> {
 			if (!options || !('model' in options)) {
 				throw new Error(
 					'[flue] init() requires a model. Pass { model: "provider/model-id" } or { model: false }.',
@@ -72,21 +77,21 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 				throw new Error('[flue] init({ model }) must be a model string or false.');
 			}
 
-			const id = options.id ?? config.id;
-			if (initializedAgentIds.has(id)) {
-				throw new Error(`[flue] init() has already been called for agent "${id}" in this request.`);
+			const name = options.name ?? 'default';
+			if (initializedHarnessNames.has(name)) {
+				throw new Error(`[flue] init() has already been called with name "${name}" in this request.`);
 			}
-			initializedAgentIds.add(id);
+			initializedHarnessNames.add(name);
 
 			try {
 				assertRoleExists(config.agentConfig.roles, options.role);
 				const sandbox = options.sandbox;
-				const baseEnv = await resolveSessionEnv(id, sandbox, config, options.cwd);
+				const baseEnv = await resolveSessionEnv(config.id, sandbox, config, options.cwd);
 				const env = options.cwd ? createCwdSessionEnv(baseEnv, options.cwd) : baseEnv;
 				const store: SessionStore = options.persist ?? config.defaultStore;
 				const localContext = await discoverSessionContext(env);
 
-				// Agent-level model override. Per-call `model` on prompt()/skill() still wins
+				// Harness-level model override. Per-call `model` on prompt()/skill() still wins
 				// because resolveModelForCall() applies it on top of this default.
 				const agentModel = config.agentConfig.resolveModel(options.model);
 
@@ -99,8 +104,9 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					thinkingLevel: options.thinkingLevel ?? config.agentConfig.thinkingLevel,
 				};
 
-				return new AgentClient(
-					id,
+				return new Harness(
+					config.id,
+					name,
 					agentConfig,
 					env,
 					store,
@@ -108,7 +114,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					options.tools,
 				);
 			} catch (error) {
-				initializedAgentIds.delete(id);
+				initializedHarnessNames.delete(name);
 				throw error;
 			}
 		},
@@ -191,7 +197,7 @@ export type { McpServerConnection, McpServerOptions, McpTransport } from './mcp.
 
 export type {
 	FlueContext,
-	FlueAgent,
+	FlueHarness,
 	FlueFs,
 	FlueSessions,
 	FlueSession,

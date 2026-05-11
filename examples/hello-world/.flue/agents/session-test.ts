@@ -5,8 +5,8 @@ export const triggers = { webhook: true };
 /**
  * Tests cross-invocation session persistence.
  *
- * The agent ID comes from the URL (routed by the platform).
- * Two requests to the same agent ID share the default session history.
+ * The agent instance id comes from the URL (routed by the platform).
+ * Two requests to the same agent instance id share the default harness/session history.
  *
  * Payload:
  *   { "action": "set" }    — store a secret in the session
@@ -23,25 +23,25 @@ export const triggers = { webhook: true };
  * refactor. Otherwise, this test is safe to skip and not run as part of your regular test suite.
  */
 export default async function ({ init, payload, id }: FlueContext) {
-	const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
-	const session = await agent.session();
+	const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+	const session = await harness.session();
 
 	const action = payload.action;
 
 	if (action === 'set') {
 		const secret = payload.secret ?? 'FLUE-42-ALPHA';
 		await session.prompt(`Remember this secret code: ${secret}. I will ask you about it later.`);
-		return { status: 'secret-set', id, sessionId: session.id };
+		return { status: 'secret-set', id, sessionName: session.name };
 	}
 
 	if (action === 'recall') {
 		const { text } = await session.prompt(
 			'What was the secret code I told you earlier? Reply with just the code, nothing else.',
 		);
-		return { status: 'recalled', id, sessionId: session.id, recalled: text.trim() };
+		return { status: 'recalled', id, sessionName: session.name, recalled: text.trim() };
 	}
 
 	return {
-		error: 'Pass payload.action: "set" or "recall". Agent ID comes from the URL path.',
+		error: 'Pass payload.action: "set" or "recall". Agent instance id comes from the URL path.',
 	};
 }

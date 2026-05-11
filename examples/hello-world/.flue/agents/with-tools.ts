@@ -14,8 +14,8 @@ export const triggers = { webhook: true };
 export default async function ({ init }: FlueContext) {
 	const fs = new InMemoryFs();
 	const sandbox = () => new Bash({ fs, network: { dangerouslyAllowFullInternetAccess: true } });
-	const agent = await init({ sandbox, model: 'anthropic/claude-sonnet-4-6' });
-	const session = await agent.session();
+	const harness = await init({ sandbox, model: 'anthropic/claude-sonnet-4-6' });
+	const session = await harness.session();
 
 	const results: Record<string, boolean> = {};
 

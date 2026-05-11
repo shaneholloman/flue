@@ -64,7 +64,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * ```typescript
  * import { exedev } from './connectors/exedev';
  *
- * const agent = await init({
+ * const harness = await init({
  *   sandbox: exedev({ host: 'maple-dune.exe.xyz' }),
  *   model: 'anthropic/claude-sonnet-4-6',
  * });
@@ -76,7 +76,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *
  * const vm = await createExeVm({ apiToken: process.env.EXE_API_TOKEN! });
  * try {
- *   const agent = await init({
+ *   const harness = await init({
  *     sandbox: exedev(vm),
  *     model: 'anthropic/claude-sonnet-4-6',
  *   });
@@ -721,11 +721,11 @@ import { exedev } from "../connectors/exedev";
 export const triggers = { webhook: true };
 
 export default async function ({ init, env }: FlueContext) {
-  const agent = await init({
+  const harness = await init({
     sandbox: exedev({ host: env.EXE_VM_HOST }),
     model: "anthropic/claude-sonnet-4-6",
   });
-  const session = await agent.session();
+  const session = await harness.session();
 
   return await session.shell("uname -a");
 }
@@ -747,11 +747,11 @@ export default async function ({ init, env }: FlueContext) {
   const vm = await createExeVm({ apiToken: env.EXE_API_TOKEN });
 
   try {
-    const agent = await init({
+    const harness = await init({
       sandbox: exedev(vm),
       model: "anthropic/claude-sonnet-4-6",
     });
-    const session = await agent.session();
+    const session = await harness.session();
 
     return await session.shell("uname -a");
   } finally {
@@ -779,11 +779,11 @@ export default async function ({ init, env }: FlueContext) {
   });
 
   try {
-    const agent = await init({
+    const harness = await init({
       sandbox: exedev(vm),
       model: "anthropic/claude-sonnet-4-6",
     });
-    const session = await agent.session();
+    const session = await harness.session();
 
     return await session.shell("uname -a");
   } finally {

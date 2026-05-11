@@ -6,8 +6,8 @@ import { assertRoleExists } from './roles.ts';
 import type {
 	AgentConfig,
 	CallHandle,
-	FlueAgent,
 	FlueFs,
+	FlueHarness,
 	FlueSessions,
 	FlueSession,
 	FlueEventCallback,
@@ -20,15 +20,15 @@ import type {
 	ToolDef,
 } from './types.ts';
 
-const DEFAULT_SESSION_ID = 'default';
+const DEFAULT_SESSION_NAME = 'default';
 
 type OpenMode = 'get-or-create' | 'get' | 'create';
 
-export class AgentClient implements FlueAgent {
+export class Harness implements FlueHarness {
 	readonly sessions: FlueSessions = {
-		get: (id?: string, options?: SessionOptions) => this.openSession(id, 'get', options),
-		create: (id?: string, options?: SessionOptions) => this.openSession(id, 'create', options),
-		delete: (id?: string) => this.deleteSession(id),
+		get: (name?: string, options?: SessionOptions) => this.openSession(name, 'get', options),
+		create: (name?: string, options?: SessionOptions) => this.openSession(name, 'create', options),
+		delete: (name?: string) => this.deleteSession(name),
 	};
 
 	readonly fs: FlueFs;
@@ -36,7 +36,8 @@ export class AgentClient implements FlueAgent {
 	private openSessions = new Map<string, Session>();
 
 	constructor(
-		readonly id: string,
+		private instanceId: string,
+		readonly name: string,
 		private config: AgentConfig,
 		private env: SessionEnv,
 		private store: SessionStore,
@@ -46,8 +47,8 @@ export class AgentClient implements FlueAgent {
 		this.fs = createFlueFs(env);
 	}
 
-	async session(id?: string, options?: SessionOptions): Promise<FlueSession> {
-		return this.openSession(id, 'get-or-create', options);
+	async session(name?: string, options?: SessionOptions): Promise<FlueSession> {
+		return this.openSession(name, 'get-or-create', options);
 	}
 
 	shell(command: string, options?: ShellOptions): CallHandle<ShellResult> {
@@ -62,33 +63,33 @@ export class AgentClient implements FlueAgent {
 	}
 
 	private async openSession(
-		id: string | undefined,
+		name: string | undefined,
 		mode: OpenMode,
 		options?: SessionOptions,
 	): Promise<FlueSession> {
 		assertRoleExists(this.config.roles, options?.role);
-		const sessionId = normalizeSessionId(id);
-		const open = this.openSessions.get(sessionId);
+		const sessionName = normalizeSessionName(name);
+		const open = this.openSessions.get(sessionName);
 		if (open) {
 			if (mode === 'create') {
-				throw new Error(`[flue] Session "${sessionId}" already exists for agent "${this.id}".`);
+				throw new Error(`[flue] Session "${sessionName}" already exists in harness "${this.name}".`);
 			}
 			if (options?.role !== undefined && options.role !== open.role) {
 				throw new Error(
-					`[flue] Session "${sessionId}" is already open with ` +
+					`[flue] Session "${sessionName}" is already open with ` +
 						`role ${JSON.stringify(open.role ?? null)}; cannot reopen with role ${JSON.stringify(options.role)}.`,
 				);
 			}
 			return open;
 		}
 
-		const storageKey = createSessionStorageKey(this.id, sessionId);
+		const storageKey = createSessionStorageKey(this.instanceId, this.name, sessionName);
 		const existingData = await this.store.load(storageKey);
 		if (mode === 'get' && !existingData) {
-			throw new Error(`[flue] Session "${sessionId}" does not exist for agent "${this.id}".`);
+			throw new Error(`[flue] Session "${sessionName}" does not exist in harness "${this.name}".`);
 		}
 		if (mode === 'create' && existingData) {
-			throw new Error(`[flue] Session "${sessionId}" already exists for agent "${this.id}".`);
+			throw new Error(`[flue] Session "${sessionName}" already exists in harness "${this.name}".`);
 		}
 
 		let data = existingData;
@@ -98,37 +99,37 @@ export class AgentClient implements FlueAgent {
 		}
 
 		const session = new Session({
-			id: sessionId,
+			name: sessionName,
 			storageKey,
 			config: this.config,
 			env: this.env,
 			store: this.store,
 			existingData: data,
-			onAgentEvent: this.eventCallback,
+			onAgentEvent: this.decorateEventCallback(this.eventCallback),
 			agentTools: this.agentTools,
 			sessionRole: options?.role,
 			taskDepth: 0,
 			createTaskSession: (taskOptions) => this.createTaskSession(taskOptions),
-			onDelete: () => this.openSessions.delete(sessionId),
+			onDelete: () => this.openSessions.delete(sessionName),
 		});
-		this.openSessions.set(sessionId, session);
+		this.openSessions.set(sessionName, session);
 		return session;
 	}
 
-	private async deleteSession(id: string | undefined): Promise<void> {
-		const sessionId = normalizeSessionId(id);
-		const open = this.openSessions.get(sessionId);
+	private async deleteSession(name: string | undefined): Promise<void> {
+		const sessionName = normalizeSessionName(name);
+		const open = this.openSessions.get(sessionName);
 		if (open) {
 			await open.delete();
 			return;
 		}
-		await deleteSessionTree(this.store, createSessionStorageKey(this.id, sessionId));
+		await deleteSessionTree(this.store, createSessionStorageKey(this.instanceId, this.name, sessionName));
 	}
 
 	private async createTaskSession(options: CreateTaskSessionOptions): Promise<Session> {
 		assertRoleExists(this.config.roles, options.role);
 
-		const sessionId = `task:${options.parentSessionId}:${options.taskId}`;
+		const sessionName = `task:${options.parentSessionId}:${options.taskId}`;
 		const taskEnv = options.cwd
 			? createCwdSessionEnv(options.parentEnv, options.parentEnv.resolvePath(options.cwd))
 			: options.parentEnv;
@@ -138,7 +139,7 @@ export class AgentClient implements FlueAgent {
 			systemPrompt: localContext.systemPrompt,
 			skills: localContext.skills,
 		};
-		const storageKey = createSessionStorageKey(this.id, sessionId);
+		const storageKey = createSessionStorageKey(this.instanceId, this.name, sessionName);
 		const data = createEmptySessionData();
 		data.metadata = {
 			parentSessionId: options.parentSessionId,
@@ -153,6 +154,7 @@ export class AgentClient implements FlueAgent {
 			? (event) => {
 					this.eventCallback?.({
 						...event,
+						harnessName: event.harnessName ?? this.name,
 						parentSessionId: event.parentSessionId ?? options.parentSessionId,
 						taskId: event.taskId ?? options.taskId,
 					});
@@ -160,7 +162,7 @@ export class AgentClient implements FlueAgent {
 			: undefined;
 
 		return new Session({
-			id: sessionId,
+			name: sessionName,
 			storageKey,
 			config: taskConfig,
 			env: taskEnv,
@@ -173,20 +175,28 @@ export class AgentClient implements FlueAgent {
 			createTaskSession: (childOptions) => this.createTaskSession(childOptions),
 		});
 	}
+
+	private decorateEventCallback(callback: FlueEventCallback | undefined): FlueEventCallback | undefined {
+		return callback
+			? (event) => {
+					callback({ ...event, harnessName: event.harnessName ?? this.name });
+				}
+			: undefined;
+	}
 }
 
-function normalizeSessionId(id: string | undefined): string {
-	return id ?? DEFAULT_SESSION_ID;
+function normalizeSessionName(name: string | undefined): string {
+	return name ?? DEFAULT_SESSION_NAME;
 }
 
-function createSessionStorageKey(agentId: string, sessionId: string): string {
-	return `agent-session:${JSON.stringify([agentId, sessionId])}`;
+function createSessionStorageKey(instanceId: string, harnessName: string, sessionName: string): string {
+	return `agent-session:${JSON.stringify([instanceId, harnessName, sessionName])}`;
 }
 
 function createEmptySessionData(): SessionData {
 	const now = new Date().toISOString();
 	return {
-		version: 2,
+		version: 3,
 		entries: [],
 		leafId: null,
 		metadata: {},

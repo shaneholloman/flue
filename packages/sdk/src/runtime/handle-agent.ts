@@ -2,6 +2,7 @@
 
 import { parseJsonBody, toHttpResponse, toSseData } from '../errors.ts';
 import type { FlueContextInternal } from '../client.ts';
+import { generateRunId } from './ids.ts';
 
 /**
  * Agent handler signature — the default export of a `.flue/agents/<name>.ts`
@@ -17,6 +18,7 @@ export type AgentHandler = (ctx: FlueContextInternal) => unknown | Promise<unkno
  */
 export type CreateContextFn = (
 	id: string,
+	runId: string,
 	payload: unknown,
 	request: Request,
 ) => FlueContextInternal;
@@ -26,13 +28,13 @@ export type CreateContextFn = (
  * a promise that resolves with the handler's return value. Implementations:
  *
  *   - Node: just `run()` — no fiber, no DO.
- *   - Cloudflare: `doInstance.runFiber('flue:webhook:<requestId>', run)`.
+ *   - Cloudflare: `doInstance.runFiber('flue:webhook:<runId>', run)`.
  *
  * The caller is responsible for any logging on completion/error; this routine
  * just kicks it off and returns the 202.
  */
 export type StartWebhookFn = (
-	requestId: string,
+	runId: string,
 	run: () => Promise<unknown>,
 ) => Promise<unknown>;
 
@@ -103,6 +105,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 	const { request, agentName, id, handler, createContext } = opts;
 	const startWebhook = opts.startWebhook ?? defaultStartWebhook;
 	const runHandler = opts.runHandler ?? defaultRunHandler;
+	const runId = generateRunId();
 
 	try {
 		// Parse the request body. Throws on invalid Content-Type or malformed
@@ -118,6 +121,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 			return runWebhookMode({
 				agentName,
 				id,
+				runId,
 				handler,
 				payload,
 				request,
@@ -129,6 +133,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 		if (isSSE) {
 			return runSseMode({
 				id,
+				runId,
 				handler,
 				payload,
 				request,
@@ -139,6 +144,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 
 		return runSyncMode({
 			id,
+			runId,
 			handler,
 			payload,
 			request,
@@ -156,6 +162,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 
 interface ModeOptions {
 	id: string;
+	runId: string;
 	handler: AgentHandler;
 	payload: unknown;
 	request: Request;
@@ -166,6 +173,7 @@ interface ModeOptions {
 interface WebhookOptions {
 	agentName: string;
 	id: string;
+	runId: string;
 	handler: AgentHandler;
 	payload: unknown;
 	request: Request;
@@ -174,8 +182,7 @@ interface WebhookOptions {
 }
 
 function runWebhookMode(opts: WebhookOptions): Response {
-	const { agentName, id, handler, payload, request, createContext, startWebhook } = opts;
-	const requestId = generateRequestId();
+	const { agentName, id, runId, handler, payload, request, createContext, startWebhook } = opts;
 
 	// Webhook execution intentionally does NOT go through `runHandler`:
 	//
@@ -195,7 +202,7 @@ function runWebhookMode(opts: WebhookOptions): Response {
 	// before entering `runWithCloudflareContext`. The factory is pure today,
 	// but keeping the timing consistent across modes avoids surprises if it
 	// ever grows ambient-env dependencies.
-	const ctx = createContext(id, payload, request);
+	const ctx = createContext(id, runId, payload, request);
 	const run = async (): Promise<unknown> => {
 		try {
 			return await handler(ctx);
@@ -204,7 +211,7 @@ function runWebhookMode(opts: WebhookOptions): Response {
 		}
 	};
 
-	startWebhook(requestId, run).then(
+	startWebhook(runId, run).then(
 		(result) => {
 			console.log(
 				'[flue] Webhook handler complete:',
@@ -217,7 +224,7 @@ function runWebhookMode(opts: WebhookOptions): Response {
 		},
 	);
 
-	return new Response(JSON.stringify({ status: 'accepted', requestId }), {
+	return new Response(JSON.stringify({ status: 'accepted', runId }), {
 		status: 202,
 		headers: { 'content-type': 'application/json' },
 	});
@@ -233,7 +240,7 @@ function runWebhookMode(opts: WebhookOptions): Response {
 const SSE_HEARTBEAT_MS = 25_000;
 
 function runSseMode(opts: ModeOptions): Response {
-	const { id, handler, payload, request, createContext, runHandler } = opts;
+	const { id, runId, handler, payload, request, createContext, runHandler } = opts;
 
 	const { readable, writable } = new TransformStream();
 	const writer = writable.getWriter();
@@ -280,7 +287,7 @@ function runSseMode(opts: ModeOptions): Response {
 		writeHeartbeat().catch(() => {});
 	}, SSE_HEARTBEAT_MS);
 
-	const ctx = createContext(id, payload, request);
+	const ctx = createContext(id, runId, payload, request);
 	ctx.setEventCallback((event) => {
 		if (event.type === 'idle') isIdle = true;
 		writeSSE(event, event.type).catch(() => {});
@@ -326,8 +333,8 @@ function runSseMode(opts: ModeOptions): Response {
 }
 
 async function runSyncMode(opts: ModeOptions): Promise<Response> {
-	const { id, handler, payload, request, createContext, runHandler } = opts;
-	const ctx = createContext(id, payload, request);
+	const { id, runId, handler, payload, request, createContext, runHandler } = opts;
+	const ctx = createContext(id, runId, payload, request);
 	try {
 		const result = await runHandler(ctx, handler);
 		return new Response(
@@ -347,7 +354,7 @@ async function runSyncMode(opts: ModeOptions): Promise<Response> {
  * overrides this with a `runFiber` wrapper for crash-recoverable execution
  * across DO hibernation.
  */
-const defaultStartWebhook: StartWebhookFn = (_requestId, run) => run();
+const defaultStartWebhook: StartWebhookFn = (_runId, run) => run();
 
 /**
  * Default foreground handler runner: invoke directly. Used by the Node
@@ -355,12 +362,3 @@ const defaultStartWebhook: StartWebhookFn = (_requestId, run) => run();
  * wrapper.
  */
 const defaultRunHandler: RunHandlerFn = (ctx, handler) => handler(ctx);
-
-/**
- * Generate a UUID for webhook request correlation. `crypto.randomUUID()` is
- * available on both modern Node (≥18) and workerd, so no per-target shim is
- * needed.
- */
-function generateRequestId(): string {
-	return crypto.randomUUID();
-}

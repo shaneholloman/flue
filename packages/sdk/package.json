@@ -62,6 +62,7 @@
 		"just-bash": "^2.14.2",
 		"package-up": "^5.0.0",
 		"typescript": "^5.9.2",
+		"ulidx": "^2.4.1",
 		"valibot": "^1.0.0"
 	},
 	"devDependencies": {

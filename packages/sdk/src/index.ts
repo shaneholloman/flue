@@ -1,6 +1,6 @@
 export type {
 	FlueContext,
-	FlueAgent,
+	FlueHarness,
 	FlueFs,
 	FlueSessions,
 	FlueSession,

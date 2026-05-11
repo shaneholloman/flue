@@ -50,8 +50,8 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * import { vercel } from './connectors/vercel';
  *
  * const sandbox = await Sandbox.create({ runtime: 'node24' });
- * const agent = await init({ sandbox: vercel(sandbox), model: 'anthropic/claude-sonnet-4-6' });
- * const session = await agent.session();
+ * const harness = await init({ sandbox: vercel(sandbox), model: 'anthropic/claude-sonnet-4-6' });
+ * const session = await harness.session();
  * ```
  */
 import { createSandboxSessionEnv } from '@flue/sdk/sandbox';
@@ -237,11 +237,11 @@ export const triggers = { webhook: true };
 export default async function ({ init }: FlueContext) {
   const sandbox = await Sandbox.create({ runtime: 'node24' });
 
-  const agent = await init({
+  const harness = await init({
     sandbox: vercel(sandbox),
     model: 'anthropic/claude-sonnet-4-6',
   });
-  const session = await agent.session();
+  const session = await harness.session();
 
   return await session.shell('uname -a');
 }

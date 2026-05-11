@@ -45,6 +45,7 @@ import {
 	resolveRoleModel,
 	resolveRoleThinkingLevel,
 } from './roles.ts';
+import { generateOperationId } from './runtime/ids.ts';
 
 import type {
 	AgentConfig,
@@ -87,8 +88,10 @@ export interface CreateTaskSessionOptions {
 
 export type CreateTaskSession = (options: CreateTaskSessionOptions) => Promise<Session>;
 
+type OperationKind = 'prompt' | 'skill' | 'task' | 'shell';
+
 interface SessionInitOptions {
-	id: string;
+	name: string;
 	storageKey: string;
 	config: AgentConfig;
 	env: SessionEnv;
@@ -331,7 +334,7 @@ export class SessionHistory {
 
 	toData(metadata: Record<string, any>, createdAt: string, updatedAt: string): SessionData {
 		return {
-			version: 2,
+			version: 3,
 			entries: [...this.entries],
 			leafId: this.leafId,
 			metadata,
@@ -388,7 +391,7 @@ function generateEntryId(byId: Map<string, SessionEntry>): string {
 }
 
 export class Session implements FlueSession {
-	readonly id: string;
+	readonly name: string;
 	readonly fs: FlueFs;
 	metadata: Record<string, any>;
 	get role(): string | undefined {
@@ -408,7 +411,8 @@ export class Session implements FlueSession {
 	private eventCallback: FlueEventCallback | undefined;
 	private agentTools: ToolDef[];
 	private deleted = false;
-	private activeOperation: string | undefined;
+	private activeOperation: OperationKind | undefined;
+	private activeOperationId: string | undefined;
 	private activeTasks = new Set<Session>();
 	private sessionRole: string | undefined;
 	private taskDepth: number;
@@ -416,7 +420,7 @@ export class Session implements FlueSession {
 	private onDelete: (() => void) | undefined;
 
 	constructor(options: SessionInitOptions) {
-		this.id = options.id;
+		this.name = options.name;
 		this.storageKey = options.storageKey;
 		this.config = options.config;
 		this.env = options.env;
@@ -940,6 +944,25 @@ export class Session implements FlueSession {
 			S extends v.GenericSchema ? PromptResultResponse<v.InferOutput<S>> : PromptResponse
 		>
 	> {
+		return this.runExclusive('task', async () => {
+			this.activeOperationId = generateOperationId();
+			try {
+				return await this.runTaskExclusive(text, options, signal);
+			} finally {
+				this.activeOperationId = undefined;
+			}
+		});
+	}
+
+	private async runTaskExclusive<S extends v.GenericSchema | undefined>(
+		text: string,
+		options: InternalTaskOptions<S> | undefined,
+		signal: AbortSignal | undefined,
+	): Promise<
+		InternalTaskResult<
+			S extends v.GenericSchema ? PromptResultResponse<v.InferOutput<S>> : PromptResponse
+		>
+	> {
 		this.assertActive();
 		if (!this.createTaskSession) {
 			throw new Error('[flue] This session cannot create task sessions.');
@@ -960,21 +983,21 @@ export class Session implements FlueSession {
 			prompt: text,
 			role: requestedRole,
 			cwd: options?.cwd,
-			parentSessionId: this.id,
+			parentSessionId: this.name,
 		});
 
 		try {
 			const role = this.resolveEffectiveRole(options?.role);
 
 			child = await this.createTaskSession({
-				parentSessionId: this.id,
+				parentSessionId: this.name,
 				taskId,
 				parentEnv: this.env,
 				cwd: options?.cwd,
 				role,
 				depth: this.taskDepth + 1,
 			});
-			await this.recordTaskSession(child.id, child.storageKey, taskId);
+			await this.recordTaskSession(child.name, child.storageKey, taskId);
 			this.activeTasks.add(child);
 
 			// Aborts during sandbox bring-up — child.prompt's own
@@ -1003,7 +1026,7 @@ export class Session implements FlueSession {
 				output,
 				text: typeof output?.text === 'string' ? output.text : child.getAssistantText(),
 				taskId,
-				sessionId: child.id,
+				sessionId: child.name,
 				messageId: child.getLatestAssistantMessageId(),
 				role,
 				cwd: options?.cwd,
@@ -1013,7 +1036,7 @@ export class Session implements FlueSession {
 				taskId,
 				isError: false,
 				result: taskResult.text,
-				parentSessionId: this.id,
+				parentSessionId: this.name,
 			});
 			return taskResult;
 		} catch (error) {
@@ -1022,7 +1045,7 @@ export class Session implements FlueSession {
 				taskId,
 				isError: true,
 				result: getErrorMessage(error),
-				parentSessionId: this.id,
+				parentSessionId: this.name,
 			});
 			throw error;
 		} finally {
@@ -1037,12 +1060,13 @@ export class Session implements FlueSession {
 	// ─── Internal ────────────────────────────────────────────────────────────
 
 	private async runOperation<T>(
-		operation: string,
+		operation: OperationKind,
 		signal: AbortSignal | undefined,
 		fn: () => Promise<T>,
 	): Promise<T> {
 		return this.runExclusive(operation, async () => {
 			if (signal?.aborted) throw abortErrorFor(signal);
+			this.activeOperationId = generateOperationId();
 
 			// Mirror Session.abort() for the duration of this call.
 			// shell() doesn't use the harness/compaction/tasks — these
@@ -1069,15 +1093,16 @@ export class Session implements FlueSession {
 			} finally {
 				signal?.removeEventListener('abort', onAbort);
 				this.emit({ type: 'idle' });
+				this.activeOperationId = undefined;
 			}
 		});
 	}
 
-	private async runExclusive<T>(operation: string, fn: () => Promise<T>): Promise<T> {
+	private async runExclusive<T>(operation: OperationKind, fn: () => Promise<T>): Promise<T> {
 		this.assertActive();
 		if (this.activeOperation) {
 			throw new Error(
-				`[flue] Session "${this.id}" is already running ${this.activeOperation}. ` +
+				`[flue] Session "${this.name}" is already running ${this.activeOperation}. ` +
 					'Start another session for parallel conversation branches.',
 			);
 		}
@@ -1090,12 +1115,12 @@ export class Session implements FlueSession {
 	}
 
 	private emit(event: FlueEvent): void {
-		this.eventCallback?.({ ...event, sessionId: this.id });
+		this.eventCallback?.({ ...event, sessionId: this.name });
 	}
 
 	private assertActive(): void {
 		if (this.deleted) {
-			throw new Error(`[flue] Session "${this.id}" has been deleted.`);
+			throw new Error(`[flue] Session "${this.name}" has been deleted.`);
 		}
 	}
 

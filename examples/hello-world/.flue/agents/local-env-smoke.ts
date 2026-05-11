@@ -7,8 +7,8 @@ export const triggers = { webhook: true };
  * Exercises every SessionEnv method without invoking a model.
  */
 export default async function ({ init }: FlueContext) {
-	const agent = await init({ sandbox: 'local', model: false });
-	const session = await agent.session();
+	const harness = await init({ sandbox: 'local', model: false });
+	const session = await harness.session();
 
 	const results: Record<string, boolean> = {};
 	const tmpDir = `/tmp/flue-local-env-smoke-${Date.now()}`;

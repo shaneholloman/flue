@@ -112,9 +112,10 @@ async function createLocalEnv() {
 // Default persistence store for Node — in-memory, process lifetime.
 const defaultStore = new InMemorySessionStore();
 
-function createContextForRequest(id, payload, req) {
+function createContextForRequest(id, runId, payload, req) {
   return createFlueContext({
     id,
+    runId,
     payload,
     env: process.env,
     req,

@@ -69,8 +69,8 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  * import { mirage } from '../connectors/mirage';
  *
  * const ws = new Workspace({ '/data': new RAMResource() }, { mode: MountMode.WRITE });
- * const agent = await init({ sandbox: mirage(ws), model: 'anthropic/claude-sonnet-4-6' });
- * const session = await agent.session();
+ * const harness = await init({ sandbox: mirage(ws), model: 'anthropic/claude-sonnet-4-6' });
+ * const session = await harness.session();
  * ```
  */
 import { createSandboxSessionEnv } from '@flue/sdk/sandbox';
@@ -368,11 +368,11 @@ export const triggers = { webhook: true };
 export default async function ({ init }: FlueContext) {
   const ws = new Workspace({ '/data': new RAMResource() }, { mode: MountMode.WRITE });
 
-  const agent = await init({
+  const harness = await init({
     sandbox: mirage(ws, { cwd: '/data' }),
     model: 'anthropic/claude-sonnet-4-6',
   });
-  const session = await agent.session();
+  const session = await harness.session();
 
   return await session.shell('echo "hello mirage" > /data/hello.txt && cat /data/hello.txt');
 }

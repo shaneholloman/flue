@@ -39,8 +39,8 @@ import * as v from 'valibot';
 export const triggers = { webhook: true };
 
 export default async function ({ init, payload }: FlueContext) {
-  const agent = await init({ model: 'anthropic/claude-sonnet-4-6' });
-  const session = await agent.session();
+  const harness = await init({ model: 'anthropic/claude-sonnet-4-6' });
+  const session = await harness.session();
 
   const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
     schema: v.object({
@@ -151,8 +151,8 @@ import type { FlueContext } from '@flue/sdk/client';
 export const triggers = { webhook: true };
 
 export default async function ({ init, payload }: FlueContext) {
-  const agent = await init({ model: 'openai/gpt-5.5' });
-  const session = await agent.session();
+  const harness = await init({ model: 'openai/gpt-5.5' });
+  const session = await harness.session();
 
   // The agent has a full virtual filesystem and shell.
   // Set up context files before prompting.
@@ -191,8 +191,8 @@ export const triggers = { webhook: true };
 
 export default async function ({ init, payload, env }: FlueContext) {
   const sandbox = await getVirtualSandbox(env.KNOWLEDGE_BASE);
-  const agent = await init({ sandbox, model: 'openrouter/moonshotai/kimi-k2.6' });
-  const session = await agent.session();
+  const harness = await init({ sandbox, model: 'openrouter/moonshotai/kimi-k2.6' });
+  const session = await harness.session();
 
   return await session.prompt(
     `You are a support agent. Search the knowledge base for articles
@@ -301,8 +301,8 @@ export const triggers = { webhook: true };
 export default async function ({ init, id, env, payload }: FlueContext) {
   // The binding name you chose in wrangler.jsonc is the key on `env`.
   const sandbox = getSandbox(env.Sandbox, id);
-  const agent = await init({ sandbox, model: 'anthropic/claude-opus-4-7' });
-  const session = await agent.session();
+  const harness = await init({ sandbox, model: 'anthropic/claude-opus-4-7' });
+  const session = await harness.session();
 
   return await session.prompt(payload.message);
 }

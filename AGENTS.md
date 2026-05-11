@@ -2,6 +2,20 @@
 
 Agent framework where agents are directories compiled into deployable server artifacts.
 
+## Terminology
+
+```
+Agent (definition)              — `agents/<name>.ts`; named by its file
+└─ AgentInstance                — URL `<id>`; exposed to handlers as `ctx.id`
+   └─ Run                       — one HTTP invocation; exposed as `ctx.runId`
+      └─ Harness                — one `init({ name })` call; defaults to `"default"`
+         └─ Session             — one `harness.session(name?)`; defaults to `"default"`
+            └─ Operation        — one `session.prompt` / `skill` / `task` / `shell` call
+               └─ Turn          — one LLM round-trip inside pi-agent-core
+```
+
+Use `harness` as the variable name for the return value of `init()`. Agents have names; agent instances have ids; harnesses and sessions have names; runs and operations have generated ids.
+
 ## Project Structure
 
 - `packages/sdk/` — Core SDK (`@flue/sdk`). Build system, session management, agent harness, tools.
@@ -89,7 +103,7 @@ pnpm run check:types    # in packages/sdk/
 
 ## Models
 
-`provider/model-id` strings; providers come from pi-ai's registry. API keys via env (`ANTHROPIC_API_KEY`, etc.) or `init({ providers: { ... } })`.
+`provider/model-id` strings; providers come from pi-ai's registry. API keys via env (`ANTHROPIC_API_KEY`, etc.) or provider configuration in `app.ts` via `configureProvider()` / `registerProvider()`.
 
 ```ts
 init({ model: 'anthropic/claude-sonnet-4-6' })
