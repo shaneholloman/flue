@@ -1335,33 +1335,25 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 	// either way (the stream endpoint replays and closes), but events
 	// is simpler for the no-follow path so we use it uniformly.
 	//
-	// Filtering / limit are applied client-side here so the `run_end`
-	// bypass matches the follow path exactly. The server-side `?types=`
-	// and `?limit=` would drop `run_end`, which would silently corrupt
-	// the exit-code contract (errored runs would exit 0).
+	// `flue logs` is a dumb log pipe: --types and --limit just constrain
+	// what's emitted. If the user filters `run_end` out (or hits --limit
+	// before reaching it), exit code is 0 even for errored runs. That's
+	// the natural consequence of asking for filtered output; scripts that
+	// care about run status should not filter `run_end` away.
 	if (!shouldFollow) {
 		const url = new URL(`${agentPath}/runs/${resolvedRunId}/events`);
 		if (args.since !== undefined) url.searchParams.set('after', String(args.since));
-		// NOTE: intentionally NOT forwarding --types or --limit to the
-		// server — see comment above.
+		if (args.types) url.searchParams.set('types', [...args.types].join(','));
+		if (args.limit !== undefined) url.searchParams.set('limit', String(args.limit));
 		const body = await fetchJsonOrExit<{ events: Array<Record<string, unknown>> }>(url.toString());
 		let exitCode = 0;
-		let emittedCount = 0;
 		for (const event of body.events) {
-			const passesFilter =
-				!args.types ||
-				(typeof event.type === 'string' && args.types.has(event.type)) ||
-				event.type === 'run_end'; // never silently drop the terminal event
-			if (passesFilter) {
-				if (args.format === 'json' || args.format === 'ndjson') {
-					process.stdout.write(`${JSON.stringify(event)}\n`);
-				} else {
-					logsRenderPretty(event);
-				}
-				emittedCount++;
+			if (args.format === 'json' || args.format === 'ndjson') {
+				process.stdout.write(`${JSON.stringify(event)}\n`);
+			} else {
+				logsRenderPretty(event);
 			}
 			if (event.type === 'run_end' && event.isError === true) exitCode = 2;
-			if (args.limit !== undefined && emittedCount >= args.limit) break;
 		}
 		if (args.format === 'pretty') flushBuffers();
 		process.exit(exitCode);
@@ -1414,8 +1406,7 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 
 			const passesFilter =
 				!args.types ||
-				(typeof event.type === 'string' && args.types.has(event.type)) ||
-				event.type === 'run_end'; // never silently drop the terminal event
+				(typeof event.type === 'string' && args.types.has(event.type));
 
 			if (passesFilter) {
 				if (args.format === 'json' || args.format === 'ndjson') {

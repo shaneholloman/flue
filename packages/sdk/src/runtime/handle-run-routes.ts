@@ -2,6 +2,7 @@
 
 import { InvalidRequestError, RunNotFoundError, RunStoreUnavailableError } from '../errors.ts';
 import type { FlueEvent } from '../types.ts';
+import { SSE_HEARTBEAT_MS } from './handle-agent.ts';
 import type { RunRecord, RunStatus, RunStore } from './run-store.ts';
 import type { RunSubscriberRegistry } from './run-subscribers.ts';
 
@@ -19,14 +20,6 @@ const RUNS_DEFAULT_LIMIT = 20;
 const RUNS_MAX_LIMIT = 100;
 const EVENTS_DEFAULT_LIMIT = 100;
 const EVENTS_MAX_LIMIT = 1000;
-
-/**
- * Heartbeat interval for live run-stream connections. SSE intermediaries
- * (Node's default request timeout, CDN proxies, browser EventSource
- * reconnect heuristics) all expect periodic traffic on the wire. 15s
- * matches the conservative end of common proxy timeouts.
- */
-const RUN_STREAM_HEARTBEAT_MS = 15_000;
 
 /**
  * Maximum number of events buffered between subscribing and finishing
@@ -186,7 +179,7 @@ function streamReplayThenTail(opts: ReplayThenTailOptions): Response {
 				} catch {
 					// Already closed — cleanup will fire from `cancel`.
 				}
-			}, RUN_STREAM_HEARTBEAT_MS);
+			}, SSE_HEARTBEAT_MS);
 
 			const close = () => {
 				if (closed) return;

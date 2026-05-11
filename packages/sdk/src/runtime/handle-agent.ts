@@ -274,13 +274,15 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 }
 
 /**
- * Heartbeat interval for long-idle SSE streams. The actual cadence matters
- * less than the existence of *some* periodic payload — the heartbeat exists
- * to defeat intermediary timeouts (Node's default 300s requestTimeout, CDN
- * proxies, browser EventSource reconnect heuristics). 25s is the conventional
- * choice and matches what Hono's `streamSSE` defaults to.
+ * Heartbeat interval for SSE streams (agent runs and run history streams).
+ *
+ * The exact cadence matters less than the existence of *some* periodic
+ * payload — the heartbeat exists to defeat intermediary timeouts (Node's
+ * default 300s requestTimeout, CDN proxies, browser EventSource reconnect
+ * heuristics). 15s is conservative against common proxy timeouts and is
+ * what {@link handleRunRouteRequest} also imports.
  */
-const SSE_HEARTBEAT_MS = 25_000;
+export const SSE_HEARTBEAT_MS = 15_000;
 
 function runSseMode(opts: ModeOptions): Response {
 	const {
@@ -609,14 +611,23 @@ async function emitRunEnd(
  * a single controlled sequence (see emitRunEnd's doc for the
  * invariant).
  *
+ * Writes are serialized through a per-run promise chain so durable
+ * persistence happens in emission order. Without this, two events
+ * emitted in the same tick would launch concurrent `appendEvent` calls
+ * that could interleave between `await` points inside the store
+ * implementation. `eventIndex` is monotonic (assigned at decoration
+ * time) so reads can still sort correctly, but ORDER BY assumptions
+ * and any append-side sequencing the store relies on would be broken.
+ *
  * Both sinks are best-effort: errors are logged but never propagated.
  */
 function subscribeRunFanout(lifecycle: RunLifecycle): () => void {
 	const { ctx, runStore, runSubscribers, runId } = lifecycle;
 	if (!runStore && !runSubscribers) return () => {};
+	let chain: Promise<void> = Promise.resolve();
 	return ctx.subscribeEvent((event) => {
 		if (event.type === 'run_end') return;
-		void fanOutEvent(runStore, runSubscribers, runId, event);
+		chain = chain.then(() => fanOutEvent(runStore, runSubscribers, runId, event));
 	});
 }
 
