@@ -8,15 +8,23 @@
  *
  * User agent code should never import from here.
  */
-import { getModel, type Api, type KnownProvider, type Model } from '@mariozechner/pi-ai';
+import { type Api, getModel, type KnownProvider, type Model } from '@mariozechner/pi-ai';
 import { getProviderConfiguration, resolveRegisteredModel } from './runtime/providers.ts';
 import type { ModelConfig, ProviderSettings } from './types.ts';
 
-export { createFlueContext } from './client.ts';
 export type { FlueContextConfig, FlueContextInternal } from './client.ts';
-export { InMemorySessionStore } from './session.ts';
-export { bashFactoryToSessionEnv } from './sandbox.ts';
-
+export { createFlueContext } from './client.ts';
+export { createDurableRunStore } from './cloudflare/run-store.ts';
+export { InMemoryRunStore } from './node/run-store.ts';
+export type { FlueRuntime } from './runtime/flue-app.ts';
+export { configureFlueRuntime, createDefaultFlueApp } from './runtime/flue-app.ts';
+export type {
+	AgentHandler,
+	CreateContextFn,
+	HandleAgentOptions,
+	RunHandlerFn,
+	StartWebhookFn,
+} from './runtime/handle-agent.ts';
 // Runtime modules consumed by the generated server entries.
 //
 //   - `handleAgentRequest` is the per-agent dispatcher (webhook / SSE /
@@ -36,15 +44,9 @@ export { bashFactoryToSessionEnv } from './sandbox.ts';
 //
 // The user-facing `flue()` itself is re-exported from `@flue/sdk/app`, not here.
 export { handleAgentRequest } from './runtime/handle-agent.ts';
-export type {
-	AgentHandler,
-	CreateContextFn,
-	HandleAgentOptions,
-	RunHandlerFn,
-	StartWebhookFn,
-} from './runtime/handle-agent.ts';
-export { configureFlueRuntime, createDefaultFlueApp } from './runtime/flue-app.ts';
-export type { FlueRuntime } from './runtime/flue-app.ts';
+export type { RunRecord, RunStatus, RunStore } from './runtime/run-store.ts';
+export { bashFactoryToSessionEnv } from './sandbox.ts';
+export { InMemorySessionStore } from './session.ts';
 
 /**
  * Resolve `provider/model-id` to a pi-ai Model. Registered URL prefixes win

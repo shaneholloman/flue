@@ -1,16 +1,16 @@
 #!/usr/bin/env node
-import { spawn, type ChildProcess } from 'node:child_process';
+import { type ChildProcess, spawn } from 'node:child_process';
 import * as fs from 'node:fs';
 import path from 'node:path';
-import { determineAgent } from '@vercel/detect-agent';
-import { build, dev, DEFAULT_DEV_PORT, parseEnvFiles, resolveEnvFiles } from '@flue/sdk';
+import { build, DEFAULT_DEV_PORT, dev, parseEnvFiles, resolveEnvFiles } from '@flue/sdk';
 import {
+	type FlueConfig,
 	resolveConfig,
 	resolveConfigPath,
-	type FlueConfig,
 	type UserFlueConfig,
 } from '@flue/sdk/config';
-import { CONNECTORS, CATEGORY_ROOTS } from './_connectors.generated.ts';
+import { determineAgent } from '@vercel/detect-agent';
+import { CATEGORY_ROOTS, CONNECTORS } from './_connectors.generated.ts';
 
 /**
  * Resolve the merged config for a CLI command. The CLI's responsibility is
@@ -484,10 +484,6 @@ function flushBuffers() {
 
 function logEvent(event: any) {
 	switch (event.type) {
-		case 'agent_start':
-			console.error('[flue] Agent started');
-			break;
-
 		case 'text_delta': {
 			flushThinkingBuffer();
 			const combined = textBuffer + (event.text ?? '');
@@ -541,7 +537,7 @@ function logEvent(event: any) {
 			break;
 		}
 
-		case 'tool_end': {
+		case 'tool_call': {
 			const status = event.isError ? 'error' : 'done';
 			let resultPreview = '';
 			if (event.result?.content?.[0]?.text) {
@@ -556,7 +552,7 @@ function logEvent(event: any) {
 			break;
 		}
 
-		case 'turn_end':
+		case 'turn':
 			flushBuffers();
 			break;
 
@@ -567,10 +563,15 @@ function logEvent(event: any) {
 			);
 			break;
 
-		case 'compaction_end':
+		case 'compaction':
 			console.error(
-				`[flue] compaction:end    messages: ${event.messagesBefore} → ${event.messagesAfter}`,
+				`[flue] compaction:done   messages: ${event.messagesBefore} → ${event.messagesAfter}`,
 			);
+			break;
+
+		case 'log':
+			flushBuffers();
+			console.error(`[flue] ${event.level ?? 'info'}: ${event.message ?? ''}`);
 			break;
 
 		case 'idle':
@@ -595,7 +596,10 @@ function logEvent(event: any) {
 			}
 			break;
 
-		case 'result':
+		case 'run_start':
+		case 'run_end':
+		case 'operation_start':
+		case 'operation':
 			// Handled separately by the caller
 			break;
 	}
@@ -653,7 +657,7 @@ async function consumeSSE(
 
 	const decoder = new TextDecoder();
 	let buffer = '';
-	let result: any = undefined;
+	let result: any ;
 	let error: string | undefined;
 
 	for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
@@ -683,8 +687,18 @@ async function consumeSSE(
 				continue;
 			}
 
-			if (event.type === 'result') {
-				result = event.data;
+			if (event.type === 'run_end') {
+				if (event.isError) {
+					const e = event.error ?? {};
+					if (typeof e === 'object' && e !== null) {
+						const message = (e as { message?: unknown }).message;
+						error = typeof message === 'string' ? message : 'Unknown error';
+					} else {
+						error = String(e || 'Unknown error');
+					}
+				} else {
+					result = event.result;
+				}
 			} else if (event.type === 'error') {
 				// Envelope: { type: 'error', error: { type, message, details, dev?, meta? } }
 				const e = event.error ?? {};

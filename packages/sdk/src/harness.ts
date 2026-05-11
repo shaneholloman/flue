@@ -1,16 +1,16 @@
 import { createCallHandle } from './abort.ts';
 import { discoverSessionContext } from './context.ts';
-import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
-import { deleteSessionTree, Session, type CreateTaskSessionOptions } from './session.ts';
 import { assertRoleExists } from './roles.ts';
+import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
+import { type CreateTaskSessionOptions, deleteSessionTree, Session } from './session.ts';
 import type {
 	AgentConfig,
 	CallHandle,
+	FlueEventCallback,
 	FlueFs,
 	FlueHarness,
-	FlueSessions,
 	FlueSession,
-	FlueEventCallback,
+	FlueSessions,
 	SessionData,
 	SessionEnv,
 	SessionOptions,
@@ -129,7 +129,7 @@ export class Harness implements FlueHarness {
 	private async createTaskSession(options: CreateTaskSessionOptions): Promise<Session> {
 		assertRoleExists(this.config.roles, options.role);
 
-		const sessionName = `task:${options.parentSessionId}:${options.taskId}`;
+		const sessionName = `task:${options.parentSession}:${options.taskId}`;
 		const taskEnv = options.cwd
 			? createCwdSessionEnv(options.parentEnv, options.parentEnv.resolvePath(options.cwd))
 			: options.parentEnv;
@@ -142,7 +142,7 @@ export class Harness implements FlueHarness {
 		const storageKey = createSessionStorageKey(this.instanceId, this.name, sessionName);
 		const data = createEmptySessionData();
 		data.metadata = {
-			parentSessionId: options.parentSessionId,
+			parentSession: options.parentSession,
 			taskId: options.taskId,
 			cwd: taskEnv.cwd,
 			role: options.role,
@@ -154,8 +154,8 @@ export class Harness implements FlueHarness {
 			? (event) => {
 					this.eventCallback?.({
 						...event,
-						harnessName: event.harnessName ?? this.name,
-						parentSessionId: event.parentSessionId ?? options.parentSessionId,
+						harness: event.harness ?? this.name,
+						parentSession: event.parentSession ?? options.parentSession,
 						taskId: event.taskId ?? options.taskId,
 					});
 				}
@@ -179,7 +179,7 @@ export class Harness implements FlueHarness {
 	private decorateEventCallback(callback: FlueEventCallback | undefined): FlueEventCallback | undefined {
 		return callback
 			? (event) => {
-					callback({ ...event, harnessName: event.harnessName ?? this.name });
+					callback({ ...event, harness: event.harness ?? this.name });
 				}
 			: undefined;
 	}
@@ -189,8 +189,8 @@ function normalizeSessionName(name: string | undefined): string {
 	return name ?? DEFAULT_SESSION_NAME;
 }
 
-function createSessionStorageKey(instanceId: string, harnessName: string, sessionName: string): string {
-	return `agent-session:${JSON.stringify([instanceId, harnessName, sessionName])}`;
+function createSessionStorageKey(instanceId: string, harness: string, sessionName: string): string {
+	return `agent-session:${JSON.stringify([instanceId, harness, sessionName])}`;
 }
 
 function createEmptySessionData(): SessionData {

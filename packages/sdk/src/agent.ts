@@ -27,7 +27,7 @@ export interface TaskToolParams {
 
 export interface TaskToolResultDetails {
 	taskId: string;
-	sessionId: string;
+	session: string;
 	messageId?: string;
 	role?: string;
 	cwd?: string;

@@ -28,7 +28,6 @@ import {
 	shouldCompact,
 } from './compaction.ts';
 import { resolveSkillFilePath, skillsDirIn } from './context.ts';
-import { createFlueFs } from './sandbox.ts';
 import {
 	buildPromptText,
 	buildResultFollowUpPrompt,
@@ -38,7 +37,6 @@ import {
 	type ResultToolBundle,
 	ResultUnavailableError,
 } from './result.ts';
-import { getProviderConfiguration, getRegisteredApiKey } from './runtime/providers.ts';
 import {
 	assertRoleExists,
 	resolveEffectiveRole as resolveEffectiveRoleName,
@@ -46,6 +44,8 @@ import {
 	resolveRoleThinkingLevel,
 } from './roles.ts';
 import { generateOperationId } from './runtime/ids.ts';
+import { getProviderConfiguration, getRegisteredApiKey } from './runtime/providers.ts';
+import { createFlueFs } from './sandbox.ts';
 
 import type {
 	AgentConfig,
@@ -78,7 +78,7 @@ import { addUsage, emptyUsage, fromProviderUsage } from './usage.ts';
 const MAX_TASK_DEPTH = 4;
 
 export interface CreateTaskSessionOptions {
-	parentSessionId: string;
+	parentSession: string;
 	taskId: string;
 	parentEnv: SessionEnv;
 	cwd?: string;
@@ -128,7 +128,7 @@ interface InternalTaskResult<T> {
 	output: T;
 	text: string;
 	taskId: string;
-	sessionId: string;
+	session: string;
 	messageId?: string;
 	role?: string;
 	cwd?: string;
@@ -413,6 +413,8 @@ export class Session implements FlueSession {
 	private deleted = false;
 	private activeOperation: OperationKind | undefined;
 	private activeOperationId: string | undefined;
+	private toolStartTimes = new Map<string, number>();
+	private turnStartTime: number | undefined;
 	private activeTasks = new Set<Session>();
 	private sessionRole: string | undefined;
 	private taskDepth: number;
@@ -473,7 +475,9 @@ export class Session implements FlueSession {
 		this.harness.subscribe(async (event) => {
 			switch (event.type) {
 				case 'agent_start':
-					this.emit({ type: 'agent_start' });
+					break;
+				case 'turn_start':
+					this.turnStartTime = Date.now();
 					break;
 				case 'message_update': {
 					const aEvent = event.assistantMessageEvent;
@@ -489,6 +493,7 @@ export class Session implements FlueSession {
 					break;
 				}
 				case 'tool_execution_start':
+					this.toolStartTimes.set(event.toolCallId, Date.now());
 					this.emit({
 						type: 'tool_start',
 						toolName: event.toolName,
@@ -498,16 +503,30 @@ export class Session implements FlueSession {
 					break;
 				case 'tool_execution_end':
 					this.emit({
-						type: 'tool_end',
+						type: 'tool_call',
 						toolName: event.toolName,
 						toolCallId: event.toolCallId,
 						isError: event.isError,
 						result: event.result,
+						durationMs: durationSince(this.toolStartTimes.get(event.toolCallId)),
 					});
+					this.toolStartTimes.delete(event.toolCallId);
 					break;
-				case 'turn_end':
-					this.emit({ type: 'turn_end' });
+				case 'turn_end': {
+					const message = event.message;
+					const assistant = message.role === 'assistant' ? (message as AssistantMessage) : undefined;
+					this.emit({
+						type: 'turn',
+						durationMs: durationSince(this.turnStartTime),
+						model: assistant?.model,
+						usage: fromProviderUsage(assistant?.usage),
+						stopReason: assistant?.stopReason,
+						isError: assistant?.stopReason === 'error' || assistant?.stopReason === 'aborted',
+						error: assistant?.errorMessage,
+					});
+					this.turnStartTime = undefined;
 					break;
+				}
 				case 'agent_end':
 					break;
 			}
@@ -635,13 +654,14 @@ export class Session implements FlueSession {
 				// real tool calls, and removes the synthetic-user-message
 				// shape that earlier versions of this method produced.
 				//
-				// Concretely we emit the same tool_start/tool_end events the
+				// Concretely we emit the same tool_start/tool_call events the
 				// harness emits for LLM-driven tool calls, and we append a
 				// (user request, assistant tool_use, toolResult) message
 				// triple to history. The toolCallId we generate here matches
 				// the one referenced by the toolResult, just like a real
 				// tool-use round.
 				const toolCallId = crypto.randomUUID();
+				const toolStartMs = Date.now();
 
 				// Per-call cwd/env names, when set, are part of the call's
 				// identity and need to be visible in the transcript. Env
@@ -671,11 +691,12 @@ export class Session implements FlueSession {
 					const toolResult = formatBashResult(shellResult, command);
 					await this.appendShellTriple(toolCallId, args, toolResult, false);
 					this.emit({
-						type: 'tool_end',
+						type: 'tool_call',
 						toolName: 'bash',
 						toolCallId,
 						isError: false,
 						result: toolResult,
+						durationMs: durationSince(toolStartMs),
 					});
 					return shellResult;
 				} catch (error) {
@@ -690,11 +711,12 @@ export class Session implements FlueSession {
 					};
 					await this.appendShellTriple(toolCallId, args, errResult, true);
 					this.emit({
-						type: 'tool_end',
+						type: 'tool_call',
 						toolName: 'bash',
 						toolCallId,
 						isError: true,
 						result: errResult,
+						durationMs: durationSince(toolStartMs),
 					});
 					throw error;
 				}
@@ -925,10 +947,10 @@ export class Session implements FlueSession {
 
 		return {
 			content: [{ type: 'text', text: result.text || '(task completed with no text)' }],
-			details: {
-				taskId: result.taskId,
-				sessionId: result.sessionId,
-				messageId: result.messageId,
+				details: {
+					taskId: result.taskId,
+					session: result.session,
+					messageId: result.messageId,
 				role: result.role,
 				cwd: result.cwd,
 			},
@@ -945,10 +967,36 @@ export class Session implements FlueSession {
 		>
 	> {
 		return this.runExclusive('task', async () => {
+			if (signal?.aborted) throw abortErrorFor(signal);
 			this.activeOperationId = generateOperationId();
+			const operationId = this.activeOperationId;
+			const startedAt = Date.now();
+			this.emit({ type: 'operation_start', operationId, operationKind: 'task' });
 			try {
-				return await this.runTaskExclusive(text, options, signal);
+				const result = await this.runTaskExclusive(text, options, signal);
+				this.emit({
+					type: 'operation',
+					operationId,
+					operationKind: 'task',
+					durationMs: durationSince(startedAt),
+					isError: false,
+					result: result.output,
+					usage: usageFromResult(result.output),
+				});
+				return result;
+			} catch (error) {
+				const surfaced = signal?.aborted ? abortErrorFor(signal) : error;
+				this.emit({
+					type: 'operation',
+					operationId,
+					operationKind: 'task',
+					durationMs: durationSince(startedAt),
+					isError: true,
+					error: serializeError(surfaced),
+				});
+				throw surfaced;
 			} finally {
+				this.emit({ type: 'idle' });
 				this.activeOperationId = undefined;
 			}
 		});
@@ -983,14 +1031,15 @@ export class Session implements FlueSession {
 			prompt: text,
 			role: requestedRole,
 			cwd: options?.cwd,
-			parentSessionId: this.name,
+			parentSession: this.name,
 		});
+		const taskStartMs = Date.now();
 
 		try {
 			const role = this.resolveEffectiveRole(options?.role);
 
 			child = await this.createTaskSession({
-				parentSessionId: this.name,
+				parentSession: this.name,
 				taskId,
 				parentEnv: this.env,
 				cwd: options?.cwd,
@@ -1026,26 +1075,28 @@ export class Session implements FlueSession {
 				output,
 				text: typeof output?.text === 'string' ? output.text : child.getAssistantText(),
 				taskId,
-				sessionId: child.name,
+				session: child.name,
 				messageId: child.getLatestAssistantMessageId(),
 				role,
 				cwd: options?.cwd,
 			};
 			this.emit({
-				type: 'task_end',
+				type: 'task',
 				taskId,
 				isError: false,
 				result: taskResult.text,
-				parentSessionId: this.name,
+				durationMs: durationSince(taskStartMs),
+				parentSession: this.name,
 			});
 			return taskResult;
 		} catch (error) {
 			this.emit({
-				type: 'task_end',
+				type: 'task',
 				taskId,
 				isError: true,
 				result: getErrorMessage(error),
-				parentSessionId: this.name,
+				durationMs: durationSince(taskStartMs),
+				parentSession: this.name,
 			});
 			throw error;
 		} finally {
@@ -1067,6 +1118,9 @@ export class Session implements FlueSession {
 		return this.runExclusive(operation, async () => {
 			if (signal?.aborted) throw abortErrorFor(signal);
 			this.activeOperationId = generateOperationId();
+			const operationId = this.activeOperationId;
+			const startedAt = Date.now();
+			this.emit({ type: 'operation_start', operationId, operationKind: operation });
 
 			// Mirror Session.abort() for the duration of this call.
 			// shell() doesn't use the harness/compaction/tasks — these
@@ -1079,16 +1133,34 @@ export class Session implements FlueSession {
 			signal?.addEventListener('abort', onAbort, { once: true });
 
 			try {
-				return await fn();
+				const result = await fn();
+				this.emit({
+					type: 'operation',
+					operationId,
+					operationKind: operation,
+					durationMs: durationSince(startedAt),
+					isError: false,
+					result,
+					usage: usageFromResult(result),
+				});
+				return result;
 			} catch (error) {
 				// After the signal aborts, anything thrown downstream is
 				// post-abort fallout (harness, tools, compaction). Surface
 				// a single AbortError shape to callers. Failures propagate
 				// to the caller via throw — operation-end events
-				// (task_end isError, tool_end isError) carry the same
+				// (task/tool_call isError) carry the same
 				// information for in-process observers, so we don't emit a
 				// separate 'error' event here.
 				const surfaced = signal?.aborted ? abortErrorFor(signal) : error;
+				this.emit({
+					type: 'operation',
+					operationId,
+					operationKind: operation,
+					durationMs: durationSince(startedAt),
+					isError: true,
+					error: serializeError(surfaced),
+				});
 				throw surfaced;
 			} finally {
 				signal?.removeEventListener('abort', onAbort);
@@ -1115,7 +1187,13 @@ export class Session implements FlueSession {
 	}
 
 	private emit(event: FlueEvent): void {
-		this.eventCallback?.({ ...event, sessionId: this.name });
+		const decorated = {
+			...event,
+			session: event.session ?? this.name,
+		};
+		const operationId = event.operationId ?? this.activeOperationId;
+		if (operationId !== undefined) decorated.operationId = operationId;
+		this.eventCallback?.(decorated);
 	}
 
 	private assertActive(): void {
@@ -1208,15 +1286,15 @@ export class Session implements FlueSession {
 	}
 
 	private async recordTaskSession(
-		sessionId: string,
+		session: string,
 		storageKey: string,
 		taskId: string,
 	): Promise<void> {
 		const taskSessions = Array.isArray(this.metadata.taskSessions)
 			? this.metadata.taskSessions
 			: [];
-		if (!taskSessions.some((task) => task?.sessionId === sessionId)) {
-			taskSessions.push({ sessionId, taskId, storageKey });
+		if (!taskSessions.some((task) => task?.session === session)) {
+			taskSessions.push({ session, taskId, storageKey });
 			this.metadata.taskSessions = taskSessions;
 			await this.save();
 		}
@@ -1244,7 +1322,7 @@ export class Session implements FlueSession {
 			if (this.overflowRecoveryAttempted) return;
 			this.overflowRecoveryAttempted = true;
 
-			console.error(`[flue:compaction] Overflow detected, compacting and retrying...`);
+			this.internalLog('info', '[flue:compaction] Overflow detected, compacting and retrying...');
 
 			const messages = this.harness.state.messages;
 			const lastMsg = messages[messages.length - 1];
@@ -1266,7 +1344,8 @@ export class Session implements FlueSession {
 		const contextTokens = calculateContextTokens(assistantMessage.usage);
 
 		if (shouldCompact(contextTokens, contextWindow, this.compactionSettings)) {
-			console.error(
+			this.internalLog(
+				'info',
 				`[flue:compaction] Threshold reached — ${contextTokens} tokens used, ` +
 					`window ${contextWindow}, reserve ${this.compactionSettings.reserveTokens}, ` +
 					`triggering compaction`,
@@ -1285,6 +1364,7 @@ export class Session implements FlueSession {
 	private async runCompaction(reason: 'threshold' | 'overflow', willRetry: boolean): Promise<void> {
 		this.compactionAbortController = new AbortController();
 		const messagesBefore = this.harness.state.messages.length;
+		const compactionStartMs = Date.now();
 
 		try {
 			const model = this.harness.state.model;
@@ -1304,16 +1384,17 @@ export class Session implements FlueSession {
 					: undefined,
 			);
 			if (!preparation) {
-				console.error(`[flue:compaction] Nothing to compact (no valid cut point found)`);
+				this.internalLog('info', '[flue:compaction] Nothing to compact (no valid cut point found)');
 				return;
 			}
 			const firstKeptEntry = contextEntries[preparation.firstKeptIndex]?.entry;
 			if (!firstKeptEntry || firstKeptEntry.type !== 'message') {
-				console.error(`[flue:compaction] Nothing to compact (first kept message has no entry)`);
+				this.internalLog('info', '[flue:compaction] Nothing to compact (first kept message has no entry)');
 				return;
 			}
 
-			console.error(
+			this.internalLog(
+				'info',
 				`[flue:compaction] Summarizing ${preparation.messagesToSummarize.length} messages` +
 					(preparation.isSplitTurn
 						? ` (split turn: ${preparation.turnPrefixMessages.length} prefix messages)`
@@ -1343,12 +1424,19 @@ export class Session implements FlueSession {
 			this.harness.state.messages = this.history.buildContext();
 
 			const messagesAfter = this.harness.state.messages.length;
-			console.error(
+			this.internalLog(
+				'info',
 				`[flue:compaction] Complete — messages: ${messagesBefore} → ${messagesAfter}, ` +
 					`tokens before: ${result.tokensBefore}`,
 			);
 
-			this.emit({ type: 'compaction_end', messagesBefore, messagesAfter });
+			this.emit({
+				type: 'compaction',
+				messagesBefore,
+				messagesAfter,
+				durationMs: durationSince(compactionStartMs),
+				usage: result.usage,
+			});
 
 			await this.save();
 
@@ -1358,7 +1446,7 @@ export class Session implements FlueSession {
 				if (lastMsg?.role === 'assistant' && (lastMsg as AssistantMessage).stopReason === 'error') {
 					this.harness.state.messages = msgs.slice(0, -1);
 				}
-				console.error(`[flue:compaction] Retrying after overflow recovery...`);
+				this.internalLog('info', '[flue:compaction] Retrying after overflow recovery...');
 				const beforeRetry = this.harness.state.messages.length;
 				await this.harness.continue();
 				await this.harness.waitForIdle();
@@ -1366,10 +1454,19 @@ export class Session implements FlueSession {
 			}
 		} catch (error) {
 			const errorMessage = error instanceof Error ? error.message : String(error);
-			console.error(`[flue:compaction] Failed: ${errorMessage}`);
+			this.internalLog('error', `[flue:compaction] Failed: ${errorMessage}`, { error });
 		} finally {
 			this.compactionAbortController = undefined;
 		}
+	}
+
+	private internalLog(
+		level: 'info' | 'warn' | 'error',
+		message: string,
+		attributes?: Record<string, unknown>,
+	): void {
+		console.error(message);
+		this.emit({ type: 'log', level, message, attributes: normalizeLogAttributes(attributes) });
 	}
 
 	private throwIfError(context: string): void {
@@ -1614,6 +1711,41 @@ export async function deleteSessionTree(
 
 function getErrorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
+}
+
+function serializeError(error: unknown): unknown {
+	if (error instanceof Error) {
+		return { name: error.name, message: error.message };
+	}
+	return error;
+}
+
+function normalizeLogAttributes(
+	attributes: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	if (!attributes) return undefined;
+	if (!(attributes.error instanceof Error)) return attributes;
+	return { ...attributes, error: serializeError(attributes.error) };
+}
+
+function durationSince(start: number | undefined): number {
+	return start === undefined ? 0 : Date.now() - start;
+}
+
+function usageFromResult(result: unknown): PromptUsage | undefined {
+	if (typeof result !== 'object' || result === null) return undefined;
+	const usage = (result as { usage?: unknown }).usage;
+	return isPromptUsage(usage) ? usage : undefined;
+}
+
+function isPromptUsage(value: unknown): value is PromptUsage {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		typeof (value as PromptUsage).input === 'number' &&
+		typeof (value as PromptUsage).output === 'number' &&
+		typeof (value as PromptUsage).totalTokens === 'number'
+	);
 }
 
 function redactEnvValues(env: Record<string, string>): Record<string, string> {

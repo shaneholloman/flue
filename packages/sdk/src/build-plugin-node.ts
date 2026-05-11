@@ -53,6 +53,7 @@ import { Bash, InMemoryFs } from 'just-bash';
 import {
   createFlueContext,
   InMemorySessionStore,
+  InMemoryRunStore,
   bashFactoryToSessionEnv,
   resolveModel,
   configureFlueRuntime,
@@ -111,6 +112,7 @@ async function createLocalEnv() {
 
 // Default persistence store for Node — in-memory, process lifetime.
 const defaultStore = new InMemorySessionStore();
+const runStore = new InMemoryRunStore();
 
 function createContextForRequest(id, runId, payload, req) {
   return createFlueContext({
@@ -142,6 +144,7 @@ configureFlueRuntime({
   allowNonWebhook: isLocalMode,
   handlers,
   createContext: createContextForRequest,
+  runStore,
 });
 
 // ─── App composition ────────────────────────────────────────────────────────

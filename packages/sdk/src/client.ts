@@ -1,13 +1,14 @@
 import { discoverSessionContext } from './context.ts';
-import { bashFactoryToSessionEnv, createCwdSessionEnv } from './sandbox.ts';
 import { Harness } from './harness.ts';
 import { assertRoleExists } from './roles.ts';
+import { bashFactoryToSessionEnv, createCwdSessionEnv } from './sandbox.ts';
 import type {
 	AgentConfig,
 	AgentInit,
 	BashFactory,
 	BashLike,
 	FlueContext,
+	FlueEvent,
 	FlueEventCallback,
 	FlueHarness,
 	SandboxFactory,
@@ -39,12 +40,34 @@ export interface FlueContextConfig {
 
 /** Extends FlueContext with server-only methods. Agent handlers only see FlueContext. */
 export interface FlueContextInternal extends FlueContext {
+	emitEvent(event: FlueEvent): void;
+	subscribeEvent(callback: FlueEventCallback): () => void;
 	setEventCallback(callback: FlueEventCallback | undefined): void;
 }
 
 export function createFlueContext(config: FlueContextConfig): FlueContextInternal {
-	let currentEventCallback: FlueEventCallback | undefined;
+	const subscribers = new Set<FlueEventCallback>();
+	let handlerUnsubscribe: (() => void) | undefined;
+	let eventIndex = 0;
 	const initializedHarnessNames = new Set<string>();
+
+	const emitEvent: FlueEventCallback = (event) => {
+		const decorated = {
+			...event,
+			runId: config.runId,
+			eventIndex: eventIndex++,
+			timestamp: new Date().toISOString(),
+		};
+		for (const subscriber of subscribers) {
+			try {
+				Promise.resolve(subscriber(decorated)).catch((error) => {
+					console.error('[flue:subscriber] Event subscriber failed:', error);
+				});
+			} catch (error) {
+				console.error('[flue:subscriber] Event subscriber failed:', error);
+			}
+		}
+	};
 
 	const ctx: FlueContextInternal = {
 		get id() {
@@ -65,6 +88,18 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 
 		get req() {
 			return config.req;
+		},
+
+		log: {
+			info(message, attributes) {
+				emitEvent({ type: 'log', level: 'info', message, attributes: normalizeLogAttributes(attributes) });
+			},
+			warn(message, attributes) {
+				emitEvent({ type: 'log', level: 'warn', message, attributes: normalizeLogAttributes(attributes) });
+			},
+			error(message, attributes) {
+				emitEvent({ type: 'log', level: 'error', message, attributes: normalizeLogAttributes(attributes) });
+			},
 		},
 
 		async init(options?: AgentInit): Promise<FlueHarness> {
@@ -110,7 +145,7 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 					agentConfig,
 					env,
 					store,
-					currentEventCallback,
+					emitEvent,
 					options.tools,
 				);
 			} catch (error) {
@@ -119,12 +154,39 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 			}
 		},
 
+		emitEvent,
+
+		subscribeEvent(callback: FlueEventCallback): () => void {
+			subscribers.add(callback);
+			return () => subscribers.delete(callback);
+		},
+
 		setEventCallback(callback: FlueEventCallback | undefined): void {
-			currentEventCallback = callback;
+			handlerUnsubscribe?.();
+			handlerUnsubscribe = callback ? ctx.subscribeEvent(callback) : undefined;
 		},
 	};
 
 	return ctx;
+}
+
+function normalizeLogAttributes(
+	attributes: Record<string, unknown> | undefined,
+): Record<string, unknown> | undefined {
+	if (!attributes) return undefined;
+	if (!(attributes.error instanceof Error)) return attributes;
+	return {
+		...attributes,
+		error: serializeLogError(attributes.error),
+	};
+}
+
+function serializeLogError(error: Error): Record<string, unknown> {
+	return {
+		name: error.name,
+		message: error.message,
+		stack: error.stack,
+	};
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -191,39 +253,38 @@ async function resolveSessionEnv(
 // ─── @flue/sdk/client public API ────────────────────────────────────────────
 
 export { Type } from '@mariozechner/pi-ai';
+export type { McpServerConnection, McpServerOptions, McpTransport } from './mcp.ts';
 export { connectMcpServer } from './mcp.ts';
 
-export type { McpServerConnection, McpServerOptions, McpTransport } from './mcp.ts';
-
 export type {
-	FlueContext,
-	FlueHarness,
-	FlueFs,
-	FlueSessions,
-	FlueSession,
 	AgentInit,
-	ModelConfig,
-	FlueEvent,
-	FlueEventCallback,
-	SessionData,
-	SessionStore,
-	FileStat,
-	SandboxFactory,
 	BashFactory,
 	BashLike,
-	SessionEnv,
-	SessionOptions,
-	ProviderSettings,
+	FileStat,
+	FlueContext,
+	FlueEvent,
+	FlueEventCallback,
+	FlueFs,
+	FlueHarness,
+	FlueSession,
+	FlueSessions,
+	ModelConfig,
+	PromptModel,
 	PromptOptions,
 	PromptResponse,
 	PromptResultResponse,
 	PromptUsage,
-	PromptModel,
-	SkillOptions,
-	TaskOptions,
+	ProviderSettings,
+	SandboxFactory,
+	SessionData,
+	SessionEnv,
+	SessionOptions,
+	SessionStore,
 	ShellOptions,
 	ShellResult,
+	SkillOptions,
+	TaskOptions,
+	ThinkingLevel,
 	ToolDef,
 	ToolParameters,
-	ThinkingLevel,
 } from './types.ts';

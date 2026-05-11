@@ -1,8 +1,9 @@
 /** Shared per-agent HTTP dispatcher for the Node and Cloudflare targets. */
 
-import { parseJsonBody, toHttpResponse, toSseData } from '../errors.ts';
 import type { FlueContextInternal } from '../client.ts';
+import { parseJsonBody, toHttpResponse } from '../errors.ts';
 import { generateRunId } from './ids.ts';
+import type { RunStore } from './run-store.ts';
 
 /**
  * Agent handler signature — the default export of a `.flue/agents/<name>.ts`
@@ -78,6 +79,8 @@ export interface HandleAgentOptions {
 	 * mid-stream.
 	 */
 	runHandler?: RunHandlerFn;
+	/** Per-target run history store. If omitted, run persistence is disabled. */
+	runStore?: RunStore;
 }
 
 /**
@@ -102,7 +105,7 @@ export interface HandleAgentOptions {
  * already been validated as a POST against a registered agent.
  */
 export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Response> {
-	const { request, agentName, id, handler, createContext } = opts;
+	const { request, agentName, id, handler, createContext, runStore } = opts;
 	const startWebhook = opts.startWebhook ?? defaultStartWebhook;
 	const runHandler = opts.runHandler ?? defaultRunHandler;
 	const runId = generateRunId();
@@ -127,11 +130,13 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 				request,
 				createContext,
 				startWebhook,
+				runStore,
 			});
 		}
 
 		if (isSSE) {
 			return runSseMode({
+				agentName,
 				id,
 				runId,
 				handler,
@@ -139,10 +144,12 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 				request,
 				createContext,
 				runHandler,
+				runStore,
 			});
 		}
 
 		return runSyncMode({
+			agentName,
 			id,
 			runId,
 			handler,
@@ -150,17 +157,21 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 			request,
 			createContext,
 			runHandler,
+			runStore,
 		});
 	} catch (err) {
 		// toHttpResponse logs unknowns via flueLog.error — no extra console.error
 		// needed at this layer.
-		return toHttpResponse(err);
+		const response = toHttpResponse(err);
+		response.headers.set('X-Flue-Run-Id', runId);
+		return response;
 	}
 }
 
 // ─── Mode implementations ───────────────────────────────────────────────────
 
 interface ModeOptions {
+	agentName: string;
 	id: string;
 	runId: string;
 	handler: AgentHandler;
@@ -168,6 +179,7 @@ interface ModeOptions {
 	request: Request;
 	createContext: CreateContextFn;
 	runHandler: RunHandlerFn;
+	runStore?: RunStore;
 }
 
 interface WebhookOptions {
@@ -179,10 +191,11 @@ interface WebhookOptions {
 	request: Request;
 	createContext: CreateContextFn;
 	startWebhook: StartWebhookFn;
+	runStore?: RunStore;
 }
 
-function runWebhookMode(opts: WebhookOptions): Response {
-	const { agentName, id, runId, handler, payload, request, createContext, startWebhook } = opts;
+async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
+	const { agentName, id, runId, handler, payload, request, createContext, startWebhook, runStore } = opts;
 
 	// Webhook execution intentionally does NOT go through `runHandler`:
 	//
@@ -202,12 +215,21 @@ function runWebhookMode(opts: WebhookOptions): Response {
 	// before entering `runWithCloudflareContext`. The factory is pure today,
 	// but keeping the timing consistent across modes avoids surprises if it
 	// ever grows ambient-env dependencies.
-	const ctx = createContext(id, runId, payload, request);
+	const lifecycle = await createRunLifecycle({ agentName, id, runId, payload, request, createContext, runStore });
+	const { ctx } = lifecycle;
+	const unsubscribePersistence = subscribeRunStore(ctx, runStore, runId);
+	emitRunStart(lifecycle);
 	const run = async (): Promise<unknown> => {
 		try {
-			return await handler(ctx);
+			const result = await handler(ctx);
+			await emitRunEnd(lifecycle, { result, isError: false });
+			return result;
+		} catch (error) {
+			await emitRunEnd(lifecycle, { isError: true, error });
+			throw error;
 		} finally {
 			ctx.setEventCallback(undefined);
+			unsubscribePersistence();
 		}
 	};
 
@@ -226,7 +248,7 @@ function runWebhookMode(opts: WebhookOptions): Response {
 
 	return new Response(JSON.stringify({ status: 'accepted', runId }), {
 		status: 202,
-		headers: { 'content-type': 'application/json' },
+		headers: { 'content-type': 'application/json', 'X-Flue-Run-Id': runId },
 	});
 }
 
@@ -240,12 +262,12 @@ function runWebhookMode(opts: WebhookOptions): Response {
 const SSE_HEARTBEAT_MS = 25_000;
 
 function runSseMode(opts: ModeOptions): Response {
-	const { id, runId, handler, payload, request, createContext, runHandler } = opts;
+	const { agentName, id, runId, handler, payload, request, createContext, runHandler, runStore } = opts;
 
 	const { readable, writable } = new TransformStream();
 	const writer = writable.getWriter();
 	const encoder = new TextEncoder();
-	let eventId = 0;
+	let nextSseId = 0;
 	let isIdle = false;
 	let closed = false;
 
@@ -258,9 +280,12 @@ function runSseMode(opts: ModeOptions): Response {
 	// finish naturally; events written after disconnect are simply dropped.
 	const writeSSE = async (data: unknown, event: string): Promise<void> => {
 		if (closed) return;
+		const eventIndex = getEventIndex(data);
+		const id = eventIndex ?? nextSseId++;
+		if (eventIndex !== undefined) nextSseId = Math.max(nextSseId, eventIndex + 1);
 		const lines: string[] = [];
 		lines.push(`event: ${event}`);
-		lines.push(`id: ${eventId++}`);
+		lines.push(`id: ${id}`);
 		lines.push(`data: ${typeof data === 'string' ? data : JSON.stringify(data)}`);
 		lines.push('', '');
 		try {
@@ -287,33 +312,33 @@ function runSseMode(opts: ModeOptions): Response {
 		writeHeartbeat().catch(() => {});
 	}, SSE_HEARTBEAT_MS);
 
-	const ctx = createContext(id, runId, payload, request);
-	ctx.setEventCallback((event) => {
-		if (event.type === 'idle') isIdle = true;
-		writeSSE(event, event.type).catch(() => {});
-	});
-
 	// Spawn the body. Errors during execution surface as in-stream `error`
 	// events because the 200 + text/event-stream headers are already on the
 	// wire by the time we await this promise.
 	(async () => {
+		const lifecycle = await createRunLifecycle({ agentName, id, runId, payload, request, createContext, runStore });
+		const { ctx } = lifecycle;
+		ctx.setEventCallback((event) => {
+			if (event.type === 'idle') isIdle = true;
+			writeSSE(event, event.type).catch(() => {});
+		});
+		const unsubscribePersistence = subscribeRunStore(ctx, runStore, runId);
+		emitRunStart(lifecycle);
 		try {
 			const result = await runHandler(ctx, handler);
 			if (!isIdle) {
-				await writeSSE({ type: 'idle' }, 'idle');
+				ctx.emitEvent({ type: 'idle' });
 			}
-			await writeSSE(
-				{ type: 'result', data: result !== undefined ? result : null },
-				'result',
-			);
+			await emitRunEnd(lifecycle, { result, isError: false });
 		} catch (err) {
-			await writeSSE(toSseData(err), 'error');
 			if (!isIdle) {
-				await writeSSE({ type: 'idle' }, 'idle');
+				ctx.emitEvent({ type: 'idle' });
 			}
+			await emitRunEnd(lifecycle, { isError: true, error: err });
 		} finally {
 			clearInterval(heartbeat);
 			ctx.setEventCallback(undefined);
+			unsubscribePersistence();
 			closed = true;
 			try {
 				await writer.close();
@@ -328,22 +353,143 @@ function runSseMode(opts: ModeOptions): Response {
 			'content-type': 'text/event-stream',
 			'cache-control': 'no-cache',
 			connection: 'keep-alive',
+			'X-Flue-Run-Id': runId,
 		},
 	});
 }
 
 async function runSyncMode(opts: ModeOptions): Promise<Response> {
-	const { id, runId, handler, payload, request, createContext, runHandler } = opts;
-	const ctx = createContext(id, runId, payload, request);
+	const { agentName, id, runId, handler, payload, request, createContext, runHandler, runStore } = opts;
+	const lifecycle = await createRunLifecycle({ agentName, id, runId, payload, request, createContext, runStore });
+	const { ctx } = lifecycle;
+	const unsubscribePersistence = subscribeRunStore(ctx, runStore, runId);
+	let terminalResult: unknown = null;
+	const unsubscribeTerminal = ctx.subscribeEvent((event) => {
+		if (event.type === 'run_end' && !event.isError) terminalResult = event.result ?? null;
+	});
+	emitRunStart(lifecycle);
 	try {
 		const result = await runHandler(ctx, handler);
+		await emitRunEnd(lifecycle, { result, isError: false });
 		return new Response(
-			JSON.stringify({ result: result !== undefined ? result : null }),
-			{ headers: { 'content-type': 'application/json' } },
+			JSON.stringify({ result: terminalResult, _meta: { runId } }),
+			{ headers: { 'content-type': 'application/json', 'X-Flue-Run-Id': runId } },
 		);
+	} catch (error) {
+		await emitRunEnd(lifecycle, { isError: true, error });
+		throw error;
 	} finally {
 		ctx.setEventCallback(undefined);
+		unsubscribeTerminal();
+		unsubscribePersistence();
 	}
+}
+
+// ─── Run lifecycle ──────────────────────────────────────────────────────────
+
+interface RunLifecycleOptions {
+	agentName: string;
+	id: string;
+	runId: string;
+	payload: unknown;
+	request: Request;
+	createContext: CreateContextFn;
+	runStore?: RunStore;
+}
+
+interface RunLifecycle extends RunLifecycleOptions {
+	ctx: FlueContextInternal;
+	startedAt: string;
+	startedAtMs: number;
+}
+
+async function createRunLifecycle(options: RunLifecycleOptions): Promise<RunLifecycle> {
+	const startedAtMs = Date.now();
+	const startedAt = new Date(startedAtMs).toISOString();
+	const ctx = options.createContext(options.id, options.runId, options.payload, options.request);
+	await safeRunStore('createRun', () =>
+		options.runStore?.createRun({
+			runId: options.runId,
+			instanceId: options.id,
+			agentName: options.agentName,
+			startedAt,
+			payload: options.payload,
+		}),
+	);
+	return { ...options, ctx, startedAt, startedAtMs };
+}
+
+function emitRunStart(lifecycle: RunLifecycle): void {
+	lifecycle.ctx.emitEvent({
+		type: 'run_start',
+		runId: lifecycle.runId,
+		instanceId: lifecycle.id,
+		agentName: lifecycle.agentName,
+		startedAt: lifecycle.startedAt,
+		payload: lifecycle.payload,
+	});
+}
+
+async function emitRunEnd(
+	lifecycle: RunLifecycle,
+	input: { result?: unknown; isError: false } | { isError: true; error: unknown },
+): Promise<void> {
+	const endedAt = new Date().toISOString();
+	const durationMs = Date.now() - lifecycle.startedAtMs;
+	const result = input.isError ? undefined : input.result;
+	const error = input.isError ? serializeError(input.error) : undefined;
+	lifecycle.ctx.emitEvent({
+		type: 'run_end',
+		runId: lifecycle.runId,
+		result: result === undefined ? null : result,
+		isError: input.isError,
+		error,
+		durationMs,
+	});
+	await safeRunStore('endRun', () =>
+		lifecycle.runStore?.endRun({
+			runId: lifecycle.runId,
+			endedAt,
+			isError: input.isError,
+			durationMs,
+			result,
+			error,
+		}),
+	);
+}
+
+function subscribeRunStore(
+	ctx: FlueContextInternal,
+	runStore: RunStore | undefined,
+	runId: string,
+): () => void {
+	if (!runStore) return () => {};
+	return ctx.subscribeEvent((event) => {
+		runStore.appendEvent(runId, event).catch((error) => {
+			console.error('[flue:run-store] appendEvent failed:', error);
+		});
+	});
+}
+
+async function safeRunStore(label: string, fn: () => Promise<void> | undefined): Promise<void> {
+	try {
+		await fn();
+	} catch (error) {
+		console.error(`[flue:run-store] ${label} failed:`, error);
+	}
+}
+
+function serializeError(error: unknown): unknown {
+	if (error instanceof Error) {
+		return { name: error.name, message: error.message };
+	}
+	return error;
+}
+
+function getEventIndex(data: unknown): number | undefined {
+	if (typeof data !== 'object' || data === null) return undefined;
+	const value = (data as { eventIndex?: unknown }).eventIndex;
+	return typeof value === 'number' ? value : undefined;
 }
 
 // ─── Defaults ───────────────────────────────────────────────────────────────

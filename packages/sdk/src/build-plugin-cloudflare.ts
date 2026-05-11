@@ -1,17 +1,17 @@
 /** Cloudflare build plugin. Produces a Worker + DO entry point with SSE/webhook/sync modes. */
 import * as path from 'node:path';
-import type { BuildContext, BuildPlugin } from './types.ts';
 import {
-	readUserWranglerConfig,
-	validateUserWranglerConfig,
-	mergeFlueAdditions,
-	stripNoisyWranglerDefaults,
-	writeDeployRedirectIfMissing,
-	detectSandboxBindings,
 	assertSandboxPackageInstalled,
 	computeFlueMigrations,
+	detectSandboxBindings,
 	type FlueAdditions,
+	mergeFlueAdditions,
+	readUserWranglerConfig,
+	stripNoisyWranglerDefaults,
+	validateUserWranglerConfig,
+	writeDeployRedirectIfMissing,
 } from './cloudflare-wrangler-merge.ts';
+import type { BuildContext, BuildPlugin } from './types.ts';
 
 export class CloudflarePlugin implements BuildPlugin {
 	name = 'cloudflare';
@@ -109,6 +109,8 @@ import { Bash, InMemoryFs } from 'just-bash';
 import {
   createFlueContext,
   InMemorySessionStore,
+  InMemoryRunStore,
+  createDurableRunStore,
   bashFactoryToSessionEnv,
   resolveModel,
   handleAgentRequest,
@@ -215,6 +217,7 @@ function resolveSandbox(sandbox) {
 
 // Fallback in-memory store (used if no DO storage is available).
 const memoryStore = new InMemorySessionStore();
+const memoryRunStore = new InMemoryRunStore();
 
 // Create a DO-backed session store from the Durable Object's SQL storage.
 function createDOStore(sql) {
@@ -263,6 +266,12 @@ function createContextForRequest(id, runId, payload, doInstance, req) {
   });
 }
 
+function createRunStoreForRequest(doInstance) {
+  return doInstance?.ctx?.storage?.sql
+    ? createDurableRunStore(doInstance.ctx.storage.sql)
+    : memoryRunStore;
+}
+
 function runWithInstanceContext(doInstance, fn) {
   return runWithCloudflareContext(
     { env: doInstance.env, agentInstance: doInstance, storage: doInstance.ctx.storage },
@@ -306,6 +315,7 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
     agentName,
     id,
     handler,
+    runStore: createRunStoreForRequest(doInstance),
     createContext: (id_, runId, payload, req) => createContextForRequest(id_, runId, payload, doInstance, req),
     startWebhook: (runId, run) => {
       const wrapped = (fiber) => {

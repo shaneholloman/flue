@@ -33,17 +33,17 @@
  * `app.ts` files call `flue()` at top level.
  */
 
-import { Hono } from 'hono';
 import type { MiddlewareHandler } from 'hono';
-import { toHttpResponse, validateAgentRequest } from '../errors.ts';
-import { RouteNotFoundError } from '../errors.ts';
+import { Hono } from 'hono';
+import { RouteNotFoundError, toHttpResponse, validateAgentRequest } from '../errors.ts';
 import {
-	handleAgentRequest,
 	type AgentHandler,
 	type CreateContextFn,
+	handleAgentRequest,
 	type RunHandlerFn,
 	type StartWebhookFn,
 } from './handle-agent.ts';
+import type { RunStore } from './run-store.ts';
 
 /**
  * Runtime configuration for {@link flue}, seeded by the generated server
@@ -92,6 +92,9 @@ export interface FlueRuntime {
 
 	/** Optional Node foreground handler wrapper. Defaults to direct invocation. */
 	runHandler?: RunHandlerFn;
+
+	/** Node run history store. Optional so existing generated entries fail soft. */
+	runStore?: RunStore;
 
 	// ─── Cloudflare-only ────────────────────────────────────────────────────
 
@@ -235,6 +238,7 @@ const agentRouteHandler: MiddlewareHandler = async (c) => {
 			createContext: rt.createContext!,
 			startWebhook: rt.startWebhook,
 			runHandler: rt.runHandler,
+			runStore: rt.runStore,
 		});
 	}
 
