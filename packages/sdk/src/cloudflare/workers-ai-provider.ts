@@ -29,6 +29,7 @@ import {
 import { convertMessages } from '@mariozechner/pi-ai/openai-completions';
 import { CLOUDFLARE_AI_BINDING_API, type CloudflareAIBindingApi } from '../cloudflare-model.ts';
 import { getModelBinding } from '../runtime/providers.ts';
+import type { CloudflareGatewayOptions } from './gateway.ts';
 
 // ─── OpenAI-completions compat profile ──────────────────────────────────────
 
@@ -301,10 +302,12 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, StreamOp
 			// arbitrary ids through the unknown-model overload (see RunOverload).
 			// `returnRawResponse: true` + `stream: true` in the payload gives us
 			// the raw SSE Response we parse below.
+			const gateway = (model as { gateway?: CloudflareGatewayOptions }).gateway;
 			const response = (await (ai.run as unknown as RunOverload)(model.id, finalPayload, {
 				returnRawResponse: true,
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
+				...(gateway ? { gateway } : {}),
 			})) as Response;
 
 			await options?.onResponse?.(
@@ -538,7 +541,7 @@ type RunOverload = (
 		returnRawResponse?: boolean;
 		signal?: AbortSignal;
 		extraHeaders?: Record<string, string>;
-		gateway?: { id: string };
+		gateway?: CloudflareGatewayOptions;
 	},
 ) => Promise<Response | Record<string, unknown>>;
 

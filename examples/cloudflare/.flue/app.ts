@@ -14,6 +14,30 @@
 import { flue } from '@flue/sdk/app';
 import { Hono } from 'hono';
 
+// ─── Cloudflare AI Gateway (optional) ───────────────────────────────────────
+// The Flue build auto-registers a default `cloudflare` provider that wraps
+// `env.AI`. If you want every `cloudflare/...` model call routed through an
+// AI Gateway (for caching, logging, budgets, etc.), claim the prefix here:
+// because user `app.ts` imports run before the auto-registration (ESM
+// hoisting), your registration wins.
+//
+//   import { registerProvider } from '@flue/sdk/app';
+//   import { env } from 'cloudflare:workers';
+//
+//   registerProvider('cloudflare', {
+//     api: 'cloudflare-ai-binding',
+//     binding: env.AI,
+//     gateway: {
+//       id: 'my-gateway',
+//       // skipCache: false,
+//       // cacheTtl: 3360,
+//       // metadata: { tenant: 'acme' },
+//       // collectLog: true,
+//     },
+//   });
+//
+// Docs: https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/
+
 const app = new Hono();
 
 // Custom route — runs in the worker isolate, NOT inside an agent's

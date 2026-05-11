@@ -5,6 +5,7 @@ import {
 	type Api,
 	type Model,
 } from '@mariozechner/pi-ai';
+import type { CloudflareGatewayOptions } from '../cloudflare/gateway.ts';
 import {
 	CLOUDFLARE_AI_BINDING_API,
 	CLOUDFLARE_AI_BINDING_PROVIDER,
@@ -61,6 +62,12 @@ export interface CloudflareAIBindingRegistration {
 	 * matching pi-ai's catalog convention for Cloudflare-Workers-AI models.
 	 */
 	provider?: string;
+	/**
+	 * AI Gateway options forwarded to every `env.AI.run(...)` call routed
+	 * through this registration. See
+	 * https://developers.cloudflare.com/ai-gateway/integrations/worker-binding-methods/.
+	 */
+	gateway?: CloudflareGatewayOptions;
 }
 
 /**
@@ -98,6 +105,11 @@ export function registerProvider(
  */
 export function getRegisteredProviders(): ReadonlyMap<string, ProviderRegistration> {
 	return userModels;
+}
+
+/** Whether a URL prefix has already been registered. */
+export function hasRegisteredProvider(name: string): boolean {
+	return userModels.has(name);
 }
 
 /**
@@ -177,21 +189,23 @@ export function getProviderConfiguration(
 // ─── Model binding extension ────────────────────────────────────────────────
 
 /**
- * Resolved Model with the captured Workers AI binding attached as a non-pi-ai
- * extension field. The binding flows from the registration through the
- * resolved Model to the Workers AI stream function without going through
- * AsyncLocalStorage.
+ * Resolved Model with the captured Workers AI binding (and optional AI
+ * Gateway options) attached as non-pi-ai extension fields. Flows from the
+ * registration through the resolved Model to the Workers AI stream
+ * function without going through AsyncLocalStorage.
  */
 export type ModelWithBinding<TApi extends Api> = Model<TApi> & {
 	binding: CloudflareAIBinding;
+	gateway?: CloudflareGatewayOptions;
 };
 
-/** Attach a Workers AI binding to a Model literal. */
+/** Attach a Workers AI binding (and optional gateway options) to a Model literal. */
 export function attachModelBinding<TApi extends Api>(
 	model: Model<TApi>,
 	binding: CloudflareAIBinding,
+	gateway?: CloudflareGatewayOptions,
 ): ModelWithBinding<TApi> {
-	return { ...model, binding } as ModelWithBinding<TApi>;
+	return { ...model, binding, gateway } as ModelWithBinding<TApi>;
 }
 
 /**
@@ -245,7 +259,7 @@ function buildModelFromRegistration(
 			contextWindow: 0,
 			maxTokens: 0,
 		};
-		return attachModelBinding(base, def.binding);
+		return attachModelBinding(base, def.binding, def.gateway);
 	}
 
 	return {

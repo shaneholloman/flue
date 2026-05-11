@@ -118,6 +118,7 @@ import {
   handleRunRouteRequest,
   configureFlueRuntime,
   createDefaultFlueApp,
+  hasRegisteredProvider,
 } from '@flue/sdk/internal';
 import {
   runWithCloudflareContext,
@@ -131,17 +132,18 @@ ${agentImports}
 ${userAppImport}
 
 // ─── Internal provider registrations ────────────────────────────────────────
-// Imports evaluate before this file's top-level body, so these built-ins
-// reserve the \`cloudflare\` prefix after any user app.ts registrations run.
+// User \`app.ts\` imports are hoisted above this body, so a user-supplied
+// \`registerProvider('cloudflare', ...)\` runs first and the guard below
+// preserves it (e.g. to attach AI Gateway options).
 
-// Wire-protocol handler for the cloudflare-ai-binding api.
 registerApiProvider(getCloudflareAIBindingApiProvider());
 
-// Capture the binding reference at module init; invoke it only per request.
-registerProvider('cloudflare', {
-  api: 'cloudflare-ai-binding',
-  binding: env.AI,
-});
+if (!hasRegisteredProvider('cloudflare')) {
+  registerProvider('cloudflare', {
+    api: 'cloudflare-ai-binding',
+    binding: env.AI,
+  });
+}
 
 // ─── Config ─────────────────────────────────────────────────────────────────
 

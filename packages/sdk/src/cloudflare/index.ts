@@ -9,3 +9,5 @@ export { runWithCloudflareContext, getCloudflareContext } from './context.ts';
 export type { CloudflareContext } from './context.ts';
 
 export { getCloudflareAIBindingApiProvider } from './workers-ai-provider.ts';
+
+export type { CloudflareGatewayOptions } from './gateway.ts';
