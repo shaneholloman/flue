@@ -1,4 +1,4 @@
-/** Shared run-history HTTP endpoints for Node and Cloudflare targets. */
+/** Run-history HTTP endpoints shared by the Node and Cloudflare targets. */
 
 import { InvalidRequestError, RunNotFoundError, RunStoreUnavailableError } from '../errors.ts';
 import type { FlueEvent } from '../types.ts';
@@ -21,12 +21,7 @@ const RUNS_MAX_LIMIT = 100;
 const EVENTS_DEFAULT_LIMIT = 100;
 const EVENTS_MAX_LIMIT = 1000;
 
-/**
- * Maximum number of events buffered between subscribing and finishing
- * replay during the replay-then-tail handoff. If exceeded, we fall back
- * to re-reading from the store after replay completes (correct, just
- * slightly slower).
- */
+/** Buffer cap for events published while a live stream is replaying history. */
 const REPLAY_BUFFER_CAP = 1000;
 
 export async function handleRunRouteRequest(opts: HandleRunRouteOptions): Promise<Response> {
@@ -72,33 +67,9 @@ async function getRunEvents(request: Request, store: RunStore, runId: string): P
 }
 
 /**
- * Replay-then-tail an event stream for a single run.
- *
- * Semantics:
- *
- *   - For an *already terminal* run, we replay all stored events (or those
- *     after `Last-Event-ID`) and close. There's nothing live to tail.
- *
- *   - For an *active* run:
- *       1. Subscribe to the live registry *first*. Incoming events are
- *          captured into a buffer while we read the durable replay.
- *       2. Read the durable replay from the store.
- *       3. Flush the replay to the client, deduplicating against the
- *          buffer (by `eventIndex`).
- *       4. Flush the buffer, then continue forwarding live events as they
- *          arrive.
- *       5. Close when `run_end` is observed, or when the client
- *          disconnects.
- *
- *   - `Last-Event-ID: <n>` (set by the browser's EventSource on
- *     reconnect, or by curl with `-H "Last-Event-ID: <n>"`):
- *       - Strict ascending replay of events with `eventIndex > n`.
- *       - Then, if the run is still active, switch to live tail.
- *       - Value `0` means "everything from the start".
- *
- * Subscriber registration always happens *before* we read the store
- * snapshot so we never miss the events that land between snapshot and
- * subscribe. The dedup pass handles overlap.
+ * Replay durable history, then tail live events for active runs.
+ * Subscribe-before-replay avoids dropping events produced during the
+ * store read; eventIndex dedup handles overlap.
  */
 async function streamRunEvents(
 	request: Request,
@@ -112,17 +83,12 @@ async function streamRunEvents(
 	const lastEventId = parseLastEventId(request.headers.get('last-event-id'));
 	const fromIndex = lastEventId === undefined ? undefined : lastEventId + 1;
 
-	// If terminal already, no live tailing needed — straight replay.
 	if (isTerminal(run)) {
 		const events = await store.getEvents(runId, fromIndex);
 		return sseResponse(encodeSseEvents(events));
 	}
 
-	// Active runs require a subscriber registry for live tailing. If the
-	// caller didn't wire one up, that's a programmer error in the
-	// target-specific entry — not something a client can recover from.
-	// Fail loudly here instead of silently degrading to replay-only,
-	// which would look like an instantly-completed run to the client.
+	// Active streams need the in-process registry; replay alone would close early.
 	if (!subscribers) {
 		throw new Error(
 			'[flue] Active run streaming requires a run subscriber registry, but none was ' +
@@ -144,9 +110,7 @@ function streamReplayThenTail(opts: ReplayThenTailOptions): Response {
 	const { store, subscribers, runId, fromIndex } = opts;
 	const encoder = new TextEncoder();
 
-	// Buffer events published between subscribe-time and end-of-replay.
-	// If the buffer overflows, we set `bufferOverflowed = true` and after
-	// replay we re-read from the store from the last index we sent.
+	// Buffered live events are deduped against the durable replay below.
 	let buffer: FlueEvent[] = [];
 	let bufferOverflowed = false;
 	let replayDone = false;
@@ -210,9 +174,6 @@ function streamReplayThenTail(opts: ReplayThenTailOptions): Response {
 
 			onLiveEvent = write;
 
-			// Kick off the replay→flush→live handoff. Errors thrown after the
-			// SSE headers are on the wire have nowhere to go on the response
-			// itself; surface them as in-stream `error` events instead.
 			(async () => {
 				try {
 					await runReplayPhase({
@@ -235,10 +196,6 @@ function streamReplayThenTail(opts: ReplayThenTailOptions): Response {
 							replayDone = true;
 						},
 					});
-
-					// At this point we're live. If the run completed during replay
-					// we may have already closed — nothing more to do. Otherwise,
-					// keep the stream open; new events arrive via `onLiveEvent`.
 				} catch (error) {
 					if (closed) return;
 					try {
@@ -253,7 +210,6 @@ function streamReplayThenTail(opts: ReplayThenTailOptions): Response {
 			})();
 		},
 		cancel() {
-			// Client disconnected. Release the subscription and stop heartbeats.
 			closed = true;
 			onClose?.();
 		},
@@ -288,16 +244,13 @@ async function runReplayPhase(opts: ReplayPhaseOptions): Promise<void> {
 		markReplayDone,
 	} = opts;
 
-	// Initial replay snapshot from the durable store.
 	const replay = await store.getEvents(runId, fromIndex);
 	for (const event of replay) {
 		write(event);
 	}
 
-	// Drain anything that landed in the buffer while we were reading. If
-	// the buffer overflowed, fall back to a second store read from
-	// lastSentIndex + 1 — this maintains correctness without unbounded
-	// memory.
+	// If the live buffer overflowed, re-read from the store rather than
+	// keeping an unbounded in-memory queue.
 	while (getBufferOverflowed()) {
 		resetBufferOverflowed();
 		const lastSent = getLastSentIndex();
@@ -308,7 +261,6 @@ async function runReplayPhase(opts: ReplayPhaseOptions): Promise<void> {
 		}
 	}
 
-	// Drain buffered events that aren't already covered by what we wrote.
 	const buffered = drainBuffer();
 	for (const event of buffered) {
 		const lastSent = getLastSentIndex();
@@ -322,7 +274,6 @@ async function runReplayPhase(opts: ReplayPhaseOptions): Promise<void> {
 		write(event);
 	}
 
-	// From here on, the subscriber listener forwards live events directly.
 	markReplayDone();
 }
 
@@ -363,12 +314,6 @@ function sseResponse(body: string | ReadableStream<Uint8Array>): Response {
 }
 
 function requireRunId(runId: string | undefined): string {
-	// Hono's path-param routing means this branch is normally
-	// unreachable — `:runId` is matched before the handler runs. The
-	// Cloudflare DO dispatcher constructs `HandleRunRouteOptions`
-	// directly though, and a future caller could too, so guard
-	// explicitly. An empty `runId` is a malformed URL (400), not a
-	// missing run (404).
 	if (!runId) {
 		throw new InvalidRequestError({ reason: 'Run id is required for this endpoint.' });
 	}

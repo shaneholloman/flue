@@ -475,11 +475,7 @@ export class Session implements FlueSession {
 		this.harness.subscribe(async (event) => {
 			switch (event.type) {
 				case 'agent_start':
-					// pi-agent-core's agent-start lifecycle event.
-					// Distinct from Flue's run_start (which the runtime
-					// emits directly in handle-agent.ts), and not part
-					// of Flue's wire vocabulary — left here for
-					// exhaustiveness against the harness's event union.
+					// pi-agent-core lifecycle event; not part of Flue's wire vocabulary.
 					break;
 				case 'turn_start':
 					this.turnStartTime = Date.now();
@@ -572,24 +568,7 @@ export class Session implements FlueSession {
 	skill(name: string, options?: SkillOptions<v.GenericSchema | undefined>): CallHandle<any> {
 		return createCallHandle(options?.signal, (signal) =>
 			this.runOperation('skill', signal, async () => {
-				// Skills can be referenced two ways. The shape determines the
-				// per-call user-message format; the model reads the file
-				// itself in both cases.
-				//
-				//   1. By registered name. Looked up in `this.config.skills`,
-				//      populated at init time from `.agents/skills/*/SKILL.md`
-				//      frontmatter. The system prompt's "Available Skills"
-				//      list tells the model name + description + convention,
-				//      so the per-call message just identifies the skill.
-				//
-				//   2. By relative path under `.agents/skills/` (e.g.
-				//      `'triage/reproduce.md'`). The skill isn't in the
-				//      registry, so we hand the model the resolved absolute
-				//      path explicitly. Triggered only when `name` looks
-				//      like a path (contains `/` or ends in `.md`/`.markdown`)
-				//      — otherwise typos of registered names fail fast with
-				//      a helpful error rather than silently fall through to
-				//      a path lookup that's also going to miss.
+				// Registered skill names and relative skill paths use different prompts.
 				const looksLikePath = name.includes('/') || /\.(md|markdown)$/i.test(name);
 				const schema = resolveSchemaOption(options);
 
@@ -659,12 +638,6 @@ export class Session implements FlueSession {
 				// real tool calls, and removes the synthetic-user-message
 				// shape that earlier versions of this method produced.
 				//
-				// Concretely we emit the same tool_start/tool_call events the
-				// harness emits for LLM-driven tool calls, and we append a
-				// (user request, assistant tool_use, toolResult) message
-				// triple to history. The toolCallId we generate here matches
-				// the one referenced by the toolResult, just like a real
-				// tool-use round.
 				const toolCallId = crypto.randomUUID();
 				const toolStartMs = Date.now();
 
@@ -1150,13 +1123,7 @@ export class Session implements FlueSession {
 				});
 				return result;
 			} catch (error) {
-				// After the signal aborts, anything thrown downstream is
-				// post-abort fallout (harness, tools, compaction). Surface
-				// a single AbortError shape to callers. Failures propagate
-				// to the caller via throw — operation-end events
-				// (task/tool_call isError) carry the same
-				// information for in-process observers, so we don't emit a
-				// separate 'error' event here.
+				// Normalize post-abort fallout to a single AbortError for callers.
 				const surfaced = signal?.aborted ? abortErrorFor(signal) : error;
 				this.emit({
 					type: 'operation',
@@ -1207,19 +1174,7 @@ export class Session implements FlueSession {
 		}
 	}
 
-	/**
-	 * Append the three-message conversational triple that represents a
-	 * `session.shell()` call in the message history:
-	 *
-	 *   1. user        — out-of-band request to run the command
-	 *   2. assistant   — synthetic turn whose content is a single bash
-	 *                    tool_use block (matching the shape pi-ai's
-	 *                    providers produce when the LLM itself calls bash)
-	 *   3. toolResult  — the bash output, keyed to the same toolCallId
-	 *
-	 * This makes a session.shell() call indistinguishable from an
-	 * LLM-issued bash tool call when later turns read the transcript.
-	 */
+	/** Append a `session.shell()` call as an LLM-shaped bash tool exchange. */
 	private async appendShellTriple(
 		toolCallId: string,
 		args: Record<string, unknown>,

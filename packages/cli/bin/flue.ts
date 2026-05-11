@@ -12,17 +12,7 @@ import {
 import { determineAgent } from '@vercel/detect-agent';
 import { CATEGORY_ROOTS, CONNECTORS } from './_connectors.generated.ts';
 
-/**
- * Resolve the merged config for a CLI command. The CLI's responsibility is
- * narrow:
- *
- *   1. Build the `inline` overrides from the flags the user actually passed
- *      (an unset flag means `undefined`, so the config file or default wins).
- *   2. Tell `resolveConfig` where to start searching for `flue.config.ts`:
- *      `--root` if given (mirrors Vite's `--root`), otherwise cwd.
- *   3. Hand back a fully-resolved {@link FlueConfig} for the rest of the
- *      command to consume.
- */
+/** Resolve CLI flags, config file values, and defaults into one config. */
 async function resolveCliConfig(args: {
 	target?: 'node' | 'cloudflare';
 	explicitRoot: string | undefined;
@@ -982,11 +972,7 @@ async function run(args: RunArgs) {
 	const output = cfg.output;
 	const serverPath = path.join(output, 'server.mjs');
 
-	// 0. Resolve --env paths up front so a typo errors before we kick
-	//    off a build. Resolves relative to root (the project root)
-	//    so users author --env paths the way they think about them, not
-	//    relative to wherever they happened to redirect the build via
-	//    --output.
+	// Resolve --env paths relative to the project root before building.
 	let resolvedEnvFiles: string[];
 	try {
 		resolvedEnvFiles = resolveEnvFiles(args.envFiles, root);
@@ -999,7 +985,6 @@ async function run(args: RunArgs) {
 	}
 	const fileEnv = parseEnvFiles(resolvedEnvFiles);
 
-	// 1. Build
 	try {
 		await build({ root, output, target: cfg.target });
 	} catch (err) {
@@ -1007,12 +992,9 @@ async function run(args: RunArgs) {
 		process.exit(1);
 	}
 
-	// 2. Pick a port
 	const port = args.port || (await findPort());
 
-	// 3. Start server. We launch the child with cwd=root so the
-	//    server resolves user dependencies, AGENTS.md, etc. relative to
-	//    the project root regardless of where the build artifacts ended up.
+	// Run the child from the project root so it resolves user files there.
 	console.error(`[flue] Starting server on port ${port}...`);
 	serverProcess = startServer(serverPath, port, fileEnv, root);
 
@@ -1062,7 +1044,6 @@ async function run(args: RunArgs) {
 		}
 	}
 
-	// 7. Print result and exit
 	if (outcome.error) {
 		console.error(`[flue] Agent error: ${outcome.error}`);
 		stopServer();
@@ -1180,10 +1161,7 @@ function renderRunsTable(runs: RunSummary[]): string {
 	return `${header}\n${body}`;
 }
 
-/**
- * SSE parser. Accumulates `event:`, `id:`, and `data:` lines into one
- * record per blank-line-terminated frame, then yields the parsed JSON.
- */
+/** Minimal SSE parser for Flue's JSON event stream. */
 async function* iterateSse(res: Response): AsyncIterableIterator<{
 	type: string;
 	id: string | null;
@@ -1223,13 +1201,7 @@ async function* iterateSse(res: Response): AsyncIterableIterator<{
 	}
 }
 
-/**
- * Render a single event for `flue logs --format pretty`. We delegate the
- * core event-by-event rendering to {@link logEvent}, which is already
- * tuned for the `flue run` consumer. `run_start` / `run_end` /
- * `operation_*` aren't handled there (they're managed by the run-time
- * caller), so we surface them here as small banners.
- */
+/** Render a single event for `flue logs --format pretty`. */
 function logsRenderPretty(event: Record<string, unknown>): void {
 	const type = event.type;
 	if (type === 'run_start') {
@@ -1263,22 +1235,6 @@ function logsRenderPretty(event: Record<string, unknown>): void {
 	logEvent(event);
 }
 
-/**
- * `flue logs` entry point. Implements three behaviors:
- *
- *   - `--list`: render `GET /agents/<name>/<id>/runs` as a small table.
- *   - With explicit `runId`: stream `/runs/<runId>/stream`, honoring
- *     `--since` (via `Last-Event-ID`), `--types`, and `--follow|--no-follow`.
- *   - Default (no `runId`, no `--list`): look up the most recent run via
- *     `/runs?limit=1` and stream it. Follows if it's active, replays if
- *     it's terminal.
- *
- * Exit codes:
- *   - 0: clean termination (replay done, or follow ended with `run_end`
- *     `isError: false`)
- *   - 1: usage / HTTP / transport / parse errors
- *   - 2: `run_end` with `isError: true` (so scripts can detect failures)
- */
 async function logsCommand(args: LogsArgs): Promise<void> {
 	const base = args.server.replace(/\/+$/, '');
 	const agentPath = `${base}/agents/${encodeURIComponent(args.agent)}/${encodeURIComponent(args.id)}`;
@@ -1299,7 +1255,6 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 		return;
 	}
 
-	// Resolve target runId.
 	let resolvedRunId = args.runId;
 	let initialRun: RunSummary | undefined;
 	if (!resolvedRunId) {
@@ -1314,32 +1269,17 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 		resolvedRunId = initialRun!.runId;
 	}
 
-	// Decide follow behavior. Explicit flag wins; otherwise auto: follow
-	// active runs, replay terminal ones.
 	let shouldFollow: boolean;
 	if (args.follow !== undefined) {
 		shouldFollow = args.follow;
 	} else if (initialRun) {
 		shouldFollow = initialRun.status === 'active';
 	} else {
-		// Explicit `runId` without `--follow|--no-follow` — look it up to
-		// decide. This costs one extra HTTP roundtrip vs. just streaming
-		// blindly, which is fine for a CLI.
 		const run = await fetchJsonOrExit<RunSummary>(`${agentPath}/runs/${resolvedRunId}`);
 		shouldFollow = run.status === 'active';
 	}
 
-	// `--no-follow` against an active run shouldn't block on the live
-	// stream — switch to the pure-replay events endpoint instead so we
-	// snapshot whatever is persisted and exit. Terminal runs are fine
-	// either way (the stream endpoint replays and closes), but events
-	// is simpler for the no-follow path so we use it uniformly.
-	//
-	// `flue logs` is a dumb log pipe: --types and --limit just constrain
-	// what's emitted. If the user filters `run_end` out (or hits --limit
-	// before reaching it), exit code is 0 even for errored runs. That's
-	// the natural consequence of asking for filtered output; scripts that
-	// care about run status should not filter `run_end` away.
+	// One-shot mode snapshots persisted events and exits immediately.
 	if (!shouldFollow) {
 		const url = new URL(`${agentPath}/runs/${resolvedRunId}/events`);
 		if (args.since !== undefined) url.searchParams.set('after', String(args.since));
@@ -1359,8 +1299,6 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 		process.exit(exitCode);
 	}
 
-	// Follow path: subscribe to the live SSE stream and render events
-	// as they arrive.
 	const streamUrl = new URL(`${agentPath}/runs/${resolvedRunId}/stream`);
 	const headers: Record<string, string> = { accept: 'text/event-stream' };
 	if (args.since !== undefined) headers['last-event-id'] = String(args.since);
@@ -1389,7 +1327,6 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 		process.exit(1);
 	}
 
-	// Handle Ctrl-C cleanly during follow.
 	const ac = new AbortController();
 	const onSignal = () => ac.abort();
 	process.on('SIGINT', onSignal);

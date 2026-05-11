@@ -1,37 +1,4 @@
-/**
- * Public Hono sub-app exposing Flue's built-in agent route.
- *
- * Two consumers:
- *
- *   1. **User `app.ts` files.** Users mount this sub-app inside their own
- *      Hono app via `app.route('/', flue())`. The user owns the outer
- *      Hono and controls everything around Flue's routes (logging,
- *      auth, custom routes, framework-level error handlers).
- *
- *   2. **The default fallback when no `app.ts` exists.** {@link
- *      createDefaultFlueApp} wraps `flue()` in a thin outer Hono so the
- *      no-customization case ships the same routes as it always has.
- *
- * Only the agent route at `/agents/:name/:id` is exposed. `/health` and
- * `/agents` are NOT mounted — projects that want them add them in their
- * own `app.ts`. The magic surface stays minimal; users opt in to
- * whatever shape of liveness / introspection endpoint they actually
- * want.
- *
- * Targets diverge inside the agent route:
- *
- *   - **Node**: dispatches in-process via `handleAgentRequest` against
- *     the seeded handler map.
- *   - **Cloudflare**: forwards to `routeAgentRequest()` (provided by
- *     the seeded runtime), which reaches the per-agent Durable Object
- *     class. The DO's `onRequest` then calls `handleAgentRequest`
- *     itself with the CF-specific keepalive / fiber wrappers.
- *
- * The split is invisible to the user. They `import { flue } from
- * '@flue/sdk/app'` and mount it the same way regardless of target. See
- * {@link configureFlueRuntime} for the seeding contract that lets user
- * `app.ts` files call `flue()` at top level.
- */
+/** Public Hono sub-app exposing Flue's built-in agent routes. */
 
 import type { MiddlewareHandler } from 'hono';
 import { Hono } from 'hono';
@@ -100,14 +67,10 @@ export interface FlueRuntime {
 	/** Optional Node foreground handler wrapper. Defaults to direct invocation. */
 	runHandler?: RunHandlerFn;
 
-	/** Node run history store. Optional so existing generated entries fail soft. */
+	/** Node run history store. */
 	runStore?: RunStore;
 
-	/**
-	 * Node in-process per-run subscriber registry, paired with the run
-	 * store and used by the run-stream route for live tailing. Optional
-	 * — if omitted, run-stream falls back to durable replay only.
-	 */
+	/** Node in-process registry used for live run-stream tailing. */
 	runSubscribers?: RunSubscriberRegistry;
 
 	// ─── Cloudflare-only ────────────────────────────────────────────────────
@@ -126,11 +89,6 @@ export interface FlueRuntime {
 	) => Promise<Response | null>;
 }
 
-/**
- * Map from Hono mount path to the run-route action it dispatches. Kept as
- * a table rather than four `app.all(...)` calls so adding a new run-route
- * is a one-line change in the route schema and the action union together.
- */
 const RUN_ROUTES: ReadonlyArray<readonly [string, HandleRunRouteOptions['action']]> = [
 	['/agents/:name/:id/runs', 'list'],
 	['/agents/:name/:id/runs/:runId', 'get'],

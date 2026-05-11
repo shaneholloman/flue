@@ -221,19 +221,7 @@ function resolveSandbox(sandbox) {
 const memoryStore = new InMemorySessionStore();
 const memoryRunStore = new InMemoryRunStore();
 
-// Per-isolate in-process subscriber registry for live run-stream tailing.
-//
-// Cloudflare may co-locate multiple DOs in a single isolate, so this Map
-// can be shared across DOs in the same isolate — but that's safe:
-//   - Run ids are globally unique (ULID), so two DOs can never publish
-//     events to the same bucket.
-//   - routeAgentRequest pins a run id to the owning Agent DO, so a
-//     subscriber for run X arriving via /runs/<X>/stream is forwarded
-//     into the same DO that's producing X's events.
-//
-// In other words: shared Map, isolated keyspace. The "per-DO" property
-// the live-tail path needs is provided by the run-id keyspace, not by
-// the registry itself.
+// Module-scoped per-isolate registry; run ids isolate buckets across DOs.
 const runSubscribers = createRunSubscriberRegistry();
 
 // Create a DO-backed session store from the Durable Object's SQL storage.
@@ -369,16 +357,7 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
   });
 }
 
-// Parse run-route URLs against the documented shape:
-//
-//   /agents/<name>/<id>/runs                        → list
-//   /agents/<name>/<id>/runs/<runId>                → get
-//   /agents/<name>/<id>/runs/<runId>/events         → events
-//   /agents/<name>/<id>/runs/<runId>/stream         → stream
-//
-// Strict positional parsing (vs. \`segments.indexOf('runs')\`) so an
-// instance id of "runs" doesn't get reinterpreted as the marker
-// segment and silently misroute.
+// Positional parse so an instance id of "runs" is not treated as the marker.
 function parseRunRoute(request) {
   const segments = new URL(request.url).pathname.split('/').filter(Boolean);
   if (segments.length < 4) return null;

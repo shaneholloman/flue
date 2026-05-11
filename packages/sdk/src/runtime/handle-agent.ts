@@ -222,24 +222,8 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 		runSubscribers,
 	} = opts;
 
-	// Webhook execution intentionally does NOT go through `runHandler`:
-	//
-	//   - On Cloudflare, fire-and-forget runs through `runFiber` (provided by
-	//     the caller's `startWebhook`), which already takes care of keeping
-	//     the DO alive across the request lifetime. Layering `keepAliveWhile`
-	//     on top would be redundant.
-	//   - On Node, there's nothing to wrap in either mode.
-	//
-	// The handler runs directly here; the caller's `startWebhook` is the
-	// only execution-context wrapper.
-	//
-	// `ctx` is created up here (outside `run`) so it lands outside any
-	// AsyncLocalStorage scope the caller's `startWebhook` may set up. This
-	// matches the pre-refactor sync/SSE behavior and the pre-refactor
-	// Cloudflare webhook behavior, where ctx construction always happened
-	// before entering `runWithCloudflareContext`. The factory is pure today,
-	// but keeping the timing consistent across modes avoids surprises if it
-	// ever grows ambient-env dependencies.
+	// Webhook mode relies on `startWebhook` for target-specific execution
+	// context (`runFiber` on Cloudflare), so it does not also use `runHandler`.
 	const lifecycle = await createRunLifecycle({
 		agentName,
 		id,
@@ -274,13 +258,7 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 }
 
 /**
- * Heartbeat interval for SSE streams (agent runs and run history streams).
- *
- * The exact cadence matters less than the existence of *some* periodic
- * payload — the heartbeat exists to defeat intermediary timeouts (Node's
- * default 300s requestTimeout, CDN proxies, browser EventSource reconnect
- * heuristics). 15s is conservative against common proxy timeouts and is
- * what {@link handleRunRouteRequest} also imports.
+ * Shared heartbeat interval for SSE streams.
  */
 export const SSE_HEARTBEAT_MS = 15_000;
 
@@ -304,17 +282,8 @@ function runSseMode(opts: ModeOptions): Response {
 	let isIdle = false;
 	let closed = false;
 
-	// Write helpers swallow errors from `writer.write` because once a stream
-	// fails (typically on client disconnect) every subsequent write fails
-	// the same way. Without the catch, the FIRST write after disconnect
-	// would throw out of the IIFE below as an unhandled rejection, and any
-	// `error`-event recovery write inside the catch block would itself
-	// throw — making cleanup unreliable. Swallowing here lets the handler
-	// finish naturally; events written after disconnect are simply dropped.
-	//
-	// `eventIndex` is non-optional on decorated events (see `client.ts`),
-	// so the SSE `id:` field always reflects the durable position — which
-	// is what `Last-Event-ID` reconnects depend on.
+	// Writes after client disconnect are intentionally dropped; the handler
+	// should still finish so run history can be finalized.
 	const writeSSE = async (data: unknown, eventType: string): Promise<void> => {
 		if (closed) return;
 		const eventIndex = getEventIndex(data) ?? 0;
@@ -339,17 +308,10 @@ function runSseMode(opts: ModeOptions): Response {
 		}
 	};
 
-	// Heartbeat keeps long-idle streams alive across intermediary timeouts
-	// (e.g. Node's default 300s request timeout — disabled at the server
-	// level for /agents routes, but the heartbeat is a defense-in-depth
-	// layer for any other proxies).
 	const heartbeat = setInterval(() => {
 		writeHeartbeat().catch(() => {});
 	}, SSE_HEARTBEAT_MS);
 
-	// Spawn the body. Errors during execution surface as in-stream `error`
-	// events because the 200 + text/event-stream headers are already on the
-	// wire by the time we await this promise.
 	(async () => {
 		const lifecycle = await createRunLifecycle({
 			agentName,
@@ -372,17 +334,12 @@ function runSseMode(opts: ModeOptions): Response {
 				try {
 					return await runHandler(ctx, handler);
 				} finally {
-					// `idle` always fires before `run_end` (which the
-					// wrapper emits) so the wire order matches what
-					// in-process consumers saw before Phase 6.
+					// Keep idle before the terminal run event on the SSE wire.
 					if (!isIdle) ctx.emitEvent({ type: 'idle' });
 				}
 			});
 		} catch {
-			// `withRunLifecycle` already emitted `run_end` with the error
-			// envelope and persisted it durably. The body's errors are
-			// already visible to the SSE client via the `setEventCallback`
-			// above; we swallow here so the IIFE doesn't reject.
+			// The lifecycle wrapper has already emitted the terminal event.
 		} finally {
 			clearInterval(heartbeat);
 			ctx.setEventCallback(undefined);
@@ -476,17 +433,7 @@ async function createRunLifecycle(options: RunLifecycleOptions): Promise<RunLife
 }
 
 /**
- * Wrap the per-mode body with the run lifecycle:
- *
- *   1. Subscribe the durable + live fan-out (all events except `run_end`).
- *   2. Emit `run_start`.
- *   3. Run the body.
- *   4. Emit `run_end` durably-before-live (see {@link emitRunEnd}).
- *   5. Tear down the fan-out subscription.
- *
- * Centralizing this eliminates three near-identical envelopes in the
- * mode functions and — critically — guarantees the run-end ordering
- * invariant holds for every mode.
+ * Wrap all invocation modes with the same run-start/run-end envelope.
  */
 async function withRunLifecycle<T>(
 	lifecycle: RunLifecycle,
@@ -520,30 +467,8 @@ function emitRunStart(lifecycle: RunLifecycle): void {
 /**
  * Emit `run_end` and finalize the run.
  *
- * Ordering invariant — "durable terminal state happens before observable
- * terminal state":
- *
- *   1. `appendEvent(run_end)` durably. We intercept `run_end` in
- *      {@link subscribeRunFanout} so the generic fan-out does NOT
- *      double-persist it — that path can't await the write, which is
- *      exactly what we need to control here.
- *   2. `publish(run_end)` to live subscribers. Any client subscribed
- *      before this fires sees `run_end` and closes naturally.
- *   3. `endRun` durably, flipping the run row to `completed`/`errored`.
- *      Only after this point does `getRun` report terminal status; any
- *      client connecting from now takes the pure-replay path.
- *   4. `complete(runId)` releases the live subscriber registry bucket.
- *
- * This closes the race where a client opens `/runs/<runId>/stream`
- * between `publish(run_end)` and `endRun`: under the old order the
- * stream would take the live path, miss the already-published
- * `run_end`, and hang. Now the durable-snapshot path always sees
- * `run_end` first.
- *
- * `ctx.emitEvent` is still called for `run_end` so in-process consumers
- * (other `ctx.subscribeEvent` listeners, the SSE-mode write callback)
- * receive it on the same channel as every other event. The fan-out's
- * `run_end` filter prevents double-persistence / double-publish.
+ * Terminal ordering matters for `/runs/:runId/stream`: append `run_end`
+ * before marking the run terminal, then publish and close subscribers.
  */
 async function emitRunEnd(
 	lifecycle: RunLifecycle,
@@ -558,10 +483,7 @@ async function emitRunEnd(
 
 	const { runStore, runSubscribers, runId } = lifecycle;
 
-	// Construct the event and decorate it through the same channel as
-	// every other event so eventIndex/timestamp are continuous.
-	// `subscribeRunFanout` will see this through `subscribeEvent` and
-	// skip it (run_end is handled here, not in the fan-out).
+	// Decorate through the shared event path so eventIndex/timestamp stay continuous.
 	const decorated = lifecycle.ctx.emitEvent({
 		type: 'run_end',
 		runId,
@@ -571,17 +493,12 @@ async function emitRunEnd(
 		durationMs,
 	});
 
-	// 1. Durable append BEFORE any observer can react to terminal state.
 	await safeRunStore('appendEvent(run_end)', () =>
 		runStore?.appendEvent(runId, decorated),
 	);
 
-	// 2. Notify live subscribers. They get the same decorated event the
-	//    durable snapshot now has.
 	runSubscribers?.publish(runId, decorated);
 
-	// 3. Flip the run row to terminal. After this, every `/stream` call
-	//    takes the pure-replay path.
 	await safeRunStore('endRun', () =>
 		runStore?.endRun({
 			runId,
@@ -593,33 +510,12 @@ async function emitRunEnd(
 		}),
 	);
 
-	// 4. Release the registry bucket. No new subscribers should arrive
-	//    after (3), but any that did during the (2)→(3) gap have already
-	//    received `run_end` and closed.
 	runSubscribers?.complete(runId);
 }
 
 /**
- * Fan-out: durable-before-live for every event EXCEPT `run_end`.
- *
- * Non-`run_end` events:
- *   - `await runStore.appendEvent(...)` first.
- *   - Then `runSubscribers.publish(...)` synchronously.
- *
- * `run_end` is intentionally skipped here; {@link emitRunEnd} handles
- * its durable-append, publish, and the terminal `endRun` transition in
- * a single controlled sequence (see emitRunEnd's doc for the
- * invariant).
- *
- * Writes are serialized through a per-run promise chain so durable
- * persistence happens in emission order. Without this, two events
- * emitted in the same tick would launch concurrent `appendEvent` calls
- * that could interleave between `await` points inside the store
- * implementation. `eventIndex` is monotonic (assigned at decoration
- * time) so reads can still sort correctly, but ORDER BY assumptions
- * and any append-side sequencing the store relies on would be broken.
- *
- * Both sinks are best-effort: errors are logged but never propagated.
+ * Persist non-terminal events before publishing them to live subscribers.
+ * `run_end` is handled separately by {@link emitRunEnd}.
  */
 function subscribeRunFanout(lifecycle: RunLifecycle): () => void {
 	const { ctx, runStore, runSubscribers, runId } = lifecycle;
