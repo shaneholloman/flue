@@ -84,6 +84,7 @@ export class Harness implements FlueHarness {
 		}
 
 		const storageKey = createSessionStorageKey(this.instanceId, this.name, sessionName);
+		const affinityKey = createSessionAffinityKey(this.instanceId, this.name, sessionName);
 		const existingData = await this.store.load(storageKey);
 		if (mode === 'get' && !existingData) {
 			throw new Error(`[flue] Session "${sessionName}" does not exist in harness "${this.name}".`);
@@ -101,6 +102,7 @@ export class Harness implements FlueHarness {
 		const session = new Session({
 			name: sessionName,
 			storageKey,
+			affinityKey,
 			config: this.config,
 			env: this.env,
 			store: this.store,
@@ -140,6 +142,7 @@ export class Harness implements FlueHarness {
 			skills: localContext.skills,
 		};
 		const storageKey = createSessionStorageKey(this.instanceId, this.name, sessionName);
+		const affinityKey = createSessionAffinityKey(this.instanceId, this.name, sessionName);
 		const data = createEmptySessionData();
 		data.metadata = {
 			parentSession: options.parentSession,
@@ -164,6 +167,7 @@ export class Harness implements FlueHarness {
 		return new Session({
 			name: sessionName,
 			storageKey,
+			affinityKey,
 			config: taskConfig,
 			env: taskEnv,
 			store: this.store,
@@ -191,6 +195,10 @@ function normalizeSessionName(name: string | undefined): string {
 
 function createSessionStorageKey(instanceId: string, harness: string, sessionName: string): string {
 	return `agent-session:${JSON.stringify([instanceId, harness, sessionName])}`;
+}
+
+function createSessionAffinityKey(instanceId: string, harness: string, sessionName: string): string {
+	return `${instanceId}::${harness}::${sessionName}`;
 }
 
 function createEmptySessionData(): SessionData {

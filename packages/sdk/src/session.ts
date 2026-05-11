@@ -93,6 +93,7 @@ type OperationKind = 'prompt' | 'skill' | 'task' | 'shell';
 interface SessionInitOptions {
 	name: string;
 	storageKey: string;
+	affinityKey: string;
 	config: AgentConfig;
 	env: SessionEnv;
 	store: SessionStore;
@@ -469,6 +470,7 @@ export class Session implements FlueSession {
 			getApiKey: (provider) => this.getProviderApiKey(provider),
 			onPayload: (payload, model) => this.applyProviderPayloadOverrides(payload, model),
 			toolExecution: 'parallel',
+			sessionId: options.affinityKey,
 		});
 
 		this.eventCallback = options.onAgentEvent;

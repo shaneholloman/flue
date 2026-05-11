@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Fixes & Other Changes
+
+- **Sessions now forward a stable affinity key to pi-ai as `sessionId`.** Derived from the `(instanceId, harnessName, sessionName)` triple as `<instanceId>::<harnessName>::<sessionName>`, this key is forwarded by pi-ai to providers that support session-aware prompt caching and routing (Anthropic, OpenAI Responses, OpenAI Codex, Workers AI via `x-session-affinity`, and others). Stable across runs of the same triple, distinct across different ones. Child task sessions get their own key automatically because their session name is `task:<parent>:<taskId>`.
+
 ## 0.5.0
 
 ### Breaking Changes
