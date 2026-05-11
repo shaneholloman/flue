@@ -61,6 +61,7 @@ function printUsage() {
 			'  flue build [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>]\n' +
 			'  flue init  --target <node|cloudflare> [--root <path>] [--force]\n' +
 			'  flue add   [<name>|<url>] [--category <category>] [--print]\n' +
+			'  flue logs  <agent> <id> [runId] [--server <url>] [--follow|-f|--no-follow] [--since <eventIndex>] [--types a,b,c] [--limit <n>] [--format pretty|json|ndjson] [--list]\n' +
 			'\n' +
 			'Commands:\n' +
 			'  dev    Long-running watch-mode dev server. Rebuilds and reloads on file changes.\n' +
@@ -68,6 +69,7 @@ function printUsage() {
 			'  build  Build a deployable artifact to ./dist (production deploys).\n' +
 			'  init   Scaffold a starter flue.config.ts in the target directory.\n' +
 			'  add    Install a connector. Pipes installation instructions for an AI coding agent to follow.\n' +
+			'  logs   Tail or replay structured run events from a running Flue server. Read-only — does not invoke the agent.\n' +
 			'\n' +
 			'Flags:\n' +
 			'  --root <path>        Project root. Default: current working directory.\n' +
@@ -98,6 +100,10 @@ function printUsage() {
 			'  flue add\n' +
 			'  flue add daytona | claude\n' +
 			'  flue add https://e2b.dev --category sandbox | claude\n' +
+			'  flue logs hello test-1                            # tail the most recent run\n' +
+			'  flue logs hello test-1 run_01H... --no-follow     # one-shot replay of a specific run\n' +
+			'  flue logs hello test-1 --list                     # list recent runs\n' +
+			'  flue logs hello test-1 --types tool_call,log,run_end --format json\n' +
 			'\n' +
 			'Note: set the model inside your agent via `init({ model: "provider/model-id" })` ' +
 			'or per-call `{ model: ... }` on prompt/skill/task.',
@@ -166,7 +172,33 @@ interface InitArgs {
 	force: boolean;
 }
 
-type ParsedArgs = RunArgs | BuildArgs | DevArgs | AddArgs | InitArgs;
+interface LogsArgs {
+	command: 'logs';
+	agent: string;
+	id: string;
+	/** Optional explicit run id. If omitted, the CLI picks the most recent run. */
+	runId: string | undefined;
+	/** Base URL of the running Flue server. */
+	server: string;
+	/**
+	 * Whether to keep streaming live events (`true`) or exit after the
+	 * initial replay (`false`). `undefined` means "auto" — follow if the
+	 * selected run is still active, replay-and-exit if it's already
+	 * terminal. CLI flags `--follow` / `--no-follow` set it explicitly.
+	 */
+	follow: boolean | undefined;
+	/** When set, treated as `Last-Event-ID` on the stream request. */
+	since: number | undefined;
+	/** Filter to a specific set of event types (comma-separated on the CLI). */
+	types: ReadonlySet<string> | undefined;
+	/** Cap event count for one-shot mode. Server applies it via `?limit=`. */
+	limit: number | undefined;
+	format: 'pretty' | 'json' | 'ndjson';
+	/** When true, list recent runs and exit instead of streaming events. */
+	list: boolean;
+}
+
+type ParsedArgs = RunArgs | BuildArgs | DevArgs | AddArgs | InitArgs | LogsArgs;
 
 function parseFlags(flags: string[]): {
 	target?: 'node' | 'cloudflare';
@@ -326,6 +358,100 @@ function parseAddArgs(rest: string[]): AddArgs {
 	return { command: 'add', name, category, print };
 }
 
+function parseLogsArgs(rest: string[]): LogsArgs {
+	const positional: string[] = [];
+	let server = `http://127.0.0.1:${DEFAULT_DEV_PORT}`;
+	let follow: boolean | undefined;
+	let since: number | undefined;
+	let types: ReadonlySet<string> | undefined;
+	let limit: number | undefined;
+	let format: LogsArgs['format'] = 'pretty';
+	let list = false;
+
+	for (let i = 0; i < rest.length; i++) {
+		const arg = rest[i]!;
+		if (arg === '--server') {
+			const value = rest[++i];
+			if (!value) {
+				console.error('Missing value for --server');
+				process.exit(1);
+			}
+			server = value;
+		} else if (arg === '--follow' || arg === '-f') {
+			follow = true;
+		} else if (arg === '--no-follow') {
+			follow = false;
+		} else if (arg === '--since') {
+			const value = rest[++i];
+			const parsed = Number.parseInt(value ?? '', 10);
+			if (!Number.isFinite(parsed) || parsed < 0) {
+				console.error('Invalid value for --since (expected a non-negative integer eventIndex)');
+				process.exit(1);
+			}
+			since = parsed;
+		} else if (arg === '--types') {
+			const value = rest[++i];
+			if (!value) {
+				console.error('Missing value for --types');
+				process.exit(1);
+			}
+			const parts = value
+				.split(',')
+				.map((t) => t.trim())
+				.filter(Boolean);
+			if (parts.length > 0) types = new Set(parts);
+		} else if (arg === '--limit') {
+			const value = rest[++i];
+			const parsed = Number.parseInt(value ?? '', 10);
+			if (!Number.isFinite(parsed) || parsed <= 0) {
+				console.error('Invalid value for --limit (expected a positive integer)');
+				process.exit(1);
+			}
+			limit = parsed;
+		} else if (arg === '--format') {
+			const value = rest[++i];
+			if (value !== 'pretty' && value !== 'json' && value !== 'ndjson') {
+				console.error(`Invalid value for --format: "${value}". Allowed: pretty, json, ndjson`);
+				process.exit(1);
+			}
+			format = value;
+		} else if (arg === '--list') {
+			list = true;
+		} else if (arg.startsWith('--')) {
+			console.error(`Unknown flag for \`flue logs\`: ${arg}`);
+			printUsage();
+			process.exit(1);
+		} else {
+			positional.push(arg);
+		}
+	}
+
+	if (positional.length < 2) {
+		console.error('Missing required arguments for `flue logs`: <agent> <id> [runId]');
+		printUsage();
+		process.exit(1);
+	}
+	if (positional.length > 3) {
+		console.error(`Unexpected extra arguments for \`flue logs\`: ${positional.slice(3).join(' ')}`);
+		printUsage();
+		process.exit(1);
+	}
+
+	return {
+		command: 'logs',
+		agent: positional[0]!,
+		id: positional[1]!,
+		runId: positional[2],
+		server,
+		follow,
+		since,
+		types,
+		limit,
+		format,
+		list,
+	};
+}
+
 function parseInitArgs(rest: string[]): InitArgs {
 	let target: 'node' | 'cloudflare' | undefined;
 	let explicitRoot: string | undefined;
@@ -382,6 +508,10 @@ function parseArgs(argv: string[]): ParsedArgs {
 
 	if (command === 'init') {
 		return parseInitArgs(rest);
+	}
+
+	if (command === 'logs') {
+		return parseLogsArgs(rest);
 	}
 
 	// `--target` is optional at parse time — the config file may supply it.
@@ -939,6 +1069,359 @@ async function run(args: RunArgs) {
 	stopServer();
 }
 
+// ─── `flue logs` ────────────────────────────────────────────────────────────
+
+interface RunSummary {
+	runId: string;
+	instanceId: string;
+	agentName: string;
+	status: 'active' | 'completed' | 'errored';
+	startedAt: string;
+	endedAt?: string;
+	isError?: boolean;
+	durationMs?: number;
+}
+
+/**
+ * Fetch JSON from a Flue endpoint with the canonical error envelope. On
+ * non-2xx, prints the envelope (or raw body fallback) to stderr and exits
+ * the process with code 1 — `flue logs` is a one-shot CLI, so propagating
+ * the error directly is simpler than threading it back to the caller.
+ */
+async function fetchJsonOrExit<T>(url: string): Promise<T> {
+	let res: Response;
+	try {
+		res = await fetch(url);
+	} catch (err) {
+		console.error(`[flue] Failed to reach Flue server at ${url}: ${err instanceof Error ? err.message : String(err)}`);
+		process.exit(1);
+	}
+	const rawBody = await res.text();
+	if (!res.ok) {
+		try {
+			const parsed = JSON.parse(rawBody);
+			if (parsed && typeof parsed === 'object' && parsed.error) {
+				const e = parsed.error;
+				console.error(`HTTP ${res.status} [${e.type ?? 'unknown'}]: ${e.message ?? ''}`);
+				if (e.details) {
+					for (const line of String(e.details).split('\n')) {
+						if (line) console.error(`  ${line}`);
+					}
+				}
+				process.exit(1);
+			}
+		} catch {
+			// fall through to raw-body fallback
+		}
+		console.error(`HTTP ${res.status}: ${rawBody}`);
+		process.exit(1);
+	}
+	try {
+		return JSON.parse(rawBody) as T;
+	} catch {
+		console.error(`[flue] Failed to parse JSON from ${url}: ${rawBody.slice(0, 256)}`);
+		process.exit(1);
+	}
+}
+
+function formatDuration(ms: number | undefined): string {
+	if (ms === undefined) return '';
+	if (ms < 1000) return `${ms}ms`;
+	if (ms < 60_000) return `${(ms / 1000).toFixed(2)}s`;
+	const m = Math.floor(ms / 60_000);
+	const s = ((ms % 60_000) / 1000).toFixed(1);
+	return `${m}m${s}s`;
+}
+
+function renderRunsTable(runs: RunSummary[]): string {
+	if (runs.length === 0) return '  (no runs)';
+	const rows = runs.map((r) => ({
+		runId: r.runId,
+		status: r.isError ? 'errored' : r.status,
+		startedAt: r.startedAt,
+		duration: formatDuration(r.durationMs),
+	}));
+	const w = (k: keyof (typeof rows)[number]) => Math.max(...rows.map((r) => r[k].length));
+	const wRunId = w('runId');
+	const wStatus = w('status');
+	const wStarted = w('startedAt');
+	const gap = '  ';
+	const header =
+		'  ' +
+		'runId'.padEnd(wRunId) +
+		gap +
+		'status'.padEnd(wStatus) +
+		gap +
+		'startedAt'.padEnd(wStarted) +
+		gap +
+		'duration';
+	const body = rows
+		.map(
+			(r) =>
+				'  ' +
+				r.runId.padEnd(wRunId) +
+				gap +
+				r.status.padEnd(wStatus) +
+				gap +
+				r.startedAt.padEnd(wStarted) +
+				gap +
+				r.duration,
+		)
+		.join('\n');
+	return `${header}\n${body}`;
+}
+
+/**
+ * SSE parser. Accumulates `event:`, `id:`, and `data:` lines into one
+ * record per blank-line-terminated frame, then yields the parsed JSON.
+ */
+async function* iterateSse(res: Response): AsyncIterableIterator<{
+	type: string;
+	id: string | null;
+	data: unknown;
+}> {
+	if (!res.body) return;
+	const decoder = new TextDecoder();
+	let buffer = '';
+	let pendingEvent: string | null = null;
+	let pendingId: string | null = null;
+	let pendingData = '';
+	for await (const chunk of res.body as AsyncIterable<Uint8Array>) {
+		buffer += decoder.decode(chunk, { stream: true });
+		const lines = buffer.split('\n');
+		buffer = lines.pop() ?? '';
+		for (const line of lines) {
+			if (line === '') {
+				if (pendingEvent && pendingData) {
+					let data: unknown;
+					try {
+						data = JSON.parse(pendingData);
+					} catch {
+						data = pendingData;
+					}
+					yield { type: pendingEvent, id: pendingId, data };
+				}
+				pendingEvent = null;
+				pendingId = null;
+				pendingData = '';
+				continue;
+			}
+			if (line.startsWith(':')) continue;
+			if (line.startsWith('event:')) pendingEvent = line.slice(6).trim();
+			else if (line.startsWith('id:')) pendingId = line.slice(3).trim();
+			else if (line.startsWith('data:')) pendingData += line.slice(5).trim();
+		}
+	}
+}
+
+/**
+ * Render a single event for `flue logs --format pretty`. We delegate the
+ * core event-by-event rendering to {@link logEvent}, which is already
+ * tuned for the `flue run` consumer. `run_start` / `run_end` /
+ * `operation_*` aren't handled there (they're managed by the run-time
+ * caller), so we surface them here as small banners.
+ */
+function logsRenderPretty(event: Record<string, unknown>): void {
+	const type = event.type;
+	if (type === 'run_start') {
+		const runId = String(event.runId ?? '');
+		const agent = String(event.agentName ?? '');
+		console.error(`[flue] run:start    ${runId}  agent=${agent}`);
+		return;
+	}
+	if (type === 'run_end') {
+		const runId = String(event.runId ?? '');
+		const duration = formatDuration(
+			typeof event.durationMs === 'number' ? event.durationMs : undefined,
+		);
+		if (event.isError) {
+			const err = event.error as { message?: string } | undefined;
+			console.error(`[flue] run:end      ${runId}  ERROR  ${err?.message ?? ''}  (${duration})`);
+		} else {
+			console.error(`[flue] run:end      ${runId}  ok  (${duration})`);
+		}
+		return;
+	}
+	if (type === 'operation_start' || type === 'operation') {
+		const kind = String(event.operationKind ?? event.kind ?? '');
+		const duration = formatDuration(
+			typeof event.durationMs === 'number' ? event.durationMs : undefined,
+		);
+		const tag = type === 'operation_start' ? 'op:start' : 'op:done';
+		console.error(`[flue] ${tag}      ${kind}${duration ? `  (${duration})` : ''}`);
+		return;
+	}
+	logEvent(event);
+}
+
+/**
+ * `flue logs` entry point. Implements three behaviors:
+ *
+ *   - `--list`: render `GET /agents/<name>/<id>/runs` as a small table.
+ *   - With explicit `runId`: stream `/runs/<runId>/stream`, honoring
+ *     `--since` (via `Last-Event-ID`), `--types`, and `--follow|--no-follow`.
+ *   - Default (no `runId`, no `--list`): look up the most recent run via
+ *     `/runs?limit=1` and stream it. Follows if it's active, replays if
+ *     it's terminal.
+ *
+ * Exit codes:
+ *   - 0: clean termination (replay done, or follow ended with `run_end`
+ *     `isError: false`)
+ *   - 1: usage / HTTP / transport / parse errors
+ *   - 2: `run_end` with `isError: true` (so scripts can detect failures)
+ */
+async function logsCommand(args: LogsArgs): Promise<void> {
+	const base = args.server.replace(/\/+$/, '');
+	const agentPath = `${base}/agents/${encodeURIComponent(args.agent)}/${encodeURIComponent(args.id)}`;
+
+	if (args.list) {
+		const url = new URL(`${agentPath}/runs`);
+		if (args.limit !== undefined) url.searchParams.set('limit', String(args.limit));
+		const body = await fetchJsonOrExit<{ runs: RunSummary[] }>(url.toString());
+		if (args.format === 'json' || args.format === 'ndjson') {
+			if (args.format === 'json') {
+				process.stdout.write(`${JSON.stringify(body.runs, null, 2)}\n`);
+			} else {
+				for (const r of body.runs) process.stdout.write(`${JSON.stringify(r)}\n`);
+			}
+		} else {
+			process.stdout.write(`${renderRunsTable(body.runs)}\n`);
+		}
+		return;
+	}
+
+	// Resolve target runId.
+	let resolvedRunId = args.runId;
+	let initialRun: RunSummary | undefined;
+	if (!resolvedRunId) {
+		const url = new URL(`${agentPath}/runs`);
+		url.searchParams.set('limit', '1');
+		const body = await fetchJsonOrExit<{ runs: RunSummary[] }>(url.toString());
+		if (body.runs.length === 0) {
+			console.error(`[flue] No runs found for ${args.agent}/${args.id}`);
+			process.exit(1);
+		}
+		initialRun = body.runs[0];
+		resolvedRunId = initialRun!.runId;
+	}
+
+	// Decide follow behavior. Explicit flag wins; otherwise auto: follow
+	// active runs, replay terminal ones.
+	let shouldFollow: boolean;
+	if (args.follow !== undefined) {
+		shouldFollow = args.follow;
+	} else if (initialRun) {
+		shouldFollow = initialRun.status === 'active';
+	} else {
+		// Explicit `runId` without `--follow|--no-follow` — look it up to
+		// decide. This costs one extra HTTP roundtrip vs. just streaming
+		// blindly, which is fine for a CLI.
+		const run = await fetchJsonOrExit<RunSummary>(`${agentPath}/runs/${resolvedRunId}`);
+		shouldFollow = run.status === 'active';
+	}
+
+	// `--no-follow` against an active run shouldn't block on the live
+	// stream — switch to the pure-replay events endpoint instead so we
+	// snapshot whatever is persisted and exit. Terminal runs are fine
+	// either way (the stream endpoint replays and closes), but events
+	// is simpler for the no-follow path so we use it uniformly.
+	if (!shouldFollow) {
+		const url = new URL(`${agentPath}/runs/${resolvedRunId}/events`);
+		if (args.since !== undefined) url.searchParams.set('after', String(args.since));
+		if (args.types) url.searchParams.set('types', [...args.types].join(','));
+		if (args.limit !== undefined) url.searchParams.set('limit', String(args.limit));
+		const body = await fetchJsonOrExit<{ events: Array<Record<string, unknown>> }>(url.toString());
+		let exitCode = 0;
+		for (const event of body.events) {
+			if (args.format === 'json' || args.format === 'ndjson') {
+				process.stdout.write(`${JSON.stringify(event)}\n`);
+			} else {
+				logsRenderPretty(event);
+			}
+			if (event.type === 'run_end' && event.isError === true) exitCode = 2;
+		}
+		if (args.format === 'pretty') flushBuffers();
+		process.exit(exitCode);
+	}
+
+	// Follow path: subscribe to the live SSE stream and render events
+	// as they arrive.
+	const streamUrl = new URL(`${agentPath}/runs/${resolvedRunId}/stream`);
+	const headers: Record<string, string> = { accept: 'text/event-stream' };
+	if (args.since !== undefined) headers['last-event-id'] = String(args.since);
+
+	let res: Response;
+	try {
+		res = await fetch(streamUrl, { headers });
+	} catch (err) {
+		console.error(`[flue] Failed to reach Flue server: ${err instanceof Error ? err.message : String(err)}`);
+		process.exit(1);
+	}
+
+	if (!res.ok) {
+		const rawBody = await res.text();
+		try {
+			const parsed = JSON.parse(rawBody);
+			if (parsed?.error) {
+				const e = parsed.error;
+				console.error(`HTTP ${res.status} [${e.type ?? 'unknown'}]: ${e.message ?? ''}`);
+				process.exit(1);
+			}
+		} catch {
+			// fall through
+		}
+		console.error(`HTTP ${res.status}: ${rawBody}`);
+		process.exit(1);
+	}
+
+	// Handle Ctrl-C cleanly during follow.
+	const ac = new AbortController();
+	const onSignal = () => ac.abort();
+	process.on('SIGINT', onSignal);
+	process.on('SIGTERM', onSignal);
+
+	let emittedCount = 0;
+	let exitCode = 0;
+
+	try {
+		for await (const frame of iterateSse(res)) {
+			if (ac.signal.aborted) break;
+			const event = frame.data as Record<string, unknown> | undefined;
+			if (!event || typeof event !== 'object') continue;
+
+			const passesFilter =
+				!args.types ||
+				(typeof event.type === 'string' && args.types.has(event.type)) ||
+				event.type === 'run_end'; // never silently drop the terminal event
+
+			if (passesFilter) {
+				if (args.format === 'json' || args.format === 'ndjson') {
+					process.stdout.write(`${JSON.stringify(event)}\n`);
+				} else {
+					logsRenderPretty(event);
+				}
+				emittedCount++;
+			}
+
+			if (event.type === 'run_end' && event.isError === true) exitCode = 2;
+			if (args.limit !== undefined && emittedCount >= args.limit) break;
+		}
+	} catch (err) {
+		if (ac.signal.aborted) {
+			exitCode = 130;
+		} else {
+			console.error(`[flue] Stream interrupted: ${err instanceof Error ? err.message : String(err)}`);
+			exitCode = 1;
+		}
+	} finally {
+		process.off('SIGINT', onSignal);
+		process.off('SIGTERM', onSignal);
+		if (args.format === 'pretty') flushBuffers();
+	}
+
+	process.exit(exitCode);
+}
+
 // ─── `flue init` ────────────────────────────────────────────────────────────
 
 function renderConfigTemplate(target: 'node' | 'cloudflare'): string {
@@ -1228,6 +1711,8 @@ if (args.command === 'build') {
 	addCommand(args);
 } else if (args.command === 'init') {
 	initCommand(args);
+} else if (args.command === 'logs') {
+	logsCommand(args);
 } else {
 	run(args);
 }
