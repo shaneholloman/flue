@@ -90,7 +90,6 @@ export interface FlueRuntime {
 }
 
 const RUN_ROUTES: ReadonlyArray<readonly [string, HandleRunRouteOptions['action']]> = [
-	['/agents/:name/:id/runs', 'list'],
 	['/agents/:name/:id/runs/:runId', 'get'],
 	['/agents/:name/:id/runs/:runId/events', 'events'],
 	['/agents/:name/:id/runs/:runId/stream', 'stream'],

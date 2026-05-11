@@ -51,7 +51,7 @@ function printUsage() {
 			'  flue build [--target <node|cloudflare>] [--root <path>] [--output <path>] [--config <path>]\n' +
 			'  flue init  --target <node|cloudflare> [--root <path>] [--force]\n' +
 			'  flue add   [<name>|<url>] [--category <category>] [--print]\n' +
-			'  flue logs  <agent> <id> [runId] [--server <url>] [--follow|-f|--no-follow] [--since <eventIndex>] [--types a,b,c] [--limit <n>] [--format pretty|json|ndjson] [--list]\n' +
+			'  flue logs  <agent> <id> <runId> [--server <url>] [--follow|-f|--no-follow] [--since <eventIndex>] [--types a,b,c] [--limit <n>] [--format pretty|json|ndjson]\n' +
 			'\n' +
 			'Commands:\n' +
 			'  dev    Long-running watch-mode dev server. Rebuilds and reloads on file changes.\n' +
@@ -90,10 +90,9 @@ function printUsage() {
 			'  flue add\n' +
 			'  flue add daytona | claude\n' +
 			'  flue add https://e2b.dev --category sandbox | claude\n' +
-			'  flue logs hello test-1                            # tail the most recent run\n' +
-			'  flue logs hello test-1 run_01H... --no-follow     # one-shot replay of a specific run\n' +
-			'  flue logs hello test-1 --list                     # list recent runs\n' +
-			'  flue logs hello test-1 --types tool_call,log,run_end --format json\n' +
+			'  flue logs hello test-1 run_01H...                 # tail a specific run\n' +
+			'  flue logs hello test-1 run_01H... --no-follow     # one-shot replay\n' +
+			'  flue logs hello test-1 run_01H... --types tool_call,log,run_end --format json\n' +
 			'\n' +
 			'Note: set the model inside your agent via `init({ model: "provider/model-id" })` ' +
 			'or per-call `{ model: ... }` on prompt/skill/task.',
@@ -166,8 +165,7 @@ interface LogsArgs {
 	command: 'logs';
 	agent: string;
 	id: string;
-	/** Optional explicit run id. If omitted, the CLI picks the most recent run. */
-	runId: string | undefined;
+	runId: string;
 	/** Base URL of the running Flue server. */
 	server: string;
 	/**
@@ -184,8 +182,6 @@ interface LogsArgs {
 	/** Cap event count for one-shot mode. Server applies it via `?limit=`. */
 	limit: number | undefined;
 	format: 'pretty' | 'json' | 'ndjson';
-	/** When true, list recent runs and exit instead of streaming events. */
-	list: boolean;
 }
 
 type ParsedArgs = RunArgs | BuildArgs | DevArgs | AddArgs | InitArgs | LogsArgs;
@@ -356,7 +352,6 @@ function parseLogsArgs(rest: string[]): LogsArgs {
 	let types: ReadonlySet<string> | undefined;
 	let limit: number | undefined;
 	let format: LogsArgs['format'] = 'pretty';
-	let list = false;
 
 	for (let i = 0; i < rest.length; i++) {
 		const arg = rest[i]!;
@@ -405,8 +400,6 @@ function parseLogsArgs(rest: string[]): LogsArgs {
 				process.exit(1);
 			}
 			format = value;
-		} else if (arg === '--list') {
-			list = true;
 		} else if (arg.startsWith('--')) {
 			console.error(`Unknown flag for \`flue logs\`: ${arg}`);
 			printUsage();
@@ -416,8 +409,8 @@ function parseLogsArgs(rest: string[]): LogsArgs {
 		}
 	}
 
-	if (positional.length < 2) {
-		console.error('Missing required arguments for `flue logs`: <agent> <id> [runId]');
+	if (positional.length < 3) {
+		console.error('Missing required arguments for `flue logs`: <agent> <id> <runId>');
 		printUsage();
 		process.exit(1);
 	}
@@ -431,14 +424,13 @@ function parseLogsArgs(rest: string[]): LogsArgs {
 		command: 'logs',
 		agent: positional[0]!,
 		id: positional[1]!,
-		runId: positional[2],
+		runId: positional[2]!,
 		server,
 		follow,
 		since,
 		types,
 		limit,
 		format,
-		list,
 	};
 }
 
@@ -784,6 +776,9 @@ async function consumeSSE(
 		return { error: 'No response body' };
 	}
 
+	const runId = res.headers.get('x-flue-run-id');
+	if (runId) console.error(`[flue] Run ID: ${runId}`);
+
 	const decoder = new TextDecoder();
 	let buffer = '';
 	let result: any ;
@@ -1061,13 +1056,12 @@ async function run(args: RunArgs) {
 
 // ─── `flue logs` ────────────────────────────────────────────────────────────
 
-interface RunSummary {
+interface RunRecord {
 	runId: string;
 	instanceId: string;
 	agentName: string;
 	status: 'active' | 'completed' | 'errored';
 	startedAt: string;
-	endedAt?: string;
 	isError?: boolean;
 	durationMs?: number;
 }
@@ -1121,44 +1115,6 @@ function formatDuration(ms: number | undefined): string {
 	const m = Math.floor(ms / 60_000);
 	const s = ((ms % 60_000) / 1000).toFixed(1);
 	return `${m}m${s}s`;
-}
-
-function renderRunsTable(runs: RunSummary[]): string {
-	if (runs.length === 0) return '  (no runs)';
-	const rows = runs.map((r) => ({
-		runId: r.runId,
-		status: r.isError ? 'errored' : r.status,
-		startedAt: r.startedAt,
-		duration: formatDuration(r.durationMs),
-	}));
-	const w = (k: keyof (typeof rows)[number]) => Math.max(...rows.map((r) => r[k].length));
-	const wRunId = w('runId');
-	const wStatus = w('status');
-	const wStarted = w('startedAt');
-	const gap = '  ';
-	const header =
-		'  ' +
-		'runId'.padEnd(wRunId) +
-		gap +
-		'status'.padEnd(wStatus) +
-		gap +
-		'startedAt'.padEnd(wStarted) +
-		gap +
-		'duration';
-	const body = rows
-		.map(
-			(r) =>
-				'  ' +
-				r.runId.padEnd(wRunId) +
-				gap +
-				r.status.padEnd(wStatus) +
-				gap +
-				r.startedAt.padEnd(wStarted) +
-				gap +
-				r.duration,
-		)
-		.join('\n');
-	return `${header}\n${body}`;
 }
 
 /** Minimal SSE parser for Flue's JSON event stream. */
@@ -1239,49 +1195,17 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 	const base = args.server.replace(/\/+$/, '');
 	const agentPath = `${base}/agents/${encodeURIComponent(args.agent)}/${encodeURIComponent(args.id)}`;
 
-	if (args.list) {
-		const url = new URL(`${agentPath}/runs`);
-		if (args.limit !== undefined) url.searchParams.set('limit', String(args.limit));
-		const body = await fetchJsonOrExit<{ runs: RunSummary[] }>(url.toString());
-		if (args.format === 'json' || args.format === 'ndjson') {
-			if (args.format === 'json') {
-				process.stdout.write(`${JSON.stringify(body.runs, null, 2)}\n`);
-			} else {
-				for (const r of body.runs) process.stdout.write(`${JSON.stringify(r)}\n`);
-			}
-		} else {
-			process.stdout.write(`${renderRunsTable(body.runs)}\n`);
-		}
-		return;
-	}
-
-	let resolvedRunId = args.runId;
-	let initialRun: RunSummary | undefined;
-	if (!resolvedRunId) {
-		const url = new URL(`${agentPath}/runs`);
-		url.searchParams.set('limit', '1');
-		const body = await fetchJsonOrExit<{ runs: RunSummary[] }>(url.toString());
-		if (body.runs.length === 0) {
-			console.error(`[flue] No runs found for ${args.agent}/${args.id}`);
-			process.exit(1);
-		}
-		initialRun = body.runs[0];
-		resolvedRunId = initialRun!.runId;
-	}
-
 	let shouldFollow: boolean;
 	if (args.follow !== undefined) {
 		shouldFollow = args.follow;
-	} else if (initialRun) {
-		shouldFollow = initialRun.status === 'active';
 	} else {
-		const run = await fetchJsonOrExit<RunSummary>(`${agentPath}/runs/${resolvedRunId}`);
+		const run = await fetchJsonOrExit<RunRecord>(`${agentPath}/runs/${args.runId}`);
 		shouldFollow = run.status === 'active';
 	}
 
 	// One-shot mode snapshots persisted events and exits immediately.
 	if (!shouldFollow) {
-		const url = new URL(`${agentPath}/runs/${resolvedRunId}/events`);
+		const url = new URL(`${agentPath}/runs/${args.runId}/events`);
 		if (args.since !== undefined) url.searchParams.set('after', String(args.since));
 		if (args.types) url.searchParams.set('types', [...args.types].join(','));
 		if (args.limit !== undefined) url.searchParams.set('limit', String(args.limit));
@@ -1299,7 +1223,7 @@ async function logsCommand(args: LogsArgs): Promise<void> {
 		process.exit(exitCode);
 	}
 
-	const streamUrl = new URL(`${agentPath}/runs/${resolvedRunId}/stream`);
+	const streamUrl = new URL(`${agentPath}/runs/${args.runId}/stream`);
 	const headers: Record<string, string> = { accept: 'text/event-stream' };
 	if (args.since !== undefined) headers['last-event-id'] = String(args.since);
 

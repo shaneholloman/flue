@@ -365,7 +365,7 @@ function parseRunRoute(request) {
   if (segments[3] !== 'runs') return null;
   const runId = segments[4];
   const child = segments[5];
-  if (!runId) return { action: 'list' };
+  if (!runId) return null;
   if (!child) return { action: 'get', runId };
   if (child === 'events') return { action: 'events', runId };
   if (child === 'stream') return { action: 'stream', runId };

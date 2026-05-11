@@ -3,7 +3,6 @@ import {
 	DEFAULT_MAX_COMPLETED_RUNS,
 	DEFAULT_MAX_EVENT_BYTES,
 	type EndRunInput,
-	type ListRunsFilter,
 	type RunRecord,
 	type RunStore,
 	type RunStoreOptions,
@@ -69,18 +68,6 @@ export class InMemoryRunStore implements RunStore {
 		const events = this.getInstance(run.instanceId).events.get(runId) ?? [];
 		if (fromIndex === undefined) return [...events];
 		return events.filter((event) => typeof event.eventIndex === 'number' && event.eventIndex >= fromIndex);
-	}
-
-	async listRuns(instanceId: string, filter: ListRunsFilter = {}): Promise<RunRecord[]> {
-		const instance = this.getInstance(instanceId);
-		let runs = [...instance.runs.values()];
-		if (filter.status) runs = runs.filter((run) => run.status === filter.status);
-		if (filter.before) {
-			const cursor = instance.runs.get(filter.before);
-			if (cursor) runs = runs.filter((run) => run.startedAt < cursor.startedAt);
-		}
-		runs.sort((a, b) => b.startedAt.localeCompare(a.startedAt));
-		return runs.slice(0, filter.limit ?? 20);
 	}
 
 	async getRun(runId: string): Promise<RunRecord | null> {

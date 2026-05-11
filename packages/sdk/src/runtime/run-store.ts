@@ -32,18 +32,11 @@ export interface EndRunInput {
 	error?: unknown;
 }
 
-export interface ListRunsFilter {
-	status?: RunStatus;
-	limit?: number;
-	before?: string;
-}
-
 export interface RunStore {
 	createRun(input: CreateRunInput): Promise<void>;
 	endRun(input: EndRunInput): Promise<void>;
 	appendEvent(runId: string, event: FlueEvent): Promise<void>;
 	getEvents(runId: string, fromIndex?: number): Promise<FlueEvent[]>;
-	listRuns(instanceId: string, filter?: ListRunsFilter): Promise<RunRecord[]>;
 	getRun(runId: string): Promise<RunRecord | null>;
 }
 

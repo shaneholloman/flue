@@ -3,7 +3,6 @@ import {
 	DEFAULT_MAX_COMPLETED_RUNS,
 	DEFAULT_MAX_EVENT_BYTES,
 	type EndRunInput,
-	type ListRunsFilter,
 	type RunRecord,
 	type RunStore,
 	type RunStoreOptions,
@@ -91,31 +90,6 @@ class DurableRunStore implements RunStore {
 			)
 			.toArray();
 		return rows.flatMap((row) => (typeof row.payload === 'string' ? [JSON.parse(row.payload)] : []));
-	}
-
-	async listRuns(instanceId: string, filter: ListRunsFilter = {}): Promise<RunRecord[]> {
-		const limit = filter.limit ?? 20;
-		const clauses = ['instance_id = ?'];
-		const bindings: unknown[] = [instanceId];
-		if (filter.status) {
-			clauses.push('status = ?');
-			bindings.push(filter.status);
-		}
-		if (filter.before) {
-			const before = await this.getRun(filter.before);
-			if (before) {
-				clauses.push('started_at < ?');
-				bindings.push(before.startedAt);
-			}
-		}
-		bindings.push(limit);
-		const rows = this.sql
-			.exec(
-				`SELECT * FROM flue_runs WHERE ${clauses.join(' AND ')} ORDER BY started_at DESC LIMIT ?`,
-				...bindings,
-			)
-			.toArray();
-		return rows.map(rowToRunRecord);
 	}
 
 	async getRun(runId: string): Promise<RunRecord | null> {

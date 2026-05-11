@@ -3,7 +3,7 @@
 import { InvalidRequestError, RunNotFoundError, RunStoreUnavailableError } from '../errors.ts';
 import type { FlueEvent } from '../types.ts';
 import { SSE_HEARTBEAT_MS } from './handle-agent.ts';
-import type { RunRecord, RunStatus, RunStore } from './run-store.ts';
+import type { RunRecord, RunStore } from './run-store.ts';
 import type { RunSubscriberRegistry } from './run-subscribers.ts';
 
 export interface HandleRunRouteOptions {
@@ -13,11 +13,9 @@ export interface HandleRunRouteOptions {
 	agentName: string;
 	id: string;
 	runId?: string;
-	action: 'list' | 'get' | 'events' | 'stream';
+	action: 'get' | 'events' | 'stream';
 }
 
-const RUNS_DEFAULT_LIMIT = 20;
-const RUNS_MAX_LIMIT = 100;
 const EVENTS_DEFAULT_LIMIT = 100;
 const EVENTS_MAX_LIMIT = 1000;
 
@@ -29,34 +27,40 @@ export async function handleRunRouteRequest(opts: HandleRunRouteOptions): Promis
 	if (!store) throw new RunStoreUnavailableError();
 
 	switch (opts.action) {
-		case 'list':
-			return listRuns(opts.request, store, opts.id);
 		case 'get':
-			return getRun(store, requireRunId(opts.runId));
+			return getRun(store, requireRunId(opts.runId), opts.agentName, opts.id);
 		case 'events':
-			return getRunEvents(opts.request, store, requireRunId(opts.runId));
+			return getRunEvents(opts.request, store, requireRunId(opts.runId), opts.agentName, opts.id);
 		case 'stream':
-			return streamRunEvents(opts.request, store, opts.runSubscribers, requireRunId(opts.runId));
+			return streamRunEvents(
+				opts.request,
+				store,
+				opts.runSubscribers,
+				requireRunId(opts.runId),
+				opts.agentName,
+				opts.id,
+			);
 	}
 }
 
-async function listRuns(request: Request, store: RunStore, instanceId: string): Promise<Response> {
-	const url = new URL(request.url);
-	const status = parseStatus(url.searchParams.get('status'));
-	const limit = parseLimit(url.searchParams.get('limit'), RUNS_DEFAULT_LIMIT, RUNS_MAX_LIMIT);
-	const before = url.searchParams.get('before') ?? undefined;
-	const runs = await store.listRuns(instanceId, { status, limit, before });
-	return json({ runs });
-}
-
-async function getRun(store: RunStore, runId: string): Promise<Response> {
-	const run = await store.getRun(runId);
-	if (!run) throw new RunNotFoundError({ runId });
+async function getRun(
+	store: RunStore,
+	runId: string,
+	agentName: string,
+	instanceId: string,
+): Promise<Response> {
+	const run = await getRunForInstance(store, runId, agentName, instanceId);
 	return json(run);
 }
 
-async function getRunEvents(request: Request, store: RunStore, runId: string): Promise<Response> {
-	await assertRunExists(store, runId);
+async function getRunEvents(
+	request: Request,
+	store: RunStore,
+	runId: string,
+	agentName: string,
+	instanceId: string,
+): Promise<Response> {
+	await getRunForInstance(store, runId, agentName, instanceId);
 	const url = new URL(request.url);
 	const after = parseEventIndex(url.searchParams.get('after'));
 	const types = parseTypes(url.searchParams.get('types'));
@@ -76,9 +80,10 @@ async function streamRunEvents(
 	store: RunStore,
 	subscribers: RunSubscriberRegistry | undefined,
 	runId: string,
+	agentName: string,
+	instanceId: string,
 ): Promise<Response> {
-	const run = await store.getRun(runId);
-	if (!run) throw new RunNotFoundError({ runId });
+	const run = await getRunForInstance(store, runId, agentName, instanceId);
 
 	const lastEventId = parseLastEventId(request.headers.get('last-event-id'));
 	const fromIndex = lastEventId === undefined ? undefined : lastEventId + 1;
@@ -277,9 +282,18 @@ async function runReplayPhase(opts: ReplayPhaseOptions): Promise<void> {
 	markReplayDone();
 }
 
-async function assertRunExists(store: RunStore, runId: string): Promise<void> {
+async function getRunForInstance(
+	store: RunStore,
+	runId: string,
+	agentName: string,
+	instanceId: string,
+): Promise<RunRecord> {
 	const run = await store.getRun(runId);
 	if (!run) throw new RunNotFoundError({ runId });
+	if (run.agentName !== agentName || run.instanceId !== instanceId) {
+		throw new RunNotFoundError({ runId });
+	}
+	return run;
 }
 
 function isTerminal(run: RunRecord): boolean {
@@ -318,12 +332,6 @@ function requireRunId(runId: string | undefined): string {
 		throw new InvalidRequestError({ reason: 'Run id is required for this endpoint.' });
 	}
 	return runId;
-}
-
-function parseStatus(value: string | null): RunStatus | undefined {
-	if (value === null || value === '') return undefined;
-	if (value === 'active' || value === 'completed' || value === 'errored') return value;
-	return undefined;
 }
 
 function parseTypes(value: string | null): Set<string> | undefined {

@@ -4,11 +4,29 @@
 
 ### Breaking Changes
 
-- **Terminology cleanup: `FlueAgent` becomes `FlueHarness`.** The value returned from `init()` is now called a harness: a configured handle for model defaults, tools, sandbox, filesystem, and sessions. Rename imports/usages from `FlueAgent` to `FlueHarness`, and prefer `const harness = await init(...)` in agent files.
-- **Harnesses and sessions are named, not id'd.** `init({ id })` becomes `init({ name })`, defaulting to `"default"`. The returned harness exposes `.name` instead of `.id`. `harness.session(id?)`, `harness.sessions.get/create/delete(id?)`, and `FlueSession.id` become name-based APIs (`name?`, `.name`).
+- **`FlueAgent` is now `FlueHarness`.** The value returned from `init()` is a harness: a configured handle for model defaults, tools, sandbox, filesystem, and sessions. Rename imports/usages from `FlueAgent` to `FlueHarness`, and prefer `const harness = await init(...)` in agent files.
+- **Harnesses and sessions are named, not id'd.** `init({ id })` is now `init({ name })`, defaulting to `"default"`. The returned harness exposes `.name` instead of `.id`. `harness.session(id?)`, `harness.sessions.get/create/delete(id?)`, and `FlueSession.id` are now name-based APIs (`name?`, `.name`).
 - **Session storage keys now include the agent instance id, harness name, and session name.** Existing persisted sessions under the old two-part key shape are not migrated. Cloudflare Durable Object session history from earlier builds will not be read by this release.
-- **Runs are named explicitly.** Every HTTP invocation gets a generated `run_<ulid>` exposed to handlers as `ctx.runId`. Webhook mode now returns `{ status: 'accepted', runId }` instead of `{ status: 'accepted', requestId }`.
-- **Session events include the harness name.** `FlueEvent` payloads emitted from sessions now carry `harnessName` so future run logs can distinguish multiple harnesses used in one run.
+- **Webhook responses return `runId` instead of `requestId`.** Every HTTP invocation now gets a generated `run_<ulid>` exposed to handlers as `ctx.runId`. Webhook mode returns `{ status: 'accepted', runId }`.
+- **The event vocabulary changed for run observability.** `tool_end` is now `tool_call`, `operation_end` is now `operation`, and session correlation fields use `harness`, `session`, and `parentSession` instead of the previous id-oriented names. Consumers of the raw `FlueEvent` stream should update event-type checks and field names.
+- **SSE `event: result` was removed.** Terminal result/error state is now delivered by the wide `run_end` event. Sync responses still return `{ result, _meta: { runId } }`.
+
+### New Features
+
+- **Run history and durable event logs.** Every invocation is recorded as a run with `run_start` / `run_end` lifecycle events and a monotonic `eventIndex`. Cloudflare persists run history in the Agent Durable Object SQLite storage; Node keeps an in-memory ring buffer of recent completed runs.
+- **Run-scoped HTTP endpoints.** New read-only endpoints expose a known run: `GET /agents/<name>/<id>/runs/<runId>`, `GET /agents/<name>/<id>/runs/<runId>/events`, and `GET /agents/<name>/<id>/runs/<runId>/stream`. There is intentionally no list-runs endpoint yet; broader run discovery remains admin-API territory.
+- **Reconnectable live run streams.** `/runs/<runId>/stream` replays durable history and then tails active runs. It honors standard `Last-Event-ID` resume semantics and closes when `run_end` is observed.
+- **`flue logs` command.** `flue logs <agent> <id> <runId>` replays or tails a known run from a running Flue dev server. It supports `--follow` / `--no-follow`, `--since`, `--types`, `--limit`, and `--format pretty|json|ndjson`.
+- **Structured handler logs.** Handlers can call `ctx.log.info(...)`, `ctx.log.warn(...)`, and `ctx.log.error(...)` to emit structured `log` events into the run event stream and persisted history.
+- **`flue run` surfaces run ids.** One-shot runs now print the generated run id to stderr and include `_meta.runId` in sync responses, making it easier to inspect the same run with `flue logs`.
+
+### Fixes & Other Changes
+
+- **Run lifecycle ordering is durable-before-live.** Terminal `run_end` events are appended before live subscribers are notified and before the run is marked terminal, avoiding missed terminal events for clients connecting near completion.
+- **Live event fan-out is ordered per run.** Durable writes are serialized before publishing each non-terminal event to live subscribers.
+- **SSE streams now use a shared 15s heartbeat.** Both direct agent SSE responses and run-history streams emit heartbeats to avoid idle proxy/client timeouts.
+- **Cloudflare run-route parsing is positional.** An agent instance id of `"runs"` no longer collides with the `/runs` route marker.
+- **Generated docs and examples were updated for the harness terminology and new run observability APIs.**
 
 ## 0.4.1
 
