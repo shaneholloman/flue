@@ -1,6 +1,7 @@
 import { discoverSessionContext } from './context.ts';
 import { Harness } from './harness.ts';
 import { assertRoleExists } from './roles.ts';
+import { dispatchGlobalEvent } from './runtime/events.ts';
 import { bashFactoryToSessionEnv, createCwdSessionEnv } from './sandbox.ts';
 import type {
 	AgentConfig,
@@ -68,6 +69,12 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 				console.error('[flue:subscriber] Event subscriber failed:', error);
 			}
 		}
+		// Fan out to module-scoped subscribers registered via
+		// `observe()` from `@flue/sdk/app`. These run after the
+		// per-context subscribers and receive the originating `ctx` as
+		// a second argument so cross-cutting code (error reporting,
+		// log forwarding) can read `ctx.id`, `ctx.runId`, etc.
+		dispatchGlobalEvent(decorated, ctx);
 		return decorated;
 	};
 

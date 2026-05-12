@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- **`observe(...)` exported from `@flue/sdk/app` for isolate-global subscriptions to the Flue event stream.** Cross-cutting integrations — error reporting, log forwarding, metrics — can now tap every Flue event in the current isolate from a single module-scoped call, without per-agent or per-context wiring. The subscriber receives the fully decorated `FlueEvent` (with `runId`, `eventIndex`, `timestamp`, and tree-correlation fields) and the originating `FlueContext`. On the Cloudflare target each Durable Object is its own V8 isolate, so `app.ts` (and thus the `observe` registration) is evaluated per-DO — each isolate captures its own events independently, which is the intended shape. See `examples/sentry/` for a fully documented Sentry error-reporting integration built on top of this hook.
+
+  ```ts
+  // app.ts
+  import { flue, observe } from '@flue/sdk/app';
+  import * as Sentry from '@sentry/node';
+
+  Sentry.init({ dsn: process.env.SENTRY_DSN });
+
+  observe((event, ctx) => {
+    if (event.type === 'run_end' && event.isError) {
+      Sentry.captureException(event.error);
+    }
+  });
+  ```
+
 ## 0.5.2
 
 ### New Features

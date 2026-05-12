@@ -40,6 +40,7 @@ export {
 	type CloudflareAIBindingRegistration,
 	type CloudflareAIBinding,
 } from './runtime/providers.ts';
+export { observe, type FlueEventSubscriber } from './runtime/events.ts';
 
 /**
  * Shape contract for a user-authored `app.ts` default export. Any
