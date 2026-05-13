@@ -17,6 +17,7 @@ export interface AgentInfo {
 
 export interface BuildContext {
 	agents: AgentInfo[];
+	manifest: { agents: Array<{ name: string; triggers: { webhook?: boolean } }> };
 	roles: Record<string, Role>;
 	/**
 	 * The project root — typically the user's cwd. Source files
@@ -47,6 +48,8 @@ export interface BuildContext {
 	 * `app.ts` > `app.mts` > `app.js` > `app.mjs`.
 	 */
 	appEntry?: string;
+	/** Version of @flue/runtime resolved for this build. */
+	runtimeVersion: string;
 	options: BuildOptions;
 }
 

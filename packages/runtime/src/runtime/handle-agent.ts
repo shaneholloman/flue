@@ -4,6 +4,7 @@ import type { FlueContextInternal } from '../client.ts';
 import { parseJsonBody, toHttpResponse } from '../errors.ts';
 import type { FlueEvent } from '../types.ts';
 import { generateRunId } from './ids.ts';
+import type { RunRegistry } from './run-registry.ts';
 import type { RunStore } from './run-store.ts';
 import type { RunSubscriberRegistry } from './run-subscribers.ts';
 
@@ -36,10 +37,7 @@ export type CreateContextFn = (
  * The caller is responsible for any logging on completion/error; this routine
  * just kicks it off and returns the 202.
  */
-export type StartWebhookFn = (
-	runId: string,
-	run: () => Promise<unknown>,
-) => Promise<unknown>;
+export type StartWebhookFn = (runId: string, run: () => Promise<unknown>) => Promise<unknown>;
 
 /**
  * Foreground handler execution wrapper. Wraps the call to `handler(ctx)` so
@@ -90,6 +88,15 @@ export interface HandleAgentOptions {
 	 * see only what's already in the store at the moment they connect.
 	 */
 	runSubscribers?: RunSubscriberRegistry;
+	/**
+	 * Per-target cross-deployment pointer index. Receives a
+	 * `recordRunStart` after every successful `createRun` and a
+	 * `recordRunEnd` after every `endRun`. Optional — if omitted, the
+	 * run still completes; only the bare `/runs/:runId` lookup path
+	 * (which consults the registry to discover the owning instance)
+	 * will be unable to find this run.
+	 */
+	runRegistry?: RunRegistry;
 }
 
 /**
@@ -114,7 +121,8 @@ export interface HandleAgentOptions {
  * already been validated as a POST against a registered agent.
  */
 export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Response> {
-	const { request, agentName, id, handler, createContext, runStore, runSubscribers } = opts;
+	const { request, agentName, id, handler, createContext, runStore, runSubscribers, runRegistry } =
+		opts;
 	const startWebhook = opts.startWebhook ?? defaultStartWebhook;
 	const runHandler = opts.runHandler ?? defaultRunHandler;
 	const runId = generateRunId();
@@ -141,6 +149,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 				startWebhook,
 				runStore,
 				runSubscribers,
+				runRegistry,
 			});
 		}
 
@@ -156,6 +165,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 				runHandler,
 				runStore,
 				runSubscribers,
+				runRegistry,
 			});
 		}
 
@@ -170,6 +180,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 			runHandler,
 			runStore,
 			runSubscribers,
+			runRegistry,
 		});
 	} catch (err) {
 		// toHttpResponse logs unknowns via flueLog.error — no extra console.error
@@ -193,6 +204,7 @@ interface ModeOptions {
 	runHandler: RunHandlerFn;
 	runStore?: RunStore;
 	runSubscribers?: RunSubscriberRegistry;
+	runRegistry?: RunRegistry;
 }
 
 interface WebhookOptions {
@@ -206,6 +218,7 @@ interface WebhookOptions {
 	startWebhook: StartWebhookFn;
 	runStore?: RunStore;
 	runSubscribers?: RunSubscriberRegistry;
+	runRegistry?: RunRegistry;
 }
 
 async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
@@ -220,6 +233,7 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 		startWebhook,
 		runStore,
 		runSubscribers,
+		runRegistry,
 	} = opts;
 
 	// Webhook mode relies on `startWebhook` for target-specific execution
@@ -233,10 +247,10 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 		createContext,
 		runStore,
 		runSubscribers,
+		runRegistry,
 	});
 	const { ctx } = lifecycle;
-	const run = async (): Promise<unknown> =>
-		withRunLifecycle(lifecycle, () => handler(ctx));
+	const run = async (): Promise<unknown> => withRunLifecycle(lifecycle, () => handler(ctx));
 
 	startWebhook(runId, run).then(
 		(result) => {
@@ -274,6 +288,7 @@ function runSseMode(opts: ModeOptions): Response {
 		runHandler,
 		runStore,
 		runSubscribers,
+		runRegistry,
 	} = opts;
 
 	const { readable, writable } = new TransformStream();
@@ -295,7 +310,6 @@ function runSseMode(opts: ModeOptions): Response {
 		try {
 			await writer.write(encoder.encode(lines.join('\n')));
 		} catch {
-			// see writeSSE rationale above
 		}
 	};
 
@@ -304,7 +318,6 @@ function runSseMode(opts: ModeOptions): Response {
 		try {
 			await writer.write(encoder.encode(': heartbeat\n\n'));
 		} catch {
-			// see writeSSE rationale above
 		}
 	};
 
@@ -322,6 +335,7 @@ function runSseMode(opts: ModeOptions): Response {
 			createContext,
 			runStore,
 			runSubscribers,
+			runRegistry,
 		});
 		const { ctx } = lifecycle;
 		ctx.setEventCallback((event) => {
@@ -374,6 +388,7 @@ async function runSyncMode(opts: ModeOptions): Promise<Response> {
 		runHandler,
 		runStore,
 		runSubscribers,
+		runRegistry,
 	} = opts;
 	const lifecycle = await createRunLifecycle({
 		agentName,
@@ -384,6 +399,7 @@ async function runSyncMode(opts: ModeOptions): Promise<Response> {
 		createContext,
 		runStore,
 		runSubscribers,
+		runRegistry,
 	});
 	const { ctx } = lifecycle;
 	try {
@@ -408,6 +424,7 @@ interface RunLifecycleOptions {
 	createContext: CreateContextFn;
 	runStore?: RunStore;
 	runSubscribers?: RunSubscriberRegistry;
+	runRegistry?: RunRegistry;
 }
 
 interface RunLifecycle extends RunLifecycleOptions {
@@ -420,13 +437,24 @@ async function createRunLifecycle(options: RunLifecycleOptions): Promise<RunLife
 	const startedAtMs = Date.now();
 	const startedAt = new Date(startedAtMs).toISOString();
 	const ctx = options.createContext(options.id, options.runId, options.payload, options.request);
-	await safeRunStore('createRun', () =>
-		options.runStore?.createRun({
+	const runStore = options.runStore;
+	const didCreateRun = runStore
+		? await safeRunStore('createRun', () =>
+			runStore.createRun({
+				runId: options.runId,
+				instanceId: options.id,
+				agentName: options.agentName,
+				startedAt,
+				payload: options.payload,
+			}),
+		)
+		: false;
+	if (didCreateRun) await safeRegistry('recordRunStart', () =>
+		options.runRegistry?.recordRunStart({
 			runId: options.runId,
-			instanceId: options.id,
 			agentName: options.agentName,
+			instanceId: options.id,
 			startedAt,
-			payload: options.payload,
 		}),
 	);
 	return { ...options, ctx, startedAt, startedAtMs };
@@ -439,17 +467,17 @@ async function withRunLifecycle<T>(
 	lifecycle: RunLifecycle,
 	body: () => T | Promise<T>,
 ): Promise<T> {
-	const unsubscribeFanout = subscribeRunFanout(lifecycle);
+	const flushFanout = subscribeRunFanout(lifecycle);
 	emitRunStart(lifecycle);
 	try {
 		const result = await body();
+		await flushFanout();
 		await emitRunEnd(lifecycle, { result, isError: false });
 		return result;
 	} catch (error) {
+		await flushFanout();
 		await emitRunEnd(lifecycle, { isError: true, error });
 		throw error;
-	} finally {
-		unsubscribeFanout();
 	}
 }
 
@@ -481,7 +509,7 @@ async function emitRunEnd(
 	const error = input.isError ? serializeError(input.error) : undefined;
 	const normalizedResult = result === undefined ? null : result;
 
-	const { runStore, runSubscribers, runId } = lifecycle;
+	const { runStore, runSubscribers, runRegistry, runId } = lifecycle;
 
 	// Decorate through the shared event path so eventIndex/timestamp stay continuous.
 	const decorated = lifecycle.ctx.emitEvent({
@@ -493,20 +521,29 @@ async function emitRunEnd(
 		durationMs,
 	});
 
-	await safeRunStore('appendEvent(run_end)', () =>
-		runStore?.appendEvent(runId, decorated),
-	);
+	await safeRunStore('appendEvent(run_end)', () => runStore?.appendEvent(runId, decorated));
 
 	runSubscribers?.publish(runId, decorated);
 
-	await safeRunStore('endRun', () =>
-		runStore?.endRun({
+	const didEndRun = runStore
+		? await safeRunStore('endRun', () =>
+			runStore.endRun({
+				runId,
+				endedAt,
+				isError: input.isError,
+				durationMs,
+				result,
+				error,
+			}),
+		)
+		: false;
+
+	if (didEndRun) await safeRegistry('recordRunEnd', () =>
+		runRegistry?.recordRunEnd({
 			runId,
 			endedAt,
-			isError: input.isError,
 			durationMs,
-			result,
-			error,
+			isError: input.isError,
 		}),
 	);
 
@@ -517,14 +554,18 @@ async function emitRunEnd(
  * Persist non-terminal events before publishing them to live subscribers.
  * `run_end` is handled separately by {@link emitRunEnd}.
  */
-function subscribeRunFanout(lifecycle: RunLifecycle): () => void {
+function subscribeRunFanout(lifecycle: RunLifecycle): () => Promise<void> {
 	const { ctx, runStore, runSubscribers, runId } = lifecycle;
-	if (!runStore && !runSubscribers) return () => {};
+	if (!runStore && !runSubscribers) return async () => {};
 	let chain: Promise<void> = Promise.resolve();
-	return ctx.subscribeEvent((event) => {
+	const unsubscribe = ctx.subscribeEvent((event) => {
 		if (event.type === 'run_end') return;
 		chain = chain.then(() => fanOutEvent(runStore, runSubscribers, runId, event));
 	});
+	return () => {
+		unsubscribe();
+		return chain;
+	};
 }
 
 async function fanOutEvent(
@@ -543,11 +584,21 @@ async function fanOutEvent(
 	runSubscribers?.publish(runId, event);
 }
 
-async function safeRunStore(label: string, fn: () => Promise<void> | undefined): Promise<void> {
+async function safeRunStore(label: string, fn: () => Promise<void> | undefined): Promise<boolean> {
+	try {
+		await fn();
+		return true;
+	} catch (error) {
+		console.error(`[flue:run-store] ${label} failed:`, error);
+		return false;
+	}
+}
+
+async function safeRegistry(label: string, fn: () => Promise<void> | undefined): Promise<void> {
 	try {
 		await fn();
 	} catch (error) {
-		console.error(`[flue:run-store] ${label} failed:`, error);
+		console.error(`[flue:run-registry] ${label} failed:`, error);
 	}
 }
 

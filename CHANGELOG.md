@@ -2,7 +2,33 @@
 
 ## Unreleased
 
+### New Features
+
+- **Public OpenAPI spec for Flue's built-in routes.** `GET /openapi.json` now serves an OpenAPI 3.1 document for `POST /agents/<name>/<id>` and `GET /runs/<runId>{,/events,/stream}`. The spec is generated from Valibot schemas via `hono-openapi`, includes Flue's canonical error envelope, documents SSE routes with `x-flue-streaming: true`, and marks agent invocation payloads as user-defined.
+
+- **Read-only admin API sub-app.** `admin()` is now exported from `@flue/runtime/app` and can be mounted by user apps with their own auth middleware, e.g. `app.use('/admin/*', myAuthMiddleware); app.route('/admin', admin())`. It serves `GET /openapi.json`, `GET /agents`, `GET /agents/<name>/instances`, `GET /agents/<name>/instances/<id>/runs`, `GET /runs`, and `GET /runs/<runId>` relative to the mount point. Flue ships no auth opinions; middleware order in the user's Hono app controls access.
+
+- **SDK scaffold for public and admin APIs.** The `@flue/sdk` workspace package now contains a private, hand-written typed client scaffold for deployed Flue apps. It covers agent invocation modes, run lookup/events/streams, and read-only admin routes. The runtime still serves OpenAPI specs, but SDK code generation is deferred until a later pass can wire real spec snapshots and generated request methods end-to-end.
+
 ### Breaking Changes
+
+- **Malformed run-event query parameters now return structured 400 errors.** `GET /runs/<runId>/events` validates query params before reading run history. `limit` must be an integer in `[1, 1000]`; `after` must be a non-negative integer; `types` must be a comma-separated list of known Flue event type names. Previously malformed `limit` / `after` values were silently defaulted or ignored.
+
+- **Run-lookup HTTP routes are now identified by `runId` alone.** The previous `GET /agents/<name>/<id>/runs/<runId>{,/events,/stream}` route family is removed and replaced with `GET /runs/<runId>{,/events,/stream}`. The new routes work end-to-end on both Node and Cloudflare for any run that exists anywhere in the deployment — the server resolves the owning `(agentName, instanceId)` via a new internal run registry, so callers no longer need to know which agent or instance ran a given run id. External consumers hitting the old paths will get a 404; update to the bare form. The `POST /agents/<name>/<id>` invocation route is unchanged.
+
+  ```diff
+  - curl http://localhost:3583/agents/hello/inst-1/runs/run_01H...
+  + curl http://localhost:3583/runs/run_01H...
+  ```
+
+- **`flue logs` now takes only the run id.** The CLI signature simplifies from `flue logs <agent> <id> <runId>` to `flue logs <runId>`, matching the new route shape. The `<agent>` and `<id>` positional arguments are removed.
+
+  ```diff
+  - flue logs hello inst-1 run_01H...
+  + flue logs run_01H...
+  ```
+
+- **Cloudflare deployments gain a new `FlueRegistry` Durable Object class.** Auto-injected into the generated `dist/wrangler.jsonc` as a SQLite-backed DO binding (`FLUE_REGISTRY`) and a migration entry (`flue-class-FlueRegistry`). New deployments include it in their initial migration; existing deployments upgrading get a single appended migration entry. No user action required — the build's wrangler-merge owns the injection.
 
 - **`@flue/sdk` has been renamed to `@flue/runtime`.** The runtime library that user agent code and the generated server depend on is now published as `@flue/runtime`. User-facing agent, connector, MCP, and sandbox helper APIs now import from the root `@flue/runtime` entry; the old `@flue/sdk/client` and `@flue/sdk/sandbox` subpaths are folded into root. Platform/internal subpaths remain (`@flue/runtime/app`, `@flue/runtime/cloudflare`, `@flue/runtime/node`, `@flue/runtime/internal`). To migrate, replace user-code `@flue/sdk` imports with `@flue/runtime`. Generated `dist/` artifacts must be rebuilt — the new build emits `@flue/runtime/*` imports in `server.mjs` / `_entry.ts`.
 

@@ -342,6 +342,18 @@ export class RunStoreUnavailableError extends FlueHttpError {
 	}
 }
 
+export class RunRegistryUnavailableError extends FlueHttpError {
+	constructor() {
+		super({
+			type: 'run_registry_unavailable',
+			message: 'Run lookup is not available in this runtime.',
+			details: 'This endpoint requires the generated runtime to be configured with a run registry.',
+			dev: '',
+			status: 501,
+		});
+	}
+}
+
 export class InvalidRequestError extends FlueHttpError {
 	constructor({ reason }: { reason: string }) {
 		super({
@@ -356,13 +368,26 @@ export class InvalidRequestError extends FlueHttpError {
 	}
 }
 
+export class ValidationError extends FlueHttpError {
+	constructor({ details, issues }: { details: string; issues: unknown }) {
+		super({
+			type: 'validation_failed',
+			message: 'Request validation failed.',
+			details,
+			dev: '',
+			meta: { issues },
+			status: 400,
+		});
+	}
+}
+
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 // ERROR FRAMEWORK UTILITIES
 // ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
 /**
  * Error framework utilities: renderers, type guards, request parsing helpers.
- * 
+ *
  * Wire envelope (HTTP body + SSE `data:` payload for error events):
  *
  *     {
@@ -412,7 +437,9 @@ function formatForLog(prefix: string, err: unknown): string {
 			}
 		}
 		if (err.cause !== undefined) {
-			lines.push(`  cause: ${err.cause instanceof Error ? (err.cause.stack ?? err.cause.message) : String(err.cause)}`);
+			lines.push(
+				`  cause: ${err.cause instanceof Error ? (err.cause.stack ?? err.cause.message) : String(err.cause)}`,
+			);
 		}
 		return lines.join('\n');
 	}
@@ -556,9 +583,7 @@ export async function parseJsonBody(request: Request): Promise<unknown> {
 	// `curl -X POST <url>` "no payload" UX for agents that don't take input,
 	// and a misconfigured client that sends a body without either header is
 	// already broken in ways we can't recover from cleanly.
-	const looksEmpty =
-		contentLength === 0 ||
-		(contentLengthHeader === null && contentType === null);
+	const looksEmpty = contentLength === 0 || (contentLengthHeader === null && contentType === null);
 	if (looksEmpty) return {};
 
 	// If a body is present, require application/json. This is strict on
@@ -627,17 +652,6 @@ export function validateAgentRequest(opts: ValidateAgentRequestOptions): void {
 	if (opts.method !== 'POST') {
 		throw new MethodNotAllowedError({ method: opts.method, allowed: ['POST'] });
 	}
-	validateAgentIdentity(opts);
-}
-
-export function validateAgentRunRequest(opts: ValidateAgentRequestOptions): void {
-	if (opts.method !== 'GET') {
-		throw new MethodNotAllowedError({ method: opts.method, allowed: ['GET'] });
-	}
-	validateAgentIdentity(opts);
-}
-
-function validateAgentIdentity(opts: ValidateAgentRequestOptions): void {
 	if (opts.name.trim() === '' || opts.id.trim() === '') {
 		throw new InvalidRequestError({
 			reason: 'Webhook URLs must have the shape /agents/<name>/<id> with non-empty segments.',

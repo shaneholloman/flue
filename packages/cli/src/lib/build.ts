@@ -264,10 +264,12 @@ export async function build(options: BuildOptions): Promise<BuildResult> {
 
 	const ctx: BuildContext = {
 		agents,
+		manifest,
 		roles,
 		root,
 		output,
 		appEntry,
+		runtimeVersion: readRuntimeVersion(root),
 		options,
 	};
 
@@ -509,6 +511,17 @@ function collectNodePaths(root: string): Set<string> {
 		}
 	}
 	return nodePathsSet;
+}
+
+function readRuntimeVersion(root: string): string {
+	const runtimeDir = resolveRuntimeDir(root);
+	if (!runtimeDir) return '0.0.0';
+	try {
+		const pkg = JSON.parse(fs.readFileSync(path.join(runtimeDir, 'package.json'), 'utf-8'));
+		return typeof pkg.version === 'string' ? pkg.version : '0.0.0';
+	} catch {
+		return '0.0.0';
+	}
 }
 
 function getCLIDir(): string {

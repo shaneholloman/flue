@@ -10,6 +10,8 @@ export class NodePlugin implements BuildPlugin {
 	generateEntryPoint(ctx: BuildContext): string {
 		const { agents, roles, appEntry } = ctx;
 		const rolesJson = JSON.stringify(roles);
+		const manifestJson = JSON.stringify(ctx.manifest);
+		const runtimeVersion = JSON.stringify(ctx.runtimeVersion);
 
 		const webhookAgents = agents.filter((a) => a.triggers.webhook);
 
@@ -38,9 +40,7 @@ export class NodePlugin implements BuildPlugin {
 		// default export and dispatches all requests through `app.fetch`. When
 		// no app.ts is present, the generated entry constructs a thin default
 		// Hono that mounts `flue()` and renders canonical error envelopes.
-		const userAppImport = appEntry
-			? `import userApp from '${appEntry.replace(/\\/g, '/')}';`
-			: '';
+		const userAppImport = appEntry ? `import userApp from '${appEntry.replace(/\\/g, '/')}';` : '';
 
 		// All HTTP routing, SSE/webhook/sync mode handling, agent dispatch,
 		// and error rendering live in @flue/runtime's runtime modules. The
@@ -54,6 +54,7 @@ import {
   createFlueContext,
   InMemorySessionStore,
   InMemoryRunStore,
+  InMemoryRunRegistry,
   createRunSubscriberRegistry,
   bashFactoryToSessionEnv,
   resolveModel,
@@ -114,6 +115,7 @@ async function createLocalEnv() {
 // Default persistence store for Node — in-memory, process lifetime.
 const defaultStore = new InMemorySessionStore();
 const runStore = new InMemoryRunStore();
+const runRegistry = new InMemoryRunRegistry();
 const runSubscribers = createRunSubscriberRegistry();
 
 function createContextForRequest(id, runId, payload, req) {
@@ -142,12 +144,15 @@ function createContextForRequest(id, runId, payload, req) {
 // only when a request arrives.
 configureFlueRuntime({
   target: 'node',
+  runtimeVersion: ${runtimeVersion},
+  manifest: ${manifestJson},
   webhookAgents: webhookAgentNames,
   allowNonWebhook: isLocalMode,
   handlers,
   createContext: createContextForRequest,
   runStore,
   runSubscribers,
+  runRegistry,
 });
 
 // ─── App composition ────────────────────────────────────────────────────────

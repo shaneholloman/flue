@@ -23,7 +23,12 @@ export { createFlueContext } from './client.ts';
 // is otherwise an internal helper of the runtime — exposed here, not on the
 // public root barrel, because it's tooling-facing.
 export { parseFrontmatterFile } from './context.ts';
+// `FlueRegistry` (Durable Object class) and `createCloudflareRunRegistry`
+// (registry client) live in the `@flue/runtime/cloudflare` subpath because
+// they pull in `cloudflare:workers`, a virtual module Node can't resolve.
+// The generated CF entry imports them from there directly.
 export { createDurableRunStore } from './cloudflare/run-store.ts';
+export { InMemoryRunRegistry } from './node/run-registry.ts';
 export { InMemoryRunStore } from './node/run-store.ts';
 export type { FlueRuntime } from './runtime/flue-app.ts';
 export { configureFlueRuntime, createDefaultFlueApp } from './runtime/flue-app.ts';
@@ -55,6 +60,17 @@ export type {
 export { handleAgentRequest } from './runtime/handle-agent.ts';
 export type { HandleRunRouteOptions } from './runtime/handle-run-routes.ts';
 export { handleRunRouteRequest } from './runtime/handle-run-routes.ts';
+export type {
+	InstancePointer,
+	ListInstancesOpts,
+	ListInstancesResponse,
+	ListRunsOpts,
+	ListRunsResponse,
+	RecordRunEndInput,
+	RecordRunStartInput,
+	RunPointer,
+	RunRegistry,
+} from './runtime/run-registry.ts';
 export type { RunRecord, RunStatus, RunStore } from './runtime/run-store.ts';
 export type { RunSubscriberListener, RunSubscriberRegistry } from './runtime/run-subscribers.ts';
 export { createRunSubscriberRegistry } from './runtime/run-subscribers.ts';
