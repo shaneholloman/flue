@@ -53,6 +53,19 @@ export interface HttpProviderRegistration {
 	 * and `configureProvider()` overrides. Defaults to the registry name.
 	 */
 	provider?: string;
+	/**
+	 * Default `contextWindow` (in tokens) for every model resolved through
+	 * this registration. Overridden per-model via {@link models}. Unset is
+	 * `0`, which the runtime treats as "unknown".
+	 */
+	contextWindow?: number;
+	/**
+	 * Default `maxTokens` for every model resolved through this registration.
+	 * Overridden per-model via {@link models}. Unset is `0`.
+	 */
+	maxTokens?: number;
+	/** Per-model overrides for {@link contextWindow} and {@link maxTokens}, keyed by model id. */
+	models?: Record<string, { contextWindow?: number; maxTokens?: number }>;
 }
 
 export interface CloudflareAIBindingRegistration {
@@ -247,8 +260,9 @@ export function resolveRegisteredModel(
 
 /**
  * Construct a pi-ai Model from a registered provider template. Binding
- * registrations inherit catalog metadata from `cloudflare-workers-ai`;
- * HTTP registrations have no catalog and default cost/limits to zero.
+ * registrations hydrate metadata from pi-ai's `cloudflare-workers-ai`
+ * catalog; HTTP registrations supply their own metadata, with any unset
+ * fields defaulting to zero.
  */
 function buildModelFromRegistration(
 	name: string,
@@ -287,8 +301,8 @@ function buildModelFromRegistration(
 		reasoning: false,
 		input: ['text'],
 		cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-		contextWindow: 0,
-		maxTokens: 0,
+		contextWindow: def.models?.[modelId]?.contextWindow ?? def.contextWindow ?? 0,
+		maxTokens: def.models?.[modelId]?.maxTokens ?? def.maxTokens ?? 0,
 		headers: def.headers,
 	};
 }
