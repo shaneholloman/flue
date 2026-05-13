@@ -14,7 +14,4 @@ export default defineConfig({
 	format: ['esm'],
 	dts: true,
 	clean: true,
-	// `wrangler` is a heavy peer/optional dep that the dev server lazy-imports
-	// at runtime. Keep it external so the SDK bundle stays small.
-	external: ['wrangler'],
 });

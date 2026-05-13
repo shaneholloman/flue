@@ -1,13 +1,26 @@
-export { getVirtualSandbox } from './virtual-sandbox.ts';
-export type { VirtualSandboxOptions } from './virtual-sandbox.ts';
+import { throwMigrationError } from '../_migration.ts';
 
-export { cfSandboxToSessionEnv } from './cf-sandbox.ts';
+throwMigrationError();
 
-export { store } from './session-store.ts';
+export interface VirtualSandboxOptions {
+	id?: string;
+}
 
-export { runWithCloudflareContext, getCloudflareContext } from './context.ts';
-export type { CloudflareContext } from './context.ts';
+export interface CloudflareContext {
+	env?: unknown;
+	ctx?: unknown;
+}
 
-export { getCloudflareAIBindingApiProvider } from './workers-ai-provider.ts';
+export interface CloudflareGatewayOptions {
+	id: string;
+	skipCache?: boolean;
+	cacheTtl?: number;
+	cacheKey?: string;
+}
 
-export type { CloudflareGatewayOptions } from './gateway.ts';
+export const getVirtualSandbox = throwMigrationError;
+export const cfSandboxToSessionEnv = throwMigrationError;
+export const store = null;
+export const runWithCloudflareContext = throwMigrationError;
+export const getCloudflareContext = throwMigrationError;
+export const getCloudflareAIBindingApiProvider = throwMigrationError;

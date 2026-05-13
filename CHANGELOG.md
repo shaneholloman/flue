@@ -1,5 +1,31 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+- **`@flue/sdk` has been renamed to `@flue/runtime`.** The runtime library that user agent code and the generated server depend on is now published as `@flue/runtime`. User-facing agent, connector, MCP, and sandbox helper APIs now import from the root `@flue/runtime` entry; the old `@flue/sdk/client` and `@flue/sdk/sandbox` subpaths are folded into root. Platform/internal subpaths remain (`@flue/runtime/app`, `@flue/runtime/cloudflare`, `@flue/runtime/node`, `@flue/runtime/internal`). To migrate, replace user-code `@flue/sdk` imports with `@flue/runtime`. Generated `dist/` artifacts must be rebuilt — the new build emits `@flue/runtime/*` imports in `server.mjs` / `_entry.ts`.
+
+  The transitional `@flue/runtime/client` and `@flue/runtime/sandbox` subpaths still resolve for now, but immediately throw with migration guidance. They will be removed in a later release.
+
+  ```diff
+  - import type { FlueContext } from '@flue/sdk/client';
+  + import type { FlueContext } from '@flue/runtime';
+  ```
+
+- **Build tooling (`build`, `dev`, `parseEnvFiles`, `resolveEnvFiles`, `resolveSourceRoot`, the build plugins, env-file helpers) has moved from `@flue/sdk` to `@flue/cli`.** `@flue/runtime` is now a pure runtime library with no `esbuild` / `typescript` / `wrangler` baggage. The `wrangler` peer dependency moved with it and is now on `@flue/cli`. If you were driving the build programmatically via `import { build } from '@flue/sdk'`, update to import from `@flue/cli` (currently via internal paths; a stable public API will land separately).
+
+- **`flue.config.ts` now imports `defineConfig` from `@flue/cli/config`.** Update existing configs:
+
+  ```diff
+  - import { defineConfig } from '@flue/sdk/config';
+  + import { defineConfig } from '@flue/cli/config';
+  ```
+
+  This sets up the eventual collapse to `import { defineConfig } from 'flue/config'` (matching Astro/Vite). `flue init` now scaffolds the new import. The `@flue/sdk/config` subpath no longer exists.
+
+- **The `@flue/sdk` package is now a migration placeholder.** It keeps publishing with the old export map (`.`, `./app`, `./client`, `./sandbox`, `./internal`, `./cloudflare`, `./node`, `./config`) but has no runtime dependencies and every import throws with migration guidance. This prevents old installs from silently staying on an obsolete package while reserving the name for a future client-side SDK for talking to deployed Flue agents (create runs, stream events, etc.).
+
 ## 0.5.3
 
 ### New Features
