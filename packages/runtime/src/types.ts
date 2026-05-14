@@ -297,15 +297,14 @@ export interface AgentInit {
 	cwd?: string;
 
 	/**
-	 * - `'empty'` (default): In-memory sandbox, no files, no host access.
-	 * - `'local'`: No sandbox — direct access to the host filesystem and shell.
-	 *   `cwd` defaults to `process.cwd()`. Node target only; throws on Cloudflare.
-	 *   Use this when flue itself is running inside an external sandbox / container
-	 *   / CI runner that already provides the isolation boundary.
+	 * - Omitted / `undefined` / `false`: default in-memory sandbox. No
+	 *   files, no host access.
+	 * - `SandboxFactory`: Connector-wrapped sandbox. Use `local()` from
+	 *   `@flue/runtime/node` for the host-bound Node sandbox, or any
+	 *   remote connector (Daytona, E2B, Cloudflare Containers, etc.).
 	 * - `BashFactory`: User-configured just-bash factory. Called once to construct the runtime.
-	 * - `SandboxFactory`: Connector-wrapped external sandbox (Daytona, CF Containers, etc.).
 	 */
-	sandbox?: 'empty' | 'local' | SandboxFactory | BashFactory;
+	sandbox?: false | SandboxFactory | BashFactory;
 
 	/** Defaults to platform store (in-memory on Node, DO SQLite on Cloudflare). */
 	persist?: SessionStore;

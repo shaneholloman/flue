@@ -61,8 +61,6 @@ import {
   configureFlueRuntime,
   createDefaultFlueApp,
 } from '@flue/runtime/internal';
-import { createLocalSessionEnv } from '@flue/runtime/node';
-
 ${agentImports}
 ${userAppImport}
 
@@ -101,17 +99,6 @@ async function createDefaultEnv() {
   }));
 }
 
-/**
- * Create a local SessionEnv backed directly by the host filesystem and
- * child_process. No virtual filesystem, no sandbox layer — file methods
- * call node:fs/promises and shell commands run on the host. Use this
- * when flue itself is running inside an external sandbox / container /
- * CI runner that already provides the isolation boundary.
- */
-async function createLocalEnv() {
-  return createLocalSessionEnv();
-}
-
 // Default persistence store for Node — in-memory, process lifetime.
 const defaultStore = new InMemorySessionStore();
 const runStore = new InMemoryRunStore();
@@ -129,7 +116,6 @@ function createContextForRequest(id, runId, payload, req) {
       systemPrompt, skills, roles, model: undefined, resolveModel,
     },
     createDefaultEnv,
-    createLocalEnv,
     defaultStore,
   });
 }

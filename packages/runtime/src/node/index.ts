@@ -1,8 +1,8 @@
 /**
- * Node-specific entry point for `@flue/runtime`. Exports node-only helpers
- * such as `createLocalSessionEnv`.
+ * Node-specific entry point for `@flue/runtime`. Exports the `local()`
+ * sandbox factory for use in `init({ sandbox: local(...) })`.
  *
  * Import platform-agnostic types (`FlueContext`, etc.) from
  * `@flue/runtime`.
  */
-export { createLocalSessionEnv, type LocalSessionEnvOptions } from './local-env.ts';
+export { local, type LocalSandboxOptions } from './local.ts';
