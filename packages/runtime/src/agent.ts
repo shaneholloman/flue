@@ -1,5 +1,5 @@
-import type { AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import { type Static, Type } from '@mariozechner/pi-ai';
+import type { AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import { type Static, Type } from '@earendil-works/pi-ai';
 import type { Role, SessionEnv } from './types.ts';
 
 const MAX_READ_LINES = 2000;

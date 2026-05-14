@@ -6,7 +6,7 @@ throw new Error(
 
 // Preserve the old type surface for one release so TypeScript users get the
 // runtime migration error instead of a less helpful "module has no export".
-export { Type } from '@mariozechner/pi-ai';
+export { Type } from '@earendil-works/pi-ai';
 export type { McpServerConnection, McpServerOptions, McpTransport } from './mcp.ts';
 export { connectMcpServer } from './mcp.ts';
 export type {

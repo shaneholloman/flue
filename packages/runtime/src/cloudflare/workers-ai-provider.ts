@@ -21,12 +21,12 @@ import type {
 	Tool,
 	ToolCall,
 	Usage,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 import {
 	createAssistantMessageEventStream,
 	parseStreamingJson,
-} from '@mariozechner/pi-ai';
-import { convertMessages } from '@mariozechner/pi-ai/openai-completions';
+} from '@earendil-works/pi-ai';
+import { convertMessages } from '@earendil-works/pi-ai/openai-completions';
 import { CLOUDFLARE_AI_BINDING_API, type CloudflareAIBindingApi } from '../cloudflare-model.ts';
 import { getModelBinding } from '../runtime/providers.ts';
 import type { CloudflareGatewayOptions } from './gateway.ts';

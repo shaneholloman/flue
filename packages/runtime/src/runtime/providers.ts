@@ -6,7 +6,7 @@ import {
 	registerApiProvider as piRegisterApiProvider,
 	type Api,
 	type Model,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 import type { CloudflareGatewayOptions } from '../cloudflare/gateway.ts';
 import {
 	CLOUDFLARE_AI_BINDING_API,

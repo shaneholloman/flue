@@ -6,8 +6,8 @@
  * 1. Threshold — tokens exceed (contextWindow - reserveTokens). Compact, no retry.
  * 2. Overflow — LLM returned context overflow. Compact, then auto-retry.
  */
-import type { AgentMessage } from '@mariozechner/pi-agent-core';
-import { completeSimple, isContextOverflow } from '@mariozechner/pi-ai';
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
+import { completeSimple, isContextOverflow } from '@earendil-works/pi-ai';
 import type {
 	AssistantMessage,
 	Message,
@@ -17,7 +17,7 @@ import type {
 	ToolResultMessage,
 	Usage,
 	UserMessage,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 import { addUsage, fromProviderUsage } from './usage.ts';
 import type { PromptUsage } from './types.ts';
 

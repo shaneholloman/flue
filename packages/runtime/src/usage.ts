@@ -8,7 +8,7 @@
  * persistence path (normalizing pi-ai's `Usage` into our `PromptUsage`
  * before storing on a `CompactionEntry`).
  */
-import type { Usage } from '@mariozechner/pi-ai';
+import type { Usage } from '@earendil-works/pi-ai';
 import type { PromptUsage } from './types.ts';
 
 /** All-zero `PromptUsage`. Identity element for `addUsage`. */

@@ -1,14 +1,14 @@
 /** Internal session implementation. Not exported publicly — wrapped by FlueSession. */
 
-import type { AgentMessage, AgentTool, AgentToolResult } from '@mariozechner/pi-agent-core';
-import { Agent } from '@mariozechner/pi-agent-core';
+import type { AgentMessage, AgentTool, AgentToolResult } from '@earendil-works/pi-agent-core';
+import { Agent } from '@earendil-works/pi-agent-core';
 import type {
 	AssistantMessage,
 	ImageContent,
 	Model,
 	ToolResultMessage,
 	UserMessage,
-} from '@mariozechner/pi-ai';
+} from '@earendil-works/pi-ai';
 import type * as v from 'valibot';
 import { abortErrorFor, createCallHandle } from './abort.ts';
 import {

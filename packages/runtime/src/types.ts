@@ -1,5 +1,5 @@
-import type { AgentMessage, ThinkingLevel } from '@mariozechner/pi-agent-core';
-import type { ImageContent, Model, TSchema } from '@mariozechner/pi-ai';
+import type { AgentMessage, ThinkingLevel } from '@earendil-works/pi-agent-core';
+import type { ImageContent, Model, TSchema } from '@earendil-works/pi-ai';
 import type * as v from 'valibot';
 
 

@@ -8,7 +8,7 @@
  *
  * User agent code should never import from here.
  */
-import { type Api, getModel, type KnownProvider, type Model } from '@mariozechner/pi-ai';
+import { type Api, getModel, type KnownProvider, type Model } from '@earendil-works/pi-ai';
 import {
 	getProviderConfiguration,
 	hasRegisteredProvider,
@@ -118,7 +118,7 @@ export function resolveModel(model: ModelConfig | undefined): Model<Api> | undef
 		throw new Error(
 			`[flue] Unknown model "${modelString}". ` +
 				`Provider "${provider}" / model id "${modelId}" ` +
-				`is not registered with @mariozechner/pi-ai or via registerProvider().`,
+				`is not registered with @earendil-works/pi-ai or via registerProvider().`,
 		);
 	}
 	return applyProviderSettings(resolved, getProviderConfiguration(provider));

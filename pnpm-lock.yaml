@@ -185,18 +185,18 @@ importers:
       '@cloudflare/shell':
         specifier: ^0.3.2
         version: 0.3.6(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ai@6.0.175(zod@4.4.3))(zod@4.4.3)
+      '@earendil-works/pi-agent-core':
+        specifier: '*'
+        version: 0.74.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)
+      '@earendil-works/pi-ai':
+        specifier: '*'
+        version: 0.74.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)
       '@hono/node-server':
         specifier: ^1.14.0
         version: 1.19.14(hono@4.12.16)
       '@hono/standard-validator':
         specifier: ^0.2.0
         version: 0.2.2(@standard-schema/spec@1.1.0)(hono@4.12.16)
-      '@mariozechner/pi-agent-core':
-        specifier: '*'
-        version: 0.73.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)
-      '@mariozechner/pi-ai':
-        specifier: '*'
-        version: 0.73.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)
       '@modelcontextprotocol/sdk':
         specifier: ^1.29.0
         version: 1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3)
@@ -787,6 +787,15 @@ packages:
 
   '@daytona/toolbox-api-client@0.171.0':
     resolution: {integrity: sha512-uxJxTQdMSFOjHi5BCtLr9SpTPBHabIj2OdVWa4MDWc8iXsXI/N6YnjpK7CzrEQP7724mLxUoqqUdu2rjQjjAQA==}
+
+  '@earendil-works/pi-agent-core@0.74.0':
+    resolution: {integrity: sha512-6GMR7/wwjEJ1EsXLWEz03QOWin4AMrJ/AZoMpgm5DJ6GHsF6q6GOhQbj5Zip4dow3vo/TmBAVqM+vmGfrjGAFQ==}
+    engines: {node: '>=20.0.0'}
+
+  '@earendil-works/pi-ai@0.74.0':
+    resolution: {integrity: sha512-7M7qcrZY/KEkH4wFkX3eqzvmKru4O88wezNKoN0KD2m4aAOmp9tdW2xCmUgSTSWlKB7b2Xw9QtAgrzHtg6t6iw==}
+    engines: {node: '>=20.0.0'}
+    hasBin: true
 
   '@emnapi/core@1.10.0':
     resolution: {integrity: sha512-yq6OkJ4p82CAfPl0u9mQebQHKPJkY7WrIuk205cTYnYe+k2Z8YBh11FrbRG/H6ihirqcacOgl2BIO8oyMQLeXw==}
@@ -1480,17 +1489,6 @@ packages:
 
   '@js-sdsl/ordered-map@4.4.2':
     resolution: {integrity: sha512-iUKgm52T8HOE/makSxjqoWhe95ZJA1/G1sYsGev2JDKUSS14KAgg1LHb+Ba+IPow0xflbnSkOsZcO08C7w1gYw==}
-
-  '@mariozechner/pi-agent-core@0.73.0':
-    resolution: {integrity: sha512-ugcpvq0X9fr9fTSK29/3S4+KU/eeVMrBb7ZU3HqiF3xD7I1GlgumLj4FYmDrYSEA6+rzgNWlJUKwjKh9o0Z6AA==}
-    engines: {node: '>=20.0.0'}
-    deprecated: please use @earendil-works/pi-agent-core instead going forward
-
-  '@mariozechner/pi-ai@0.73.0':
-    resolution: {integrity: sha512-phKOpcde/ssz6UYszkmaGJ9LF9mgt/AP8LrtSwsfap+kMSeFfSQ2/mCSBT1mLJ2BqVuff9uXs1/+op1aQeaafQ==}
-    engines: {node: '>=20.0.0'}
-    deprecated: please use @earendil-works/pi-ai instead going forward
-    hasBin: true
 
   '@mistralai/mistralai@2.2.1':
     resolution: {integrity: sha512-uKU8CZmL2RzYKmplsU01hii4p3pe4HqJefpWNRWXm1Tcm0Sm4xXfwSLIy4k7ZCPlbETCGcp69E7hZs+WOJ5itQ==}
@@ -6434,6 +6432,41 @@ snapshots:
     transitivePeerDependencies:
       - debug
 
+  '@earendil-works/pi-agent-core@0.74.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)':
+    dependencies:
+      '@earendil-works/pi-ai': 0.74.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)
+      typebox: 1.1.37
+    transitivePeerDependencies:
+      - '@modelcontextprotocol/sdk'
+      - aws-crt
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+      - ws
+      - zod
+
+  '@earendil-works/pi-ai@0.74.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)':
+    dependencies:
+      '@anthropic-ai/sdk': 0.91.1(zod@4.4.3)
+      '@aws-sdk/client-bedrock-runtime': 3.1042.0
+      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))
+      '@mistralai/mistralai': 2.2.1
+      chalk: 5.6.2
+      openai: 6.26.0(ws@8.20.0)(zod@4.4.3)
+      partial-json: 0.1.7
+      proxy-agent: 6.5.0
+      typebox: 1.1.37
+      undici: 7.25.0
+      zod-to-json-schema: 3.25.2(zod@4.4.3)
+    transitivePeerDependencies:
+      - '@modelcontextprotocol/sdk'
+      - aws-crt
+      - bufferutil
+      - supports-color
+      - utf-8-validate
+      - ws
+      - zod
+
   '@emnapi/core@1.10.0':
     dependencies:
       '@emnapi/wasi-threads': 1.2.1
@@ -6873,41 +6906,6 @@ snapshots:
       '@jridgewell/sourcemap-codec': 1.5.5
 
   '@js-sdsl/ordered-map@4.4.2': {}
-
-  '@mariozechner/pi-agent-core@0.73.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)':
-    dependencies:
-      '@mariozechner/pi-ai': 0.73.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)
-      typebox: 1.1.37
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - aws-crt
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
-
-  '@mariozechner/pi-ai@0.73.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))(ws@8.20.0)(zod@4.4.3)':
-    dependencies:
-      '@anthropic-ai/sdk': 0.91.1(zod@4.4.3)
-      '@aws-sdk/client-bedrock-runtime': 3.1042.0
-      '@google/genai': 1.52.0(@modelcontextprotocol/sdk@1.29.0(@cfworker/json-schema@4.1.1)(zod@4.4.3))
-      '@mistralai/mistralai': 2.2.1
-      chalk: 5.6.2
-      openai: 6.26.0(ws@8.20.0)(zod@4.4.3)
-      partial-json: 0.1.7
-      proxy-agent: 6.5.0
-      typebox: 1.1.37
-      undici: 7.25.0
-      zod-to-json-schema: 3.25.2(zod@4.4.3)
-    transitivePeerDependencies:
-      - '@modelcontextprotocol/sdk'
-      - aws-crt
-      - bufferutil
-      - supports-color
-      - utf-8-validate
-      - ws
-      - zod
 
   '@mistralai/mistralai@2.2.1':
     dependencies:
