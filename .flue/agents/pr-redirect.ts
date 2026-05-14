@@ -383,16 +383,17 @@ const BRANCH_URL = (pr: PrDetails) =>
 const COMPARE_URL = (pr: PrDetails) =>
 	`https://github.com/${pr.baseRepo}/compare/main...${pr.headRepoFullName.replace('/', ':')}:${pr.headRefName}`;
 
-function implementationDetailsBlock(pr: PrDetails): string {
-	return `<details>
-<summary>Original implementation (from #${pr.number} by @${pr.author})</summary>
-
-- Source branch: [${pr.headRepoFullName}@${pr.headRefName}](${BRANCH_URL(pr)})
-- Diff vs \`main\`: [view comparison](${COMPARE_URL(pr)})
-- Original PR: ${pr.htmlUrl}
-
-</details>`;
+/** One-line attribution back to the source PR. */
+function originalImplementationLine(pr: PrDetails): string {
+	return `Original implementation from [#${pr.number}](${pr.htmlUrl}) by @${pr.author}`;
 }
+
+/**
+ * Footer reproduced verbatim on every auto-created issue and discussion.
+ * Explains the redirect model: ideas get discussed first, implementation
+ * follows once the idea is prioritized.
+ */
+const REDIRECT_FOOTER = `_All community-submitted pull requests are automatically converted to issues (bugs) & discussions (feature requests, enhancements) where they can be triaged and prioritized. Once prioritized, a PR implementation is created automatically._`;
 
 /**
  * The bug-report template that the LLM is asked to fill in. Kept inline
@@ -452,9 +453,9 @@ function bugIssueBody(pr: PrDetails, llmBody: string): string {
 
 ---
 
-${implementationDetailsBlock(pr)}
+${originalImplementationLine(pr)}
 
-_Filed automatically from #${pr.number} by @${pr.author}. The implementation is preserved on the source branch above._`;
+${REDIRECT_FOOTER}`;
 }
 
 function featureDiscussionBody(pr: PrDetails): string {
@@ -470,9 +471,9 @@ ${body}
 
 ---
 
-${implementationDetailsBlock(pr)}
+${originalImplementationLine(pr)}
 
-_Discussion happens here, not on the PR. The implementation is preserved on the source branch above so it can inform the work as the proposal evolves._`;
+${REDIRECT_FOOTER}`;
 }
 
 function duplicateCommentBody(pr: PrDetails, classification: Classification): string {
