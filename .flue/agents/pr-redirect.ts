@@ -394,15 +394,17 @@ function implementationDetailsBlock(pr: PrDetails): string {
 </details>`;
 }
 
-function bugIssueBody(pr: PrDetails, classification: Classification): string {
-	return `### Describe the Bug
+/**
+ * The bug-report template that the LLM is asked to fill in. Kept inline
+ * (not read from `.github/ISSUE_TEMPLATE/01-bug-report.md`) so the prompt
+ * is self-contained and not affected by template edits at runtime.
+ *
+ * If the on-disk template changes meaningfully, update this string to
+ * match.
+ */
+const BUG_REPORT_TEMPLATE = `### Describe the Bug
 
-${classification.summary}
-
-<!-- Original PR description from @${pr.author}: -->
-<!--
-${pr.body || '(empty)'}
--->
+<!-- A clear and concise description of what the bug is. -->
 
 ### Expected Behavior
 
@@ -411,46 +413,67 @@ ${pr.body || '(empty)'}
 ### Steps to Reproduce
 
 <!-- Either starting from one of the examples in \`examples/\`, or from a basic hello world. -->
+
 1.
 2.
-3.
+3.`;
 
----
+/**
+ * Ask the LLM to map the PR's content onto the bug-report template,
+ * returning a complete markdown body. Output is used verbatim — we
+ * trust the model to produce well-formed markdown that follows the
+ * shape of the template.
+ */
+async function writeBugIssueBody(session: FlueSession, pr: PrDetails): Promise<string> {
+	const prompt = `A contributor opened a pull request fixing what they believe is a bug. Translate their PR into a bug-report issue body that follows the template below.
 
-${implementationDetailsBlock(pr)}
+Fill each section based on what the PR title, body, and changed files imply. If a section is genuinely impossible to infer (for example, no reproduction steps are mentioned anywhere), leave its placeholder text in place so a maintainer can fill it in later. Do not invent reproduction steps you can't justify from the PR's content.
 
-_This issue was created automatically from #${pr.number}. Discussion happens here; the implementation is preserved on the source branch above._`;
+## PR
+**Title:** ${pr.title}
+**Author:** @${pr.author}
+**Files changed (${pr.filesChanged}):**
+${pr.diffStat || '(no files listed)'}
+
+**Body:**
+${pr.body || '(empty)'}
+
+## Template to fill
+${BUG_REPORT_TEMPLATE}
+
+## Output
+Return only the filled-in markdown body. No JSON, no fences, no explanation. Start directly with the first \`###\` heading. Do not add a top-level title — the issue title is set separately.`;
+	const response = await session.prompt(prompt);
+	return response.text.trim();
 }
 
-function featureDiscussionBody(pr: PrDetails, classification: Classification): string {
-	return `# Summary
-
-${classification.summary}
-
-# Background & Motivation
-
-<!-- Why is this proposal important? What problem does it solve?
-
-The original PR description from @${pr.author} is below — feel free to use it as a starting point:
-
-> ${(pr.body || '(empty)').split('\n').join('\n> ')}
--->
-
-# Goals
-
-<!-- Bulleted list of what this proposal should achieve. -->
-
-- 
-
-# Example
-
-<!-- Code example or API sketch, if applicable. -->
+function bugIssueBody(pr: PrDetails, llmBody: string): string {
+	return `${llmBody}
 
 ---
 
 ${implementationDetailsBlock(pr)}
 
-_This discussion was created automatically from #${pr.number}. The implementation is preserved on the source branch above — please discuss the proposal here before any code review._`;
+_Filed automatically from #${pr.number} by @${pr.author}. The implementation is preserved on the source branch above._`;
+}
+
+function featureDiscussionBody(pr: PrDetails): string {
+	// Verbatim PR body with attribution. Features are typically already
+	// justifying themselves in prose, so the original wording is the
+	// most useful starting point for discussion.
+	const quotedBody = (pr.body || '_(no description)_')
+		.split('\n')
+		.map((line) => `> ${line}`)
+		.join('\n');
+	return `> _Originally proposed by @${pr.author} in [#${pr.number}](${pr.htmlUrl}). Their description is reproduced verbatim below._
+
+${quotedBody}
+
+---
+
+${implementationDetailsBlock(pr)}
+
+_Discussion happens here, not on the PR. The implementation is preserved on the source branch above so it can inform the work as the proposal evolves._`;
 }
 
 function duplicateCommentBody(pr: PrDetails, classification: Classification): string {
@@ -600,7 +623,8 @@ export default async function ({ init, payload, log }: FlueContext) {
 	}
 
 	// ─── Build the Decision ─────────────────────────────────────────────
-	// Pure data. No mutations happen until the switch below.
+	// Pure data and a final LLM call (only for bugs). No mutations
+	// happen until the switch below.
 	let decision: Decision;
 	if (duplicate) {
 		decision = {
@@ -609,16 +633,17 @@ export default async function ({ init, payload, log }: FlueContext) {
 			commentBody: duplicateCommentBody(pr, classification),
 		};
 	} else if (classification.kind === 'bug') {
+		const llmBody = await writeBugIssueBody(session, pr);
 		decision = {
 			action: 'create-issue',
 			title: classification.suggestedTitle,
-			body: bugIssueBody(pr, classification),
+			body: bugIssueBody(pr, llmBody),
 		};
 	} else {
 		decision = {
 			action: 'create-discussion',
 			title: classification.suggestedTitle,
-			body: featureDiscussionBody(pr, classification),
+			body: featureDiscussionBody(pr),
 		};
 	}
 
