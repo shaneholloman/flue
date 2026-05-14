@@ -241,7 +241,14 @@ export async function resolveConfig(opts: ResolveConfigOptions): Promise<Resolve
 	const cwd = path.resolve(opts.cwd);
 	const searchFrom = path.resolve(opts.searchFrom ?? cwd);
 
-	const configPath = resolveConfigPath({ cwd: searchFrom, configFile: opts.configFile });
+	// Explicit `--config <path>` is resolved relative to the caller's cwd
+	// (matches the help text: "(relative to cwd)"). Auto-discovery still
+	// scans `searchFrom` so `--root` continues to influence where we look
+	// when no `--config` was provided.
+	const configPath =
+		opts.configFile !== undefined
+			? resolveConfigPath({ cwd, configFile: opts.configFile })
+			: resolveConfigPath({ cwd: searchFrom, configFile: undefined });
 
 	let fileConfig: UserFlueConfig = {};
 	if (configPath) {

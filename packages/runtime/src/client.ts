@@ -130,7 +130,13 @@ export function createFlueContext(config: FlueContextConfig): FlueContextInterna
 				assertRoleExists(config.agentConfig.roles, options.role);
 				const sandbox = options.sandbox;
 				const baseEnv = await resolveSessionEnv(config.id, sandbox, config, options.cwd);
-				const env = options.cwd ? createCwdSessionEnv(baseEnv, options.cwd) : baseEnv;
+				// Resolve `init({ cwd })` against the sandbox's own cwd so that
+				// relative paths target the sandbox/session filesystem, not the
+				// agent process cwd or `/`. Mirrors the same pattern used for
+				// task sessions in harness.ts.
+				const env = options.cwd
+					? createCwdSessionEnv(baseEnv, baseEnv.resolvePath(options.cwd))
+					: baseEnv;
 				const store: SessionStore = options.persist ?? config.defaultStore;
 				const localContext = await discoverSessionContext(env);
 
