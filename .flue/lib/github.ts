@@ -2,7 +2,7 @@
  * GitHub write API for the `pr-redirect` agent.
  *
  * Every function here authenticates as `astrobot-houston` via the
- * `HOUSTON_GITHUB_TOKEN` env var, so all created issues, discussions,
+ * `FREDKBOT_GITHUB_TOKEN` env var, so all created issues, discussions,
  * and comments attribute to the bot. This module is deliberately
  * write-only: the agent does all reads through the `gh` CLI inside its
  * sandbox, which carries only the read-only `GITHUB_TOKEN`.
@@ -14,17 +14,19 @@
 
 const REPO = process.env.GITHUB_REPOSITORY ?? 'withastro/flue';
 
-function requireHoustonToken(): string {
-	const token = process.env.HOUSTON_GITHUB_TOKEN;
+function requireBotToken(): string {
+	const token = process.env.FREDKBOT_GITHUB_TOKEN;
 	if (!token) {
-		throw new Error('HOUSTON_GITHUB_TOKEN env var is required for deterministic GitHub mutations.');
+		throw new Error(
+			'FREDKBOT_GITHUB_TOKEN env var is required for deterministic GitHub mutations.',
+		);
 	}
 	return token;
 }
 
 function headers(): Record<string, string> {
 	return {
-		Authorization: `token ${requireHoustonToken()}`,
+		Authorization: `token ${requireBotToken()}`,
 		'Content-Type': 'application/json',
 		Accept: 'application/vnd.github+json',
 		'User-Agent': 'flue-pr-redirect',

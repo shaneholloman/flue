@@ -10,7 +10,7 @@ name: PR Redirect
 # Do NOT add `ref: ${{ github.event.pull_request.head.sha }}` to the
 # checkout step. Do NOT add steps that build, test, or otherwise execute
 # code from the PR. Either change makes a fork PR author able to
-# exfiltrate HOUSTON_GITHUB_TOKEN.
+# exfiltrate FREDKBOT_GITHUB_TOKEN.
 
 on:
   pull_request_target:
@@ -74,7 +74,7 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           # Privileged write token (astrobot-houston PAT) for the
           # deterministic phase. Must not be exposed to the sandbox.
-          HOUSTON_GITHUB_TOKEN: ${{ secrets.HOUSTON_GITHUB_TOKEN }}
+          FREDKBOT_GITHUB_TOKEN: ${{ secrets.FREDKBOT_GITHUB_TOKEN }}
           ANTHROPIC_API_KEY: ${{ secrets.CI_ANTHROPIC_API_KEY }}
           # Read by the agent rather than interpolated into the shell,
           # so PR-controlled data never reaches `run:`.

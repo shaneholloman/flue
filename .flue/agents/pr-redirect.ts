@@ -11,13 +11,13 @@
  *        - classify as 'bug' or 'feature' (when ambiguous: 'bug')
  *        - generate search queries and look up open issues/discussions
  *        - score candidates; high/medium-confidence match = duplicate
- *   2. Deterministic phase (plain TS, HOUSTON_GITHUB_TOKEN):
+ *   2. Deterministic phase (plain TS, FREDKBOT_GITHUB_TOKEN):
  *        - duplicate found → comment on existing thread, close PR
  *        - otherwise        → create new issue/discussion, close PR
  *
  * Security
  * --------
- * The sandbox env is an allowlist; `HOUSTON_GITHUB_TOKEN` is never
+ * The sandbox env is an allowlist; `FREDKBOT_GITHUB_TOKEN` is never
  * exposed to it, so even total prompt injection of the LLM phase cannot
  * make `astrobot-houston` write anything. All mutations happen in the
  * deterministic phase from typed inputs validated by the agent.
@@ -547,15 +547,15 @@ export default async function ({ init, payload, log }: FlueContext) {
 	// Validate both tokens up front so we don't spend LLM tokens on a
 	// run that's guaranteed to fail when the deterministic phase tries
 	// to mutate.
-	if (!process.env.HOUSTON_GITHUB_TOKEN) {
-		throw new Error('HOUSTON_GITHUB_TOKEN env var is required.');
+	if (!process.env.FREDKBOT_GITHUB_TOKEN) {
+		throw new Error('FREDKBOT_GITHUB_TOKEN env var is required.');
 	}
 	const ghToken = process.env.GITHUB_TOKEN;
 	if (!ghToken) {
 		throw new Error('GITHUB_TOKEN env var is required.');
 	}
 
-	// Only GH_TOKEN is passed to the sandbox. HOUSTON_GITHUB_TOKEN
+	// Only GH_TOKEN is passed to the sandbox. FREDKBOT_GITHUB_TOKEN
 	// intentionally stays in process.env so only `lib/github.ts` can read
 	// it — see the security note at the top of the file.
 	const harness = await init({
@@ -623,7 +623,7 @@ export default async function ({ init, payload, log }: FlueContext) {
 	}
 
 	// ─── Deterministic phase ────────────────────────────────────────────
-	// No LLM beyond this point. All mutations use HOUSTON_GITHUB_TOKEN
+	// No LLM beyond this point. All mutations use FREDKBOT_GITHUB_TOKEN
 	// via lib/github.ts on inputs already validated above.
 	//
 	// Order is significant: create the destination first so the PR's
