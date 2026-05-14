@@ -35,7 +35,7 @@ export default async function ({ init, payload }: FlueContext) {
   const { data } = await session.prompt(
     `Say hello to ${payload.name ?? 'the user'} and share an interesting fact.`,
     {
-      schema: v.object({
+      result: v.object({
         greeting: v.string(),
         fact: v.string(),
       }),
@@ -108,20 +108,20 @@ Once you have a session, you have three core methods:
 - **`session.prompt(text, opts)`** — Send a prompt to the agent and get back a result.
 - **`session.skill(name, opts)`** — Run a named skill — a reusable agent task defined by a markdown instruction file.
 
-Both `prompt()` and `skill()` accept a `schema` option — a [Valibot](https://valibot.dev) schema that defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed:
+Both `prompt()` and `skill()` accept a `result` option — a [Valibot](https://valibot.dev) schema that defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed:
 
 ```typescript
 import * as v from 'valibot';
 
 // summary: string
 const { data: summary } = await session.prompt(`Summarize this diff:\n${diff}`, {
-  schema: v.string(),
+  result: v.string(),
 });
 
 // diagnosis: { reproducible: boolean, skipped: boolean }
 const { data: diagnosis } = await session.skill('triage', {
   args: { issueNumber, issue },
-  schema: v.object({
+  result: v.object({
     reproducible: v.boolean(),
     skipped: v.boolean(),
   }),
@@ -163,7 +163,7 @@ export default async function ({ init, payload }: FlueContext) {
   // those binaries.
   const { data } = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    schema: v.object({
+    result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),
@@ -198,7 +198,7 @@ Use a role by passing its name to `prompt()`:
 ```typescript
 const { data } = await session.prompt(`Review this PR:\n${diff}`, {
   role: 'reviewer',
-  schema: v.object({ approved: v.boolean(), comments: v.array(v.string()) }),
+  result: v.object({ approved: v.boolean(), comments: v.array(v.string()) }),
 });
 ```
 
@@ -279,7 +279,7 @@ The `--payload` flag passes JSON data to the agent's `payload` property. `GITHUB
 
 ## Typed results and orchestration
 
-Schemas aren't just for type safety — they're how you orchestrate multi-step workflows. Because you get typed data back from `prompt()` and `skill()`, you can branch on results within a single agent:
+Result schemas aren't just for type safety — they're how you orchestrate multi-step workflows. Because you get typed data back from `prompt()` and `skill()`, you can branch on results within a single agent:
 
 ```typescript
 import { type FlueContext } from '@flue/runtime';
@@ -292,7 +292,7 @@ export default async function ({ init, payload }: FlueContext) {
 
   const { data } = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    schema: v.object({
+    result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),
@@ -303,7 +303,7 @@ export default async function ({ init, payload }: FlueContext) {
     // Escalate: attempt an automated fix
     await session.skill('auto-fix', {
       args: { issueNumber: payload.issueNumber },
-      schema: v.object({ fix_applied: v.boolean(), pr_url: v.optional(v.string()) }),
+      result: v.object({ fix_applied: v.boolean(), pr_url: v.optional(v.string()) }),
     });
   }
 

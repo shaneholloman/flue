@@ -41,7 +41,7 @@ export default async function ({ init, payload }: FlueContext) {
   const session = await harness.session();
 
   const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
-    schema: v.object({
+    result: v.object({
       translation: v.string(),
       confidence: v.picklist(['low', 'medium', 'high']),
     }),
@@ -156,7 +156,7 @@ import * as v from 'valibot';
 
 const { data } = await session.skill('summarize', {
   args: { text: document },
-  schema: v.object({ summary: v.string() }),
+  result: v.object({ summary: v.string() }),
 });
 ```
 
@@ -186,7 +186,7 @@ export default async function ({ init, payload }: FlueContext) {
     related to: ${payload.topic}`,
     {
       role: 'reviewer',
-      schema: v.object({
+      result: v.object({
         issues: v.array(
           v.object({
             file: v.string(),

@@ -43,8 +43,8 @@ export default async function ({ init, payload }: FlueContext) {
 
   // prompt() sends a message in the session, triggering action.
   const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
-    // Pass a `schema` to get typed, schema-validated data back from your agent.
-    schema: v.object({
+    // Pass `result` to get typed, schema-validated data back from your agent.
+    result: v.object({
       translation: v.string(),
       confidence: v.picklist(['low', 'medium', 'high']),
     }),
@@ -129,9 +129,9 @@ export default async function ({ init, payload }: FlueContext) {
   const { data } = await session.skill('triage', {
     // Pass arguments to any prompt or skill.
     args: { issueNumber: payload.issueNumber },
-    // Schemas are great for being able to act/orchestrate based on
+    // Result schemas are great for being able to act/orchestrate based on
     // the structured `data` returned from your prompt or skill call.
-    schema: v.object({
+    result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),

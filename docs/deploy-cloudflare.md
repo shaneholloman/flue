@@ -43,7 +43,7 @@ export default async function ({ init, payload }: FlueContext) {
   const session = await harness.session();
 
   const { data } = await session.prompt(`Translate this to ${payload.language}: "${payload.text}"`, {
-    schema: v.object({
+    result: v.object({
       translation: v.string(),
       confidence: v.picklist(['low', 'medium', 'high']),
     }),
@@ -403,7 +403,7 @@ Call a skill from your agent:
 ```typescript
 const { data } = await session.skill('greet', {
   args: { name: 'World' },
-  schema: v.object({ greeting: v.string() }),
+  result: v.object({ greeting: v.string() }),
 });
 ```
 

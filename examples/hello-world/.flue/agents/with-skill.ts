@@ -11,7 +11,7 @@ export default async function ({ init, payload }: FlueContext) {
 	// Test: invoke a named skill with structured result
 	const { data } = await session.skill('greet', {
 		args: { name: payload.name ?? 'World' },
-		schema: v.object({ greeting: v.string() }),
+		result: v.object({ greeting: v.string() }),
 	});
 	console.log('[with-skill] greeting:', data.greeting);
 

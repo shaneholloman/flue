@@ -10,7 +10,7 @@
 //
 // Payload:
 //   { "test": "multiturn" }   — multi-turn memory within one invocation
-//   { "test": "structured" }  — structured output via schema option
+//   { "test": "structured" }  — structured output via result option
 //   { "test": "tool" }        — custom tool calling
 //   { "action": "set", "secret": "..." }   — cross-invocation persistence (set)
 //   { "action": "recall" }                  — cross-invocation persistence (recall)
@@ -72,7 +72,7 @@ export default async function ({ init, payload, id }: FlueContext) {
 		};
 	}
 
-	// Test 2: structured output via the schema option.
+	// Test 2: structured output via the result option.
 	if (!test || test === 'structured') {
 		const Answer = v.object({
 			capital: v.string(),
@@ -81,7 +81,7 @@ export default async function ({ init, payload, id }: FlueContext) {
 		try {
 			const structured = await session.prompt(
 				'What is the capital of France? Respond as JSON.',
-				{ schema: Answer },
+				{ result: Answer },
 			);
 			results.structured = {
 				pass:

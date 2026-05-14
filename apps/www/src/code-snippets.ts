@@ -10,7 +10,7 @@ export const HERO = `export default async function ({ init, payload, env }) {
   // Call skills as reusable workflows with structured output:
   const { data } = await session.skill('triage', {
     args: { issueNumber: payload.issueNumber },
-    schema: v.object({ fixApplied: v.boolean(), summary: v.string() }),
+    result: v.object({ fixApplied: v.boolean(), summary: v.string() }),
   });
 
   // Keep track of work in the session, just like Claude Code or Codex:
@@ -67,7 +67,7 @@ export default async function ({ init, payload, env }: FlueContext) {
   // Run the 'triage' skill to triage the GitHub issue.
   const { data } = await session.skill('triage', {
     args: { issueNumber },
-    schema: v.object({
+    result: v.object({
       severity: v.picklist(['low', 'medium', 'high', 'critical']),
       reproducible: v.boolean(),
       summary: v.string(),

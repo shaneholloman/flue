@@ -120,7 +120,7 @@ interface RuntimeScopeOptions {
 	callSite: string;
 	/**
 	 * Framework-injected pi-agent-core tools spliced in alongside builtins and custom
-	 * tools for the duration of this call. Used by the schema'd-result flow to
+	 * tools for the duration of this call. Used by the result-schema flow to
 	 * inject `finish` and `give_up`.
 	 */
 	extraTools?: AgentTool<any>[];
@@ -137,18 +137,15 @@ interface InternalTaskResult<T> {
 }
 
 /**
- * Read the per-call schema option, accepting both the canonical `schema`
- * field and the deprecated `result` alias. The deprecated alias is typed
- * as `never` on the public option interfaces so TypeScript flags new
- * usage; we still honor it at runtime during the deprecation window so
- * existing callers keep working without code changes.
+ * Read the per-call result schema option, accepting both the canonical
+ * `result` field and the deprecated `schema` alias.
  */
-function resolveSchemaOption(
-	options: { schema?: v.GenericSchema; result?: never } | undefined,
+function resolveResultOption(
+	options: { result?: v.GenericSchema; schema?: v.GenericSchema } | undefined,
 ): v.GenericSchema | undefined {
 	if (!options) return undefined;
-	if (options.schema !== undefined) return options.schema;
-	return (options as { result?: v.GenericSchema }).result;
+	if (options.result !== undefined) return options.result;
+	return options.schema;
 }
 
 interface InternalTaskOptions<S extends v.GenericSchema | undefined> extends TaskOptions<S> {
@@ -552,13 +549,17 @@ export class Session implements FlueSession {
 
 	prompt<S extends v.GenericSchema>(
 		text: string,
+		options: PromptOptions<S> & { result: S },
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	prompt<S extends v.GenericSchema>(
+		text: string,
 		options: PromptOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	prompt(text: string, options?: PromptOptions): CallHandle<PromptResponse>;
 	prompt(text: string, options?: PromptOptions<v.GenericSchema | undefined>): CallHandle<any> {
 		return createCallHandle(options?.signal, (signal) =>
 			this.runOperation('prompt', signal, async () => {
-				const schema = resolveSchemaOption(options);
+				const schema = resolveResultOption(options);
 				return this.runPromptCall({
 					promptText: buildPromptText(text, schema),
 					schema,
@@ -578,6 +579,10 @@ export class Session implements FlueSession {
 
 	skill<S extends v.GenericSchema>(
 		name: string,
+		options: SkillOptions<S> & { result: S },
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
+	skill<S extends v.GenericSchema>(
+		name: string,
 		options: SkillOptions<S> & { schema: S },
 	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	skill(name: string, options?: SkillOptions): CallHandle<PromptResponse>;
@@ -586,7 +591,7 @@ export class Session implements FlueSession {
 			this.runOperation('skill', signal, async () => {
 				// Registered skill names and relative skill paths use different prompts.
 				const looksLikePath = name.includes('/') || /\.(md|markdown)$/i.test(name);
-				const schema = resolveSchemaOption(options);
+				const schema = resolveResultOption(options);
 
 				let promptText: string;
 				if (looksLikePath) {
@@ -631,6 +636,10 @@ export class Session implements FlueSession {
 		);
 	}
 
+	task<S extends v.GenericSchema>(
+		text: string,
+		options: TaskOptions<S> & { result: S },
+	): CallHandle<PromptResultResponse<v.InferOutput<S>>>;
 	task<S extends v.GenericSchema>(
 		text: string,
 		options: TaskOptions<S> & { schema: S },
@@ -1056,7 +1065,7 @@ export class Session implements FlueSession {
 				signal.addEventListener('abort', abortListener, { once: true });
 			}
 
-			const schema = resolveSchemaOption(options);
+			const schema = resolveResultOption(options);
 			const roleModel = resolveRoleModel(this.config.roles, role);
 			const roleThinkingLevel = resolveRoleThinkingLevel(this.config.roles, role);
 			const childOptions: PromptOptions<v.GenericSchema | undefined> = {
@@ -1068,7 +1077,7 @@ export class Session implements FlueSession {
 				images: options?.images,
 				signal,
 			};
-			if (schema) childOptions.schema = schema;
+			if (schema) childOptions.result = schema;
 
 			const output: any = await child.prompt(text, childOptions as any);
 			const taskResult: InternalTaskResult<any> = {
@@ -1530,7 +1539,7 @@ export class Session implements FlueSession {
 	 * Shared body of `prompt()` and `skill()`: scope the runtime, optionally
 	 * inject the result-tool pair, drive the harness, and aggregate usage.
 	 *
-	 * Returns `PromptResultResponse<T>` when `schema` is set, else `PromptResponse`.
+	 * Returns `PromptResultResponse<T>` when a result schema is set, else `PromptResponse`.
 	 */
 	private async runPromptCall(args: {
 		promptText: string;
@@ -1544,7 +1553,7 @@ export class Session implements FlueSession {
 		errorLabel: string;
 		callSite: string;
 		signal: AbortSignal;
-		// The schema'd branch returns the public `PromptResultResponse<unknown>`
+		// The result-schema branch returns the public `PromptResultResponse<unknown>`
 		// shape (`data` + `usage` + `model`) plus a deprecated `result` alias
 		// that the public type marks as `never`. We widen the internal return
 		// type with `Omit<…, 'result'> & { result: unknown }` so the runtime

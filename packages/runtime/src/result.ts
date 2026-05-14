@@ -3,7 +3,7 @@ import { toJsonSchema } from '@valibot/to-json-schema';
 import * as v from 'valibot';
 
 /**
- * Names of the framework-injected tools used to capture schema-typed results.
+ * Names of the framework-injected tools used to capture structured results.
  * Surfaced for diagnostics and logging; not part of the public API.
  */
 export const FINISH_TOOL_NAME = 'finish';
@@ -97,7 +97,7 @@ export function buildPromptText(text: string, schema?: v.GenericSchema): string 
 // ─── Result tools ───────────────────────────────────────────────────────────
 
 /**
- * Outcome of a schema'd prompt/skill call. `pending` means the LLM ended its
+ * Outcome of a result-schema prompt/skill call. `pending` means the LLM ended its
  * turn without calling either of the result tools.
  */
 export type ResultOutcome<T> =
