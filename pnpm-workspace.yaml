@@ -10,3 +10,8 @@ allowBuilds:
   sharp: true
   workerd: false
 minimumReleaseAge: 1440
+resolutionMode: highest
+minimumReleaseAgeExclude:
+  - '@aws-sdk/*'
+  - '@smithy/*'
+  - protobufjs
