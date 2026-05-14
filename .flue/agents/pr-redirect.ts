@@ -460,14 +460,13 @@ _Filed automatically from #${pr.number} by @${pr.author}. The implementation is 
 function featureDiscussionBody(pr: PrDetails): string {
 	// Verbatim PR body with attribution. Features are typically already
 	// justifying themselves in prose, so the original wording is the
-	// most useful starting point for discussion.
-	const quotedBody = (pr.body || '_(no description)_')
-		.split('\n')
-		.map((line) => `> ${line}`)
-		.join('\n');
+	// most useful starting point for discussion. The body is included
+	// raw (not block-quoted) so that fenced code blocks, mermaid
+	// diagrams, headings, etc. render natively.
+	const body = pr.body?.trim() || '_(no description)_';
 	return `> _Originally proposed by @${pr.author} in [#${pr.number}](${pr.htmlUrl}). Their description is reproduced verbatim below._
 
-${quotedBody}
+${body}
 
 ---
 
