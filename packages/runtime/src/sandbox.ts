@@ -120,17 +120,27 @@ function createBashSessionEnv(bash: BashLike): SessionEnv {
 	};
 }
 
+/**
+ * Duck-type detection for just-bash Bash instances. Shared with client.ts
+ * so the predicate doesn't drift between the throwing and boolean variants.
+ */
+export function isBashLike(value: unknown): value is BashLike {
+	return (
+		typeof value === 'object' &&
+		value !== null &&
+		'exec' in value &&
+		'getCwd' in value &&
+		'fs' in value &&
+		typeof (value as any).exec === 'function' &&
+		typeof (value as any).getCwd === 'function' &&
+		// `typeof null === 'object'`, so an explicit null-check is required here.
+		typeof (value as any).fs === 'object' &&
+		(value as any).fs !== null
+	);
+}
+
 function assertBashLike(value: unknown): asserts value is BashLike {
-	if (
-		typeof value !== 'object' ||
-		value === null ||
-		!('exec' in value) ||
-		!('getCwd' in value) ||
-		!('fs' in value) ||
-		typeof (value as any).exec !== 'function' ||
-		typeof (value as any).getCwd !== 'function' ||
-		typeof (value as any).fs !== 'object'
-	) {
+	if (!isBashLike(value)) {
 		throw new Error('[flue] BashFactory must return a Bash-like object.');
 	}
 }

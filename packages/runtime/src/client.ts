@@ -2,12 +2,11 @@ import { discoverSessionContext } from './context.ts';
 import { Harness } from './harness.ts';
 import { assertRoleExists } from './roles.ts';
 import { dispatchGlobalEvent } from './runtime/events.ts';
-import { bashFactoryToSessionEnv, createCwdSessionEnv } from './sandbox.ts';
+import { bashFactoryToSessionEnv, createCwdSessionEnv, isBashLike } from './sandbox.ts';
 import type {
 	AgentConfig,
 	AgentInit,
 	BashFactory,
-	BashLike,
 	FlueContext,
 	FlueEvent,
 	FlueEventCallback,
@@ -207,20 +206,6 @@ function serializeLogError(error: Error): Record<string, unknown> {
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
-
-/** Duck-type detection for just-bash Bash instances. */
-function isBashLike(value: unknown): value is BashLike {
-	return (
-		typeof value === 'object' &&
-		value !== null &&
-		'exec' in value &&
-		'getCwd' in value &&
-		'fs' in value &&
-		typeof (value as any).exec === 'function' &&
-		typeof (value as any).getCwd === 'function' &&
-		typeof (value as any).fs === 'object'
-	);
-}
 
 function isBashFactory(value: unknown): value is BashFactory {
 	return typeof value === 'function';
