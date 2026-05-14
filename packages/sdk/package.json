@@ -1,8 +1,7 @@
 {
 	"name": "@flue/sdk",
-	"version": "0.5.3",
+	"version": "0.6.2",
 	"type": "module",
-	"private": true,
 	"license": "Apache-2.0",
 	"exports": {
 		".": {
