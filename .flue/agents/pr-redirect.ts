@@ -389,11 +389,24 @@ function originalImplementationLine(pr: PrDetails): string {
 }
 
 /**
- * Footer reproduced verbatim on every auto-created issue and discussion.
- * Explains the redirect model: ideas get discussed first, implementation
- * follows once the idea is prioritized.
+ * Banner reproduced verbatim at the top of every auto-created issue and
+ * discussion. Names the source PR and explains the redirect model:
+ * ideas get discussed first, implementation follows once the idea is
+ * prioritized.
  */
-const REDIRECT_FOOTER = `_All community-submitted pull requests are automatically converted to issues (bugs) & discussions (feature requests, enhancements) where they can be triaged and prioritized. Once prioritized, a PR implementation is created automatically._`;
+type BannerLead =
+	| 'verbatim' // discussion: full PR body follows, unmodified
+	| 'rephrased'; // bug issue: body was rewritten by the LLM into the bug template
+
+function redirectBanner(pr: PrDetails, lead: BannerLead): string {
+	const firstLine =
+		lead === 'verbatim'
+			? `_Originally proposed by @${pr.author} in [#${pr.number}](${pr.htmlUrl}). Their description is reproduced verbatim below._`
+			: `_Originally reported by @${pr.author} in [#${pr.number}](${pr.htmlUrl})._`;
+	return `> ${firstLine}
+>
+> _All community-submitted pull requests are automatically converted to issues (bugs) & discussions (feature requests, enhancements) where they can be triaged and prioritized. Once prioritized, a PR implementation is created automatically._`;
+}
 
 /**
  * The bug-report template that the LLM is asked to fill in. Kept inline
@@ -449,13 +462,13 @@ Return only the filled-in markdown body. No JSON, no fences, no explanation. Sta
 }
 
 function bugIssueBody(pr: PrDetails, llmBody: string): string {
-	return `${llmBody}
+	return `${redirectBanner(pr, 'rephrased')}
+
+${llmBody}
 
 ---
 
-${originalImplementationLine(pr)}
-
-${REDIRECT_FOOTER}`;
+${originalImplementationLine(pr)}`;
 }
 
 function featureDiscussionBody(pr: PrDetails): string {
@@ -465,15 +478,13 @@ function featureDiscussionBody(pr: PrDetails): string {
 	// raw (not block-quoted) so that fenced code blocks, mermaid
 	// diagrams, headings, etc. render natively.
 	const body = pr.body?.trim() || '_(no description)_';
-	return `> _Originally proposed by @${pr.author} in [#${pr.number}](${pr.htmlUrl}). Their description is reproduced verbatim below._
+	return `${redirectBanner(pr, 'verbatim')}
 
 ${body}
 
 ---
 
-${originalImplementationLine(pr)}
-
-${REDIRECT_FOOTER}`;
+${originalImplementationLine(pr)}`;
 }
 
 function duplicateCommentBody(pr: PrDetails, classification: Classification): string {
