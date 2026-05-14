@@ -1,5 +1,15 @@
 # Changelog
 
+## Unreleased
+
+### Fixes & Other Changes
+
+- **`init({ cwd })` with a relative path now resolves against the sandbox cwd.** Previously, `init({ cwd: 'relative/path' })` was treated as if absolute against the sandbox root (`'relative/path'` → `/relative/path`), so agents ran in the wrong directory — potentially discovering the wrong `AGENTS.md`, skills, or pointing shell/file operations at unintended paths. Relative `cwd` values now resolve against the parent `SessionEnv`'s `cwd`, matching the pattern already used for task sessions. Absolute paths are unchanged. Fixes #152.
+
+- **`flue --config <path>` resolves against the caller's cwd, not `--root`.** The explicit `--config` flag was being resolved against `searchFrom` (effectively `--root`), contradicting the CLI help text and the config-module doc comment, and diverging from Vite/Astro behavior. Explicit `--config` paths now resolve against `process.cwd()`. Auto-discovery (no `--config` flag) still scans `searchFrom`, so `--root` continues to influence where the config is looked up when one wasn't named explicitly. Fixes #152.
+
+- **`isBashLike` duck-check no longer accepts `fs: null`.** Because `typeof null === 'object'`, an object like `{ exec, getCwd, fs: null }` slipped past `assertBashLike` / `isBashLike` and crashed later inside `createBashSessionEnv` on the first `fs.readFile(...)` call instead of failing with the clear `"BashFactory must return a Bash-like object"` validation error. The check now rejects `fs: null` explicitly, and the predicate is shared between `sandbox.ts` and `client.ts` so the two copies can't drift. Fixes #149.
+
 ## 0.6.1 - 2026-05-13
 
 ### Fixes & Other Changes
