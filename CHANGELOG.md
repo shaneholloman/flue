@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.6.1 - 2026-05-13
+
+### Fixes & Other Changes
+
+- **Runtime dependencies now use the maintained `@earendil-works/*` package scope.** Replaced deprecated `@mariozechner/pi-ai` and `@mariozechner/pi-agent-core` dependencies and imports with `@earendil-works/pi-ai` and `@earendil-works/pi-agent-core`, and updated the website model registry endpoint to read from the new package scope. Fixes #143.
+
 ## 0.6.0 - 2026-05-13
 
 ### New Features
