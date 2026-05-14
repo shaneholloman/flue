@@ -1,8 +1,8 @@
 ---
 {
   "category": "sandbox",
-  "website": "https://developers.cloudflare.com/containers",
-  "aliases": ["@cloudflare/sandbox", "cloudflare-sandbox", "cf-sandbox"]
+  "website": "https://developers.cloudflare.com/sandbox",
+  "aliases": ["@cloudflare/sandbox"]
 }
 ---
 
