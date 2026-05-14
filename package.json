@@ -4,9 +4,9 @@
 	"private": true,
 	"license": "Apache-2.0",
 	"engines": {
-		"node": ">=22"
+		"node": ">=22",
+		"pnpm": ">=11 <12"
 	},
-	"packageManager": "pnpm@9.12.3",
 	"scripts": {
 		"dev": "turbo dev",
 		"build": "turbo build",
