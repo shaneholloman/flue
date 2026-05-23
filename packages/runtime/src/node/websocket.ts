@@ -1,7 +1,7 @@
 import type { IncomingMessage, Server } from 'node:http';
 import type { Duplex } from 'node:stream';
-import { WebSocket, WebSocketServer, type RawData } from 'ws';
-import { InvalidRequestError, toPublicError } from '../errors.ts';
+import { WebSocket, WebSocketServer } from 'ws';
+import { InvalidRequestError } from '../errors.ts';
 import type {
 	AgentWebSocketClientMessage,
 	WebSocketServerMessage,
@@ -13,6 +13,11 @@ import type { AgentHandler, CreateContextFn, RunHandlerFn, WorkflowHandler } fro
 import { invokeAttached } from '../runtime/handle-agent.ts';
 import { generateRunId, generateWorkflowRunId } from '../runtime/ids.ts';
 import type { RunRegistry } from '../runtime/run-registry.ts';
+import {
+	createWebSocketErrorMessage,
+	parseAgentWebSocketMessage,
+	parseWorkflowWebSocketMessage,
+} from '../runtime/websocket-protocol.ts';
 import type { RunStore } from '../runtime/run-store.ts';
 import type { RunSubscriberRegistry } from '../runtime/run-subscribers.ts';
 
@@ -123,7 +128,7 @@ function handleAgentSocket(
 		}
 		let message: AgentWebSocketClientMessage;
 		try {
-			message = parseAgentMessage(raw);
+			message = parseAgentWebSocketMessage(raw.toString());
 		} catch (error) {
 			sendError(socket, error);
 			return;
@@ -189,7 +194,7 @@ function handleWorkflowSocket(
 		}
 		let message: WorkflowWebSocketClientMessage;
 		try {
-			message = parseWorkflowMessage(raw);
+			message = parseWorkflowWebSocketMessage(raw.toString());
 		} catch (error) {
 			sendError(socket, error);
 			return;
@@ -237,47 +242,6 @@ async function invokeWorkflow(
 	}
 }
 
-function parseAgentMessage(raw: RawData): AgentWebSocketClientMessage {
-	const value = parseObject(raw);
-	if (value.version !== 1 || (value.type !== 'prompt' && value.type !== 'ping')) {
-		throw new InvalidRequestError({ reason: 'Agent WebSocket messages must use protocol version 1 and type "prompt" or "ping".' });
-	}
-	if (value.type === 'ping') {
-		if (value.requestId !== undefined && typeof value.requestId !== 'string') {
-			throw new InvalidRequestError({ reason: 'Agent WebSocket ping requestId must be a string when provided.' });
-		}
-		return { version: 1, type: 'ping', requestId: value.requestId as string | undefined };
-	}
-	if (typeof value.requestId !== 'string' || value.requestId === '' || typeof value.message !== 'string') {
-		throw new InvalidRequestError({ reason: 'Agent WebSocket prompt messages require string requestId and message values.' });
-	}
-	if (value.session !== undefined && (typeof value.session !== 'string' || value.session.trim() === '')) {
-		throw new InvalidRequestError({ reason: 'Agent WebSocket prompt session must be a non-empty string when provided.' });
-	}
-	return { version: 1, type: 'prompt', requestId: value.requestId, message: value.message, session: value.session as string | undefined };
-}
-
-function parseWorkflowMessage(raw: RawData): WorkflowWebSocketClientMessage {
-	const value = parseObject(raw);
-	if (value.version !== 1 || value.type !== 'invoke' || typeof value.requestId !== 'string' || value.requestId === '') {
-		throw new InvalidRequestError({ reason: 'Workflow WebSocket messages require protocol version 1, type "invoke", and a string requestId.' });
-	}
-	return { version: 1, type: 'invoke', requestId: value.requestId, payload: value.payload };
-}
-
-function parseObject(raw: RawData): Record<string, unknown> {
-	let value: unknown;
-	try {
-		value = JSON.parse(raw.toString());
-	} catch {
-		throw new InvalidRequestError({ reason: 'WebSocket messages must be valid JSON objects.' });
-	}
-	if (!value || typeof value !== 'object' || Array.isArray(value)) {
-		throw new InvalidRequestError({ reason: 'WebSocket messages must be valid JSON objects.' });
-	}
-	return value as Record<string, unknown>;
-}
-
 function toRequest(request: IncomingMessage): Request {
 	const headers = new Headers();
 	for (const [name, value] of Object.entries(request.headers)) {
@@ -292,7 +256,7 @@ function toRequest(request: IncomingMessage): Request {
 }
 
 function sendError(socket: WebSocket, error: unknown, requestId?: string, runId?: string): void {
-	send(socket, { version: 1, type: 'error', requestId, runId, error: toPublicError(error) });
+	send(socket, createWebSocketErrorMessage(error, requestId, runId));
 }
 
 function send(socket: WebSocket, message: WebSocketServerMessage): void {

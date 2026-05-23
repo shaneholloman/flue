@@ -78,6 +78,32 @@ export class CloudflarePlugin implements BuildPlugin {
     return dispatchAgent(request, this, ${JSON.stringify(agent.name)}, directHandlers[${JSON.stringify(agent.name)}]);
   }
 
+  async fetch(request) {
+    if (isWebSocketUpgrade(request)) {
+      await this.__unsafe_ensureInitialized();
+      return acceptAgentSocket(request, this, ${JSON.stringify(agent.name)});
+    }
+    return super.fetch(request);
+  }
+
+  async webSocketMessage(socket, message) {
+    if (isFlueSocket(socket, 'agent', ${JSON.stringify(agent.name)})) {
+      await this.__unsafe_ensureInitialized();
+      return messageAgentSocket(socket, message, this, ${JSON.stringify(agent.name)});
+    }
+    return super.webSocketMessage(socket, message);
+  }
+
+  async webSocketClose(socket, code, reason, wasClean) {
+    if (isFlueSocket(socket, 'agent', ${JSON.stringify(agent.name)})) return closeFlueSocket(socket, code, reason);
+    return super.webSocketClose(socket, code, reason, wasClean);
+  }
+
+  async webSocketError(socket, error) {
+    if (isFlueSocket(socket, 'agent', ${JSON.stringify(agent.name)})) return closeFlueSocket(socket, 1011, 'WebSocket error');
+    return super.webSocketError(socket, error);
+  }
+
   async onFiberRecovered(ctx) {
     if (ctx.name?.startsWith('flue:')) {
       return handleFlueFiberRecovered(ctx, this, ${JSON.stringify(agent.name)});
@@ -93,6 +119,32 @@ export class CloudflarePlugin implements BuildPlugin {
 			.map((workflow) => `export class ${workflowClassName(workflow.name)} extends Agent {
   async onRequest(request) {
     return dispatchWorkflow(request, this, ${JSON.stringify(workflow.name)});
+  }
+
+  async fetch(request) {
+    if (isWebSocketUpgrade(request)) {
+      await this.__unsafe_ensureInitialized();
+      return acceptWorkflowSocket(request, this, ${JSON.stringify(workflow.name)});
+    }
+    return super.fetch(request);
+  }
+
+  async webSocketMessage(socket, message) {
+    if (isFlueSocket(socket, 'workflow', ${JSON.stringify(workflow.name)})) {
+      await this.__unsafe_ensureInitialized();
+      return messageWorkflowSocket(socket, message, this, ${JSON.stringify(workflow.name)});
+    }
+    return super.webSocketMessage(socket, message);
+  }
+
+  async webSocketClose(socket, code, reason, wasClean) {
+    if (isFlueSocket(socket, 'workflow', ${JSON.stringify(workflow.name)})) return closeFlueSocket(socket, code, reason);
+    return super.webSocketClose(socket, code, reason, wasClean);
+  }
+
+  async webSocketError(socket, error) {
+    if (isFlueSocket(socket, 'workflow', ${JSON.stringify(workflow.name)})) return closeFlueSocket(socket, 1011, 'WebSocket error');
+    return super.webSocketError(socket, error);
   }
 
   async onFiberRecovered(ctx) {
@@ -151,6 +203,10 @@ import {
   getCloudflareAIBindingApiProvider,
   FlueRegistry,
   createCloudflareRunRegistry,
+  connectCloudflareAgentWebSocket,
+  connectCloudflareWorkflowWebSocket,
+  messageCloudflareAgentWebSocket,
+  messageCloudflareWorkflowWebSocket,
 } from '@flue/runtime/cloudflare';
 import { registerApiProvider, registerProvider } from '@flue/runtime/app';
 
@@ -183,6 +239,7 @@ const systemPrompt = '';
 function normalizeBuiltModules(agentModules, workflowModules) {
   const manifest = { agents: [], workflows: [] };
   const directHandlers = {};
+  const websocketAgentHandlers = {};
   const receiveHandlers = {};
   for (const [name, mod] of Object.entries(agentModules)) {
     if (!mod.default || mod.default.__flueCreatedAgent !== true || typeof mod.default.initialize !== 'function') throw new Error('[flue] Agent "' + name + '" must default-export createAgent(...).');
@@ -196,10 +253,12 @@ function normalizeBuiltModules(agentModules, workflowModules) {
     }
     manifest.agents.push({ name, channels, receive: typeof mod.receive === 'function', created: true });
     if (channels.http) directHandlers[name] = createDirectAgentHandler(mod.default);
+    if (channels.websocket) websocketAgentHandlers[name] = createDirectAgentHandler(mod.default);
     if (typeof mod.receive === 'function') receiveHandlers[name] = mod.receive;
   }
 
   const workflowHandlers = {};
+  const websocketWorkflowHandlers = {};
   for (const [name, mod] of Object.entries(workflowModules)) {
     if (typeof mod.run !== 'function') throw new Error('[flue] Workflow "' + name + '" must export async function run(...).');
     const channels = normalizeChannelList(mod.channels, 'workflow "' + name + '"');
@@ -210,9 +269,14 @@ function normalizeBuiltModules(agentModules, workflowModules) {
     }
     manifest.workflows.push({ name, channels });
     if (channels.http) workflowHandlers[name] = mod.run;
+    if (channels.websocket) websocketWorkflowHandlers[name] = mod.run;
   }
 
-  return { manifest, directHandlers, receiveHandlers, workflowHandlers };
+  if (${appEntry ? 'true' : 'false'} && (Object.keys(websocketAgentHandlers).length > 0 || Object.keys(websocketWorkflowHandlers).length > 0)) {
+    throw new Error('[flue] websocket() on the Cloudflare target currently requires the generated default app. Custom app.ts WebSocket mounting is not yet supported.');
+  }
+
+  return { manifest, directHandlers, websocketAgentHandlers, receiveHandlers, workflowHandlers, websocketWorkflowHandlers };
 }
 
 function normalizeChannelList(value, label) {
@@ -241,7 +305,7 @@ const workflowModules = {
 ${workflowModuleEntries}
 };
 const normalized = normalizeBuiltModules(agentModules, workflowModules);
-const { manifest, directHandlers, receiveHandlers, workflowHandlers } = normalized;
+const { manifest, directHandlers, websocketAgentHandlers, receiveHandlers, workflowHandlers, websocketWorkflowHandlers } = normalized;
 const agentClassNames = {
 ${agentClassMapEntries}
 };
@@ -522,6 +586,98 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
         return doInstance.keepAliveWhile(() => h(ctx));
       },
     }));
+}
+
+function isWebSocketUpgrade(request) {
+  return request.method === 'GET' && request.headers.get('upgrade')?.toLowerCase() === 'websocket';
+}
+
+function isFlueSocket(socket, target, name) {
+  const attachment = socket.deserializeAttachment?.();
+  return attachment?.version === 1 && attachment.target === target && attachment.name === name;
+}
+
+function closeFlueSocket(socket, code, reason) {
+  if (code === 1005 || code === 1006 || code === 1015) return;
+  try {
+    socket.close(code, reason);
+  } catch {
+    return;
+  }
+}
+
+function acceptAgentSocket(request, doInstance, agentName) {
+  const handler = websocketAgentHandlers[agentName];
+  if (!handler) return new Response(null, { status: 404 });
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  doInstance.ctx.acceptWebSocket(server);
+  connectCloudflareAgentWebSocket(server, { name: agentName, id: doInstance.name, requestUrl: socketRequestUrl(request) });
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+function acceptWorkflowSocket(request, doInstance, workflowName) {
+  const handler = websocketWorkflowHandlers[workflowName];
+  if (!handler) return new Response(null, { status: 404 });
+  const pair = new WebSocketPair();
+  const client = pair[0];
+  const server = pair[1];
+  doInstance.ctx.acceptWebSocket(server);
+  connectCloudflareWorkflowWebSocket(server, { name: workflowName, runId: doInstance.name, requestUrl: socketRequestUrl(request) });
+  return new Response(null, { status: 101, webSocket: client });
+}
+
+async function messageAgentSocket(connection, message, doInstance, agentName) {
+  const handler = websocketAgentHandlers[agentName];
+  if (!handler) return;
+  const identity = agentRuntimeIdentity(agentName);
+  return runWithInstanceContext(doInstance, identity, () => messageCloudflareAgentWebSocket(connection, message, {
+    name: agentName,
+    id: doInstance.name,
+    request: socketRequest(connection),
+    handler,
+    runStore: createRunStoreForRequest(doInstance),
+    runSubscribers,
+    runRegistry: createRunRegistryForRequest(doInstance.env),
+    createContext: (id_, runId, payload, req) => createContextForRequest(id_, runId, payload, doInstance, req),
+    runHandler: (ctx, h) => {
+      assertAgentsDurabilityApi(doInstance, 'keepAliveWhile');
+      return doInstance.keepAliveWhile(() => h(ctx));
+    },
+  }));
+}
+
+async function messageWorkflowSocket(connection, message, doInstance, workflowName) {
+  const handler = websocketWorkflowHandlers[workflowName];
+  if (!handler) return;
+  const identity = workflowRuntimeIdentity(workflowName);
+  return runWithInstanceContext(doInstance, identity, () => messageCloudflareWorkflowWebSocket(connection, message, {
+    name: workflowName,
+    runId: doInstance.name,
+    request: socketRequest(connection),
+    handler,
+    runStore: createRunStoreForRequest(doInstance),
+    runSubscribers,
+    runRegistry: createRunRegistryForRequest(doInstance.env),
+    createContext: (id_, runId, payload, req) => createContextForRequest(id_, runId, payload, doInstance, req),
+    runHandler: (ctx, h) => {
+      assertAgentsDurabilityApi(doInstance, 'keepAliveWhile');
+      return doInstance.keepAliveWhile(() => h(ctx));
+    },
+  }));
+}
+
+function socketRequest(connection) {
+  const attachment = connection.deserializeAttachment?.();
+  return new Request(attachment?.requestUrl || 'https://flue.invalid/');
+}
+
+function socketRequestUrl(request) {
+  const url = new URL(request.url);
+  url.search = '';
+  url.hash = '';
+  return url.toString();
 }
 
 function workflowRuntimeIdentity(workflowName) {

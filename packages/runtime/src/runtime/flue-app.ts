@@ -414,6 +414,20 @@ const workflowRouteHandler: MiddlewareHandler = async (c) => {
 	}
 
 	const name = c.req.param('name') ?? '';
+	if (rt.target === 'cloudflare' && isWebSocketUpgrade(c.req.raw)) {
+		if (!registeredWorkflowsForChannel(rt, 'websocket').includes(name)) {
+			throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+		}
+		if (!rt.routeWorkflowRequest) {
+			throw new Error('[flue] Cloudflare runtime is missing workflow route forwarding.');
+		}
+		const response = await rt.routeWorkflowRequest(c.req.raw.clone(), c.env, {
+			workflowName: name,
+			instanceId: generateWorkflowRunId(name),
+		});
+		if (response) return response;
+		throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+	}
 	const workflows = rt.manifest?.workflows ?? [];
 	validateWorkflowRequest({
 		method: c.req.method,
@@ -466,6 +480,17 @@ const agentRouteHandler: MiddlewareHandler = async (c) => {
 
 	const name = c.req.param('name') ?? '';
 	const id = c.req.param('id') ?? '';
+	if (rt.target === 'cloudflare' && isWebSocketUpgrade(c.req.raw)) {
+		if (!registeredAgentsForChannel(rt, 'websocket').includes(name) || id.trim() === '') {
+			throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+		}
+		if (!rt.routeAgentRequest) {
+			throw new Error('[flue] Cloudflare runtime is missing agent route forwarding.');
+		}
+		const response = await rt.routeAgentRequest(c.req.raw.clone(), c.env);
+		if (response) return response;
+		throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+	}
 
 	validateAgentRequest({
 		method: c.req.method,
@@ -598,6 +623,10 @@ function normalizeRunRequest(
 				? `/runs/${encodeURIComponent(runId)}/stream`
 				: `/runs/${encodeURIComponent(runId)}`;
 	return new Request(url, request);
+}
+
+function isWebSocketUpgrade(request: Request): boolean {
+	return request.method === 'GET' && request.headers.get('upgrade')?.toLowerCase() === 'websocket';
 }
 
 export function registeredAgentsForChannel(rt: FlueRuntime, channel: AttachedChannel): readonly string[] {

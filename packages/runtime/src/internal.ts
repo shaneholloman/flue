@@ -75,6 +75,7 @@ export {
 	invokeAttached,
 } from './runtime/handle-agent.ts';
 export { generateRunId, generateWorkflowRunId, parseWorkflowRunId } from './runtime/ids.ts';
+export { createWebSocketErrorMessage, parseAgentWebSocketMessage, parseWorkflowWebSocketMessage } from './runtime/websocket-protocol.ts';
 export type { HandleRunRouteOptions } from './runtime/handle-run-routes.ts';
 export { handleRunRouteRequest } from './runtime/handle-run-routes.ts';
 export type {

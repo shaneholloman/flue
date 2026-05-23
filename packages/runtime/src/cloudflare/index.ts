@@ -22,3 +22,16 @@ export type { CloudflareGatewayOptions } from './gateway.ts';
 
 export { FlueRegistry } from './registry-do.ts';
 export { createCloudflareRunRegistry } from './run-registry.ts';
+
+export {
+	connectCloudflareAgentWebSocket,
+	connectCloudflareWorkflowWebSocket,
+	messageCloudflareAgentWebSocket,
+	messageCloudflareWorkflowWebSocket,
+} from './websocket.ts';
+export type {
+	CloudflareAgentWebSocketOptions,
+	CloudflareWebSocketAttachment,
+	CloudflareWebSocketConnection,
+	CloudflareWorkflowWebSocketOptions,
+} from './websocket.ts';

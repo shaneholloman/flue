@@ -67,6 +67,41 @@ describe('WebSocket transport foundation', () => {
 		expect(await response.json()).toMatchObject({ error: { type: 'workflow_not_http' } });
 	});
 
+	it('forwards Cloudflare upgrades only for WebSocket-exposed targets', async () => {
+		const forwarded: string[] = [];
+		configureFlueRuntime({
+			target: 'cloudflare',
+			manifest: {
+				agents: [
+					{ name: 'assistant', channels: { websocket: true }, receive: false, created: true },
+					{ name: 'http-agent', channels: { http: true }, receive: false, created: true },
+				],
+				workflows: [
+					{ name: 'job', channels: { websocket: true } },
+					{ name: 'http-job', channels: { http: true } },
+				],
+			},
+			routeAgentRequest: async (request) => {
+				forwarded.push(new URL(request.url).pathname);
+				return Response.json({ ok: true });
+			},
+			routeWorkflowRequest: async (request, _env, target) => {
+				forwarded.push(`${new URL(request.url).pathname}:${target.instanceId}`);
+				return Response.json({ ok: true });
+			},
+		});
+		const app = new Hono();
+		app.route('/', flue());
+		const upgrade = { method: 'GET', headers: { upgrade: 'websocket' } };
+
+		expect((await app.fetch(new Request('http://localhost/agents/assistant/one', upgrade))).status).toBe(200);
+		expect((await app.fetch(new Request('http://localhost/workflows/job', upgrade))).status).toBe(200);
+		expect((await app.fetch(new Request('http://localhost/agents/http-agent/one', upgrade))).status).toBe(404);
+		expect((await app.fetch(new Request('http://localhost/workflows/http-job', upgrade))).status).toBe(404);
+		expect(forwarded[0]).toBe('/agents/assistant/one');
+		expect(forwarded[1]).toMatch(/^\/workflows\/job:workflow:job:/);
+	});
+
 	it('rejects concurrent attached prompts to the same agent session', async () => {
 		let release: (() => void) | undefined;
 		const pending = new Promise<void>((resolve) => {
