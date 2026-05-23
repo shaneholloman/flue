@@ -1,4 +1,5 @@
-import { createServer } from 'node:http';
+import { serve } from '@hono/node-server';
+import { Hono } from 'hono';
 import { afterEach, describe, expect, it } from 'vitest';
 import { createFlueContext, InMemoryRunRegistry, InMemoryRunStore, InMemorySessionStore } from '../src/internal.ts';
 import { createNodeWebSocketTransport, type NodeWebSocketTransport } from '../src/node/index.ts';
@@ -35,16 +36,23 @@ describe('Node WebSocket transport', () => {
 		expect(error).toMatchObject({ error: { type: 'invalid_request' } });
 		expect(socket.readyState).toBe(WebSocket.OPEN);
 	});
+
+	it('terminates server sockets after transport-level errors', async () => {
+		const { socket, transport } = await startAgentSocket();
+		const accepted = [...transport.server.clients][0];
+		if (!accepted) throw new Error('Expected accepted server socket.');
+		accepted.emit('error', new Error('transport failed'));
+		await new Promise<void>((resolve) => socket.addEventListener('close', () => resolve(), { once: true }));
+		expect(transport.server.clients.size).toBe(0);
+	});
 });
 
-async function startAgentSocket(): Promise<{ socket: WebSocket; messages: WebSocketServerMessage[] }> {
-	const server = createServer((_request, response) => {
-		response.writeHead(404);
-		response.end();
-	});
+async function startAgentSocket(): Promise<{ socket: WebSocket; messages: WebSocketServerMessage[]; transport: NodeWebSocketTransport }> {
 	const transport = createTransport();
-	transport.attach(server);
-	await new Promise<void>((resolve) => server.listen(0, resolve));
+	const app = new Hono();
+	app.get('/agents/:name/:id', transport.agentRoute);
+	const server = serve({ fetch: app.fetch, websocket: { server: transport.server }, port: 0 });
+	await new Promise<void>((resolve) => server.once('listening', resolve));
 	const address = server.address();
 	if (!address || typeof address === 'string') throw new Error('Expected test server address.');
 	const socket = new WebSocket(`ws://localhost:${address.port}/agents/assistant/instance-1`);
@@ -60,10 +68,9 @@ async function startAgentSocket(): Promise<{ socket: WebSocket; messages: WebSoc
 				socket.close();
 			});
 		}
-		await transport.close();
 		await new Promise<void>((resolve) => server.close(() => resolve()));
 	});
-	return { socket, messages };
+	return { socket, messages, transport };
 }
 
 function createTransport(): NodeWebSocketTransport {

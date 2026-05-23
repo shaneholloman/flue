@@ -13,6 +13,8 @@ export interface RunRecord {
 	status: RunStatus;
 	startedAt: string;
 	payload?: unknown;
+	restartedFromRunId?: string;
+	restartedAsRunId?: string;
 	endedAt?: string;
 	isError?: boolean;
 	durationMs?: number;
@@ -25,10 +27,12 @@ export interface CreateRunInput {
 	owner: RunOwner;
 	startedAt: string;
 	payload: unknown;
+	restartedFromRunId?: string;
 }
 
 export interface EndRunInput {
 	runId: string;
+	restartedAsRunId?: string;
 	endedAt: string;
 	isError: boolean;
 	durationMs: number;

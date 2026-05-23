@@ -60,7 +60,7 @@ export async function handleRegistryRequest(
 	try {
 		// GET /pointers/<runId>
 		if (request.method === 'GET' && segments[0] === 'pointers' && segments.length === 2) {
-			const runId = segments[1];
+			const runId = decodeURIComponent(segments[1] ?? '');
 			if (!runId) return new Response('Missing runId.', { status: 404 });
 			const pointer = ops.lookupRun(runId);
 			if (!pointer) return new Response(null, { status: 404 });
@@ -74,7 +74,7 @@ export async function handleRegistryRequest(
 			segments[2] === 'start' &&
 			segments.length === 3
 		) {
-			const runId = segments[1];
+			const runId = decodeURIComponent(segments[1] ?? '');
 			if (!runId) return new Response('Missing runId.', { status: 404 });
 			const body = (await request.json()) as RecordRunStartInput;
 			ops.recordRunStart({ ...body, runId });
@@ -88,7 +88,7 @@ export async function handleRegistryRequest(
 			segments[2] === 'end' &&
 			segments.length === 3
 		) {
-			const runId = segments[1];
+			const runId = decodeURIComponent(segments[1] ?? '');
 			if (!runId) return new Response('Missing runId.', { status: 404 });
 			const body = (await request.json()) as Omit<RecordRunEndInput, 'runId'>;
 			ops.recordRunEnd({ ...body, runId });

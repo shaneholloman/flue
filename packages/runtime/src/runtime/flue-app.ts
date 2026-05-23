@@ -58,6 +58,8 @@ export interface FlueRuntime {
 	handlers?: Record<string, AgentHandler>;
 	receiveHandlers?: Record<string, AgentReceiveHandler>;
 	workflowHandlers?: Record<string, WorkflowHandler>;
+	nodeWebSocketAgentRoute?: MiddlewareHandler;
+	nodeWebSocketWorkflowRoute?: MiddlewareHandler;
 
 	/**
 	 * Per-target context factory. Required when {@link target} is `'node'`.
@@ -190,6 +192,7 @@ export function flue(): Hono {
 		validated('query', WorkflowInvocationQuerySchema),
 		workflowRouteHandler,
 	);
+	app.get('/workflows/:name', workflowSocketRouteHandler);
 	app.all('/workflows/:name', workflowRouteHandler);
 
 	app.post(
@@ -198,6 +201,7 @@ export function flue(): Hono {
 		validated('param', AgentRouteParamSchema),
 		agentRouteHandler,
 	);
+	app.get('/agents/:name/:id', agentSocketRouteHandler);
 	// Non-POSTs still reach the canonical Flue 405 envelope instead of
 	// Hono's default 404 for unmatched methods.
 	app.all('/agents/:name/:id', agentRouteHandler);
@@ -404,6 +408,44 @@ function runRouteSpec(action: HandleRunRouteOptions['action']) {
 	};
 }
 
+const workflowSocketRouteHandler: MiddlewareHandler = async (c, next) => {
+	if (!isWebSocketUpgrade(c.req.raw)) return next();
+	const rt = requiredRuntime();
+	const name = c.req.param('name') ?? '';
+	if (!registeredWorkflowsForChannel(rt, 'websocket').includes(name)) {
+		throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+	}
+	if (rt.target === 'node') {
+		if (!rt.nodeWebSocketWorkflowRoute) throw new Error('[flue] Node runtime is missing WebSocket workflow routing.');
+		return rt.nodeWebSocketWorkflowRoute(c, next);
+	}
+	if (!rt.routeWorkflowRequest) throw new Error('[flue] Cloudflare runtime is missing workflow route forwarding.');
+	const response = await rt.routeWorkflowRequest(normalizeAttachedRequest(c.req.raw, `/workflows/${encodeURIComponent(name)}`), c.env, {
+		workflowName: name,
+		instanceId: generateWorkflowRunId(name),
+	});
+	if (response) return response;
+	throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+};
+
+const agentSocketRouteHandler: MiddlewareHandler = async (c, next) => {
+	if (!isWebSocketUpgrade(c.req.raw)) return next();
+	const rt = requiredRuntime();
+	const name = c.req.param('name') ?? '';
+	const id = c.req.param('id') ?? '';
+	if (!registeredAgentsForChannel(rt, 'websocket').includes(name) || id.trim() === '') {
+		throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+	}
+	if (rt.target === 'node') {
+		if (!rt.nodeWebSocketAgentRoute) throw new Error('[flue] Node runtime is missing WebSocket agent routing.');
+		return rt.nodeWebSocketAgentRoute(c, next);
+	}
+	if (!rt.routeAgentRequest) throw new Error('[flue] Cloudflare runtime is missing agent route forwarding.');
+	const response = await rt.routeAgentRequest(normalizeAttachedRequest(c.req.raw, `/agents/${encodeURIComponent(name)}/${encodeURIComponent(id)}`), c.env);
+	if (response) return response;
+	throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
+};
+
 const workflowRouteHandler: MiddlewareHandler = async (c) => {
 	const rt = runtimeConfig;
 	if (!rt) {
@@ -414,20 +456,6 @@ const workflowRouteHandler: MiddlewareHandler = async (c) => {
 	}
 
 	const name = c.req.param('name') ?? '';
-	if (rt.target === 'cloudflare' && isWebSocketUpgrade(c.req.raw)) {
-		if (!registeredWorkflowsForChannel(rt, 'websocket').includes(name)) {
-			throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
-		}
-		if (!rt.routeWorkflowRequest) {
-			throw new Error('[flue] Cloudflare runtime is missing workflow route forwarding.');
-		}
-		const response = await rt.routeWorkflowRequest(c.req.raw.clone(), c.env, {
-			workflowName: name,
-			instanceId: generateWorkflowRunId(name),
-		});
-		if (response) return response;
-		throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
-	}
 	const workflows = rt.manifest?.workflows ?? [];
 	validateWorkflowRequest({
 		method: c.req.method,
@@ -480,17 +508,6 @@ const agentRouteHandler: MiddlewareHandler = async (c) => {
 
 	const name = c.req.param('name') ?? '';
 	const id = c.req.param('id') ?? '';
-	if (rt.target === 'cloudflare' && isWebSocketUpgrade(c.req.raw)) {
-		if (!registeredAgentsForChannel(rt, 'websocket').includes(name) || id.trim() === '') {
-			throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
-		}
-		if (!rt.routeAgentRequest) {
-			throw new Error('[flue] Cloudflare runtime is missing agent route forwarding.');
-		}
-		const response = await rt.routeAgentRequest(c.req.raw.clone(), c.env);
-		if (response) return response;
-		throw new RouteNotFoundError({ method: c.req.method, path: new URL(c.req.url).pathname });
-	}
 
 	validateAgentRequest({
 		method: c.req.method,
@@ -625,8 +642,24 @@ function normalizeRunRequest(
 	return new Request(url, request);
 }
 
+function requiredRuntime(): FlueRuntime {
+	if (!runtimeConfig) {
+		throw new Error(
+			'[flue] flue() route invoked before runtime was configured. ' +
+				'This usually means flue() was used outside a Flue-built server entry.',
+		);
+	}
+	return runtimeConfig;
+}
+
 function isWebSocketUpgrade(request: Request): boolean {
 	return request.method === 'GET' && request.headers.get('upgrade')?.toLowerCase() === 'websocket';
+}
+
+function normalizeAttachedRequest(request: Request, pathname: string): Request {
+	const url = new URL(request.url);
+	url.pathname = pathname;
+	return new Request(url, request);
 }
 
 export function registeredAgentsForChannel(rt: FlueRuntime, channel: AttachedChannel): readonly string[] {

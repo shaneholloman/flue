@@ -353,6 +353,36 @@ describe('handleRegistryRequest (REST router)', () => {
 		expect(ops.lookupRun('run_rest_start')?.status).toBe('active');
 	});
 
+	it('decodes workflow run ids in pointer routes', async () => {
+		const ops = createRegistryOps(makeFakeSql());
+		const runId = 'workflow:daily-report:run_01';
+		const encoded = encodeURIComponent(runId);
+		const start = await handleRegistryRequest(
+			ops,
+			new Request(`https://registry/pointers/${encoded}/start`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({
+					owner: { kind: 'workflow', workflowName: 'daily-report', instanceId: runId },
+					startedAt: STARTED_AT_1,
+				}),
+			}),
+		);
+		expect(start.status).toBe(204);
+		const end = await handleRegistryRequest(
+			ops,
+			new Request(`https://registry/pointers/${encoded}/end`, {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ endedAt: ENDED_AT, durationMs: 5000, isError: true }),
+			}),
+		);
+		expect(end.status).toBe(204);
+		const hit = await handleRegistryRequest(ops, new Request(`https://registry/pointers/${encoded}`));
+		expect(hit.status).toBe(200);
+		expect(await hit.json()).toMatchObject({ runId, status: 'errored' });
+	});
+
 	it('POST /pointers/<runId>/end: 204 and pointer status is updated', async () => {
 		const ops = createRegistryOps(makeFakeSql());
 		ops.recordRunStart({

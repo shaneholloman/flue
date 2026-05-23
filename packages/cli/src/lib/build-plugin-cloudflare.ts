@@ -194,6 +194,7 @@ import {
   recoverAgentRun,
   reserveRecoveredAgentSession,
   failRecoveredRun,
+  generateWorkflowRunId,
   configureFlueRuntime,
   createDefaultFlueApp,
   createDirectAgentHandler,
@@ -273,10 +274,6 @@ function normalizeBuiltModules(agentModules, workflowModules) {
     manifest.workflows.push({ name, channels });
     if (channels.http) workflowHandlers[name] = mod.run;
     if (channels.websocket) websocketWorkflowHandlers[name] = mod.run;
-  }
-
-  if (${appEntry ? 'true' : 'false'} && (Object.keys(websocketAgentHandlers).length > 0 || Object.keys(websocketWorkflowHandlers).length > 0)) {
-    throw new Error('[flue] websocket() on the Cloudflare target currently requires the generated default app. Custom app.ts WebSocket mounting is not yet supported.');
   }
 
   return { manifest, directHandlers, websocketAgentHandlers, receiveHandlers, workflowHandlers, websocketWorkflowHandlers };
@@ -582,21 +579,56 @@ async function handleFlueFiberRecovered(ctx, doInstance, agentName) {
 
 async function handleFlueWorkflowFiberRecovered(ctx, doInstance, workflowName) {
   if (!ctx.name || ctx.name !== 'flue:workflow:' + doInstance.name) return;
+  const interruptedRunId = doInstance.name;
   const runStore = createRunStoreForRequest(doInstance);
-  const run = await runStore.getRun(doInstance.name);
-  await failRecoveredRun({
-    label: workflowName,
-    owner: { kind: 'workflow', workflowName, instanceId: doInstance.name },
-    id: doInstance.name,
-    runId: doInstance.name,
-    payload: run?.payload,
-    request: new Request('https://flue.invalid/workflows/' + encodeURIComponent(workflowName), { method: 'POST' }),
-    error: new Error('Flue workflow execution was interrupted. Use Cloudflare Workflows for durable execution.'),
-    runStore,
-    runSubscribers,
-    runRegistry: createRunRegistryForRequest(doInstance.env),
-    createContext: (id_, recoveredRunId, payload, req, initialEventIndex) => createContextForRequest(id_, recoveredRunId, payload, doInstance, req, initialEventIndex),
-  });
+  const run = await runStore.getRun(interruptedRunId);
+  const events = await runStore.getEvents(interruptedRunId);
+  const startEvent = events.find((event) => event.type === 'run_start');
+  const payload = run?.payload !== undefined ? run.payload : startEvent?.payload;
+  const request = new Request('https://flue.invalid/workflows/' + encodeURIComponent(workflowName), { method: 'POST' });
+  const restartRunId = generateWorkflowRunId(workflowName);
+  try {
+    const binding = doInstance.env?.[workflowBindingNameFromWorkflowName(workflowName)];
+    if (!binding) throw new Error('Flue workflow restart binding unavailable after deployment.');
+    const stub = await getAgentByName(binding, restartRunId);
+    const response = await stub.fetch(new Request(request.url, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-flue-restarted-from-run-id': interruptedRunId,
+      },
+      body: JSON.stringify(payload ?? {}),
+    }));
+    if (!response.ok) throw new Error('Flue workflow restart admission failed after deployment: ' + response.status);
+    await failRecoveredRun({
+      label: workflowName,
+      owner: { kind: 'workflow', workflowName, instanceId: interruptedRunId },
+      id: interruptedRunId,
+      runId: interruptedRunId,
+      payload,
+      request,
+      restartedAsRunId: restartRunId,
+      error: new Error('Flue workflow execution was interrupted and restarted as run "' + restartRunId + '".'),
+      runStore,
+      runSubscribers,
+      runRegistry: createRunRegistryForRequest(doInstance.env),
+      createContext: (id_, recoveredRunId, payload, req, initialEventIndex) => createContextForRequest(id_, recoveredRunId, payload, doInstance, req, initialEventIndex),
+    });
+  } catch (error) {
+    await failRecoveredRun({
+      label: workflowName,
+      owner: { kind: 'workflow', workflowName, instanceId: interruptedRunId },
+      id: interruptedRunId,
+      runId: interruptedRunId,
+      payload,
+      request,
+      error,
+      runStore,
+      runSubscribers,
+      runRegistry: createRunRegistryForRequest(doInstance.env),
+      createContext: (id_, recoveredRunId, payload, req, initialEventIndex) => createContextForRequest(id_, recoveredRunId, payload, doInstance, req, initialEventIndex),
+    });
+  }
 }
 
 // ─── Per-DO Dispatch ───────────────────────────────────────────────────────
@@ -631,6 +663,7 @@ async function dispatchWorkflow(request, doInstance, workflowName) {
       runStore: createRunStoreForRequest(doInstance),
       runSubscribers,
       runRegistry: createRunRegistryForRequest(doInstance.env),
+      restartedFromRunId: new URL(request.url).hostname === 'flue.invalid' ? request.headers.get('x-flue-restarted-from-run-id') || undefined : undefined,
       createContext: (id_, runId, payload, req, initialEventIndex) => createContextForRequest(id_, runId, payload, doInstance, req, initialEventIndex),
       startWebhook: (runId, run) => {
         assertAgentsDurabilityApi(doInstance, 'runFiber');

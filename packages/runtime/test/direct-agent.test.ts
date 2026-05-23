@@ -11,6 +11,7 @@ import {
 	InMemoryRunRegistry,
 	InMemoryRunStore,
 	InMemorySessionStore,
+	recoverAgentRun,
 } from '../src/internal.ts';
 import { createAgent } from '../src/agent-definition.ts';
 import { Harness } from '../src/harness.ts';
@@ -145,6 +146,90 @@ describe('direct attached agent delivery', () => {
 		expect(continuations).toBe(1);
 		expect(data?.entries.filter((entry) => entry.type === 'message' && entry.message.role === 'user')).toHaveLength(1);
 		expect(data?.entries[0]).toMatchObject({ direct: { runId: 'run-direct' } });
+	});
+
+	it('retries an uncommitted side effect while recovering admitted direct input', async () => {
+		const store = new InMemorySessionStore();
+		const runStore = new InMemoryRunStore();
+		const runRegistry = new InMemoryRunRegistry();
+		const runId = 'run-side-effect';
+		const payload = { message: 'hello', session: 'case:123' };
+		const owner = { kind: 'agent' as const, agentName: 'assistant', instanceId: 'inst-side-effect' };
+		const startedAt = new Date().toISOString();
+		await runStore.createRun({ runId, owner, startedAt, payload });
+		await runStore.appendEvent(runId, {
+			type: 'run_start',
+			runId,
+			owner,
+			instanceId: owner.instanceId,
+			agentName: owner.agentName,
+			startedAt,
+			payload,
+			eventIndex: 0,
+			timestamp: startedAt,
+		});
+		let sideEffects = 0;
+		const interruptedHarness = new Harness(owner.instanceId, 'default', testAgentConfig(), fakeEnv(), store);
+		const interruptedSession = await interruptedHarness.session(payload.session);
+		const interruptedAgent = Reflect.get(interruptedSession, 'harness') as {
+			continue: () => Promise<void>;
+			waitForIdle: () => Promise<void>;
+		};
+		interruptedAgent.continue = async () => {
+			sideEffects++;
+			throw new Error('simulated Durable Object reset');
+		};
+		interruptedAgent.waitForIdle = async () => {};
+		const interrupted = interruptedSession as FlueSession & { processDirectInput(input: { runId: string; message: string }): PromiseLike<unknown> };
+		await expect(interrupted.processDirectInput({ runId, message: payload.message })).rejects.toThrow('simulated Durable Object reset');
+
+		const recoveredHarness = new Harness(owner.instanceId, 'default', testAgentConfig(), fakeEnv(), store);
+		const recoveredSession = await recoveredHarness.session(payload.session);
+		const recoveredAgent = Reflect.get(recoveredSession, 'harness') as {
+			state: { messages: AgentMessage[] };
+			continue: () => Promise<void>;
+			waitForIdle: () => Promise<void>;
+		};
+		recoveredAgent.continue = async () => {
+			sideEffects++;
+			recoveredAgent.state.messages.push({
+				role: 'assistant',
+				content: [{ type: 'text', text: 'processed' }],
+				usage: {
+					input: 0,
+					output: 0,
+					cacheRead: 0,
+					cacheWrite: 0,
+					totalTokens: 0,
+					cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 },
+				},
+				timestamp: Date.now(),
+			} as AgentMessage);
+		};
+		recoveredAgent.waitForIdle = async () => {};
+		const recovered = recoveredSession as FlueSession & { processDirectInput(input: { runId: string; message: string }): PromiseLike<unknown> };
+
+		const result = await recoverAgentRun({
+			label: owner.agentName,
+			owner,
+			id: owner.instanceId,
+			runId,
+			payload,
+			request: new Request(`http://localhost/agents/assistant/${owner.instanceId}`, { method: 'POST' }),
+			createContext: createTestContext,
+			handler: async () => recovered.processDirectInput({ runId, message: payload.message }),
+			runStore,
+			runRegistry,
+		});
+
+		const data = await store.load(`agent-session:["${owner.instanceId}","default","${payload.session}"]`);
+		const events = await runStore.getEvents(runId);
+		expect(result).toMatchObject({ isError: false });
+		expect(sideEffects).toBe(2);
+		expect(data?.entries.filter((entry) => entry.type === 'message' && entry.message.role === 'user')).toHaveLength(1);
+		expect(data?.entries[0]).toMatchObject({ direct: { runId } });
+		expect(events.map((event) => event.type)).toEqual(['run_start', 'run_end']);
+		expect(await runStore.getRun(runId)).toMatchObject({ status: 'completed' });
 	});
 
 	it('does not complete recovery from a persisted errored assistant turn', async () => {

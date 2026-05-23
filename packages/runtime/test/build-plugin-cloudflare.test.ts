@@ -25,7 +25,7 @@ describe('Cloudflare build plugin', () => {
 		expect(entry).not.toContain('createRegistryIdentity');
 	});
 
-	it('recovers agent turns from persisted runs and fails interrupted Flue workflows', async () => {
+	it('recovers agent turns and restarts interrupted Flue workflows as new runs', async () => {
 		const entry = await new CloudflarePlugin().generateEntryPoint(testBuildContext());
 
 		expect(entry).toContain('recoverAgentRun');
@@ -36,7 +36,10 @@ describe('Cloudflare build plugin', () => {
 		expect(entry).toContain("const startEvent = events.find((event) => event.type === 'run_start');");
 		expect(entry).toContain('const payload = run?.payload !== undefined ? run.payload : startEvent?.payload;');
 		expect(entry).toContain("ctx.name !== 'flue:workflow:' + doInstance.name");
-		expect(entry).toContain('Flue workflow execution was interrupted. Use Cloudflare Workflows for durable execution.');
+		expect(entry).toContain('const restartRunId = generateWorkflowRunId(workflowName);');
+		expect(entry).toContain("'x-flue-restarted-from-run-id': interruptedRunId");
+		expect(entry).toContain('restartedAsRunId: restartRunId');
+		expect(entry).toContain('Flue workflow execution was interrupted and restarted as run');
 		expect(entry).toContain("return doInstance.runFiber('flue:workflow:' + runId");
 		expect(entry).toContain("return doInstance.runFiber('flue:webhook:' + runId");
 		expect(entry).not.toContain('flue_fiber_recovery');
@@ -68,11 +71,12 @@ describe('Cloudflare build plugin', () => {
 		expect(entry).not.toContain('shouldSendProtocolMessages()');
 	});
 
-	it('rejects WebSocket modules when custom app routing owns Cloudflare requests', async () => {
+	it('allows custom app routing to own Cloudflare WebSocket middleware and mounts', async () => {
 		const entry = await new CloudflarePlugin().generateEntryPoint({ ...testBuildContext(), appEntry: '/tmp/app.ts' });
 
-		expect(entry).toContain('websocket() on the Cloudflare target currently requires the generated default app.');
-		expect(entry).toContain('Custom app.ts WebSocket mounting is not yet supported.');
+		expect(entry).toContain("import userApp from '/tmp/app.ts';");
+		expect(entry).toContain('return app.fetch(request, env, ctx);');
+		expect(entry).not.toContain('Custom app.ts WebSocket mounting is not yet supported.');
 	});
 
 });

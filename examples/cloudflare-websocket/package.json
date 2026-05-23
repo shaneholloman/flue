@@ -2,9 +2,13 @@
 	"name": "cloudflare-websocket-example",
 	"private": true,
 	"type": "module",
+	"scripts": {
+		"test:live": "node ./test/live-websocket.mjs"
+	},
 	"dependencies": {
 		"@flue/runtime": "workspace:*",
-		"agents": "*"
+		"agents": "*",
+		"hono": "^4.7.0"
 	},
 	"devDependencies": {
 		"@cloudflare/workers-types": "^4.20260505.1",

@@ -124,7 +124,7 @@ await job.ready;
 console.log(await job.invoke({ text: 'Hello', language: 'French' }));
 ```
 
-WebSocket modules currently require the generated default app and cannot be combined with custom `.flue/app.ts` routing yet. Generated WebSocket endpoints therefore do not currently provide an application-level upgrade authorization hook; protect production socket routes with an authenticated upstream gateway or proxy until custom mounting/authentication support is available.
+Custom `.flue/app.ts` applications can protect and mount WebSocket routes with ordinary Hono middleware. For example, apply `app.use('/api/agents/*', authenticate)` and `app.use('/api/workflows/*', authenticate)` before `app.route('/api', flue())` to cover both socket surfaces. The SDK socket helpers currently construct root-mounted socket URLs and do not automatically apply HTTP `token` or `headers` options during WebSocket upgrade; use a directly constructed/custom WebSocket client for prefixed or application-authenticated socket mounts for now. Without a custom app, generated socket routes have no application authentication hook and must be protected by an authenticated upstream gateway or proxy in production. Avoid header-mutating middleware such as CORS wrapping WebSocket upgrade routes, because WebSocket upgrade responses may have immutable headers.
 
 You can also invoke any workflow from the CLI without starting a server. `flue run` accepts the same `--env` flag:
 

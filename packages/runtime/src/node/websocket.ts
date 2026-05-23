@@ -1,5 +1,6 @@
-import type { IncomingMessage, Server } from 'node:http';
-import type { Duplex } from 'node:stream';
+import { upgradeWebSocket } from '@hono/node-server';
+import type { MiddlewareHandler } from 'hono';
+import type { WSContext } from 'hono/ws';
 import { WebSocket, WebSocketServer } from 'ws';
 import { InvalidRequestError } from '../errors.ts';
 import type {
@@ -34,7 +35,9 @@ export interface NodeWebSocketTransportOptions {
 }
 
 export interface NodeWebSocketTransport {
-	attach(server: Server): void;
+	server: WebSocketServer;
+	agentRoute: MiddlewareHandler;
+	workflowRoute: MiddlewareHandler;
 	close(): Promise<void>;
 }
 
@@ -42,108 +45,104 @@ type SocketTarget =
 	| { kind: 'agent'; name: string; id: string; handler: AgentHandler }
 	| { kind: 'workflow'; name: string; handler: WorkflowHandler };
 
+type RoutedSocket = WSContext<WebSocket>;
+
 export function createNodeWebSocketTransport(options: NodeWebSocketTransportOptions): NodeWebSocketTransport {
-	const wss = new WebSocketServer({ noServer: true, maxPayload: options.maxPayload ?? 1024 * 1024 });
+	installErrorEvent();
+	const server = new WebSocketServer({ noServer: true, maxPayload: options.maxPayload ?? 1024 * 1024 });
 	const runtime: FlueRuntime = { target: 'node', manifest: options.manifest };
 	const agents = new Set(registeredAgentsForChannel(runtime, 'websocket'));
 	const workflows = new Set(registeredWorkflowsForChannel(runtime, 'websocket'));
-	let attachedServer: Server | undefined;
-	const upgrade = (request: IncomingMessage, socket: Duplex, head: Buffer) => {
-		const target = resolveSocketTarget(request, agents, workflows, options);
-		if (!target) {
-			rejectUpgrade(socket);
-			return;
-		}
-		wss.handleUpgrade(request, socket, head, (ws) => {
-			ws.on('error', () => {
-				if (ws.readyState !== WebSocket.CLOSED) ws.terminate();
-			});
-			if (target.kind === 'agent') handleAgentSocket(ws, request, target, options);
-			else handleWorkflowSocket(ws, request, target, options);
-		});
-	};
+	const agentRoute = upgradeWebSocket((c) => {
+		const name = c.req.param('name') ?? '';
+		const id = c.req.param('id') ?? '';
+		const handler = options.agentHandlers[name];
+		if (!agents.has(name) || !id || !handler) throw new Error('[flue] Node runtime is missing WebSocket agent handler configuration.');
+		const target: Extract<SocketTarget, { kind: 'agent' }> = { kind: 'agent', name, id, handler };
+		const request = c.req.raw;
+		return {
+			onOpen: (_event, socket) => openAgentSocket(socket, target),
+			onMessage: (event, socket) => receiveAgentMessage(socket, request, target, event.data, options),
+			onError: (_event, socket) => terminateSocket(socket),
+		};
+	});
+	const workflowRoute = upgradeWebSocket((c) => {
+		const name = c.req.param('name') ?? '';
+		const handler = options.workflowHandlers[name];
+		if (!workflows.has(name) || !handler) throw new Error('[flue] Node runtime is missing WebSocket workflow handler configuration.');
+		const target: Extract<SocketTarget, { kind: 'workflow' }> = { kind: 'workflow', name, handler };
+		const request = c.req.raw;
+		let invoked = false;
+		return {
+			onOpen: (_event, socket) => openWorkflowSocket(socket, target),
+			onMessage: (event, socket) => {
+				if (typeof event.data !== 'string') {
+					sendError(socket, new InvalidRequestError({ reason: 'Binary WebSocket messages are not supported.' }));
+					socket.close(1003, 'Binary messages are not supported');
+					return;
+				}
+				let message: WorkflowWebSocketClientMessage;
+				try {
+					message = parseWorkflowWebSocketMessage(event.data);
+				} catch (error) {
+					sendError(socket, error);
+					return;
+				}
+				if (invoked) {
+					sendError(socket, new InvalidRequestError({ reason: 'Workflow WebSocket connections accept one invocation only.' }), message.requestId);
+					socket.close(1008, 'Workflow accepts one invocation only');
+					return;
+				}
+				invoked = true;
+				void invokeWorkflow(socket, request, target, message, options);
+			},
+			onError: (_event, socket) => terminateSocket(socket),
+		};
+	});
 	return {
-		attach(server) {
-			if (attachedServer) throw new Error('[flue] Node WebSocket transport is already attached.');
-			attachedServer = server;
-			server.on('upgrade', upgrade);
-		},
+		server,
+		agentRoute,
+		workflowRoute,
 		async close() {
-			if (attachedServer) attachedServer.off('upgrade', upgrade);
-			for (const socket of wss.clients) socket.terminate();
-			await new Promise<void>((resolve) => wss.close(() => resolve()));
+			for (const socket of server.clients) socket.terminate();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
 		},
 	};
 }
 
-function resolveSocketTarget(
-	request: IncomingMessage,
-	agents: Set<string>,
-	workflows: Set<string>,
-	options: NodeWebSocketTransportOptions,
-): SocketTarget | undefined {
-	const segments = parseSegments(request.url);
-	if (segments[0] === 'agents' && segments.length === 3) {
-		const name = segments[1];
-		const id = segments[2];
-		const handler = name ? options.agentHandlers[name] : undefined;
-		if (name && id && handler && agents.has(name)) return { kind: 'agent', name, id, handler };
-	}
-	if (segments[0] === 'workflows' && segments.length === 2) {
-		const name = segments[1];
-		const handler = name ? options.workflowHandlers[name] : undefined;
-		if (name && handler && workflows.has(name)) return { kind: 'workflow', name, handler };
-	}
-	return undefined;
+function openAgentSocket(socket: RoutedSocket, target: Extract<SocketTarget, { kind: 'agent' }>): void {
+	send(socket, { version: 1, type: 'ready', target: 'agent', name: target.name, instanceId: target.id });
 }
 
-function parseSegments(pathname: string | undefined): string[] {
-	try {
-		return new URL(pathname ?? '/', 'http://localhost').pathname
-			.split('/')
-			.filter(Boolean)
-			.map((part) => decodeURIComponent(part));
-	} catch {
-		return [];
-	}
-}
-
-function rejectUpgrade(socket: Duplex): void {
-	socket.write('HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n');
-	socket.destroy();
-}
-
-function handleAgentSocket(
-	socket: WebSocket,
-	request: IncomingMessage,
+function receiveAgentMessage(
+	socket: RoutedSocket,
+	request: Request,
 	target: Extract<SocketTarget, { kind: 'agent' }>,
+	raw: string | Blob | ArrayBufferLike,
 	options: NodeWebSocketTransportOptions,
 ): void {
-	send(socket, { version: 1, type: 'ready', target: 'agent', name: target.name, instanceId: target.id });
-	socket.on('message', (raw, isBinary) => {
-		if (isBinary) {
-			sendError(socket, new InvalidRequestError({ reason: 'Binary WebSocket messages are not supported.' }));
-			socket.close(1003, 'Binary messages are not supported');
-			return;
-		}
-		let message: AgentWebSocketClientMessage;
-		try {
-			message = parseAgentWebSocketMessage(raw.toString());
-		} catch (error) {
-			sendError(socket, error);
-			return;
-		}
-		if (message.type === 'ping') {
-			send(socket, { version: 1, type: 'pong', requestId: message.requestId });
-			return;
-		}
-		void invokeAgentPrompt(socket, request, target, message, options);
-	});
+	if (typeof raw !== 'string') {
+		sendError(socket, new InvalidRequestError({ reason: 'Binary WebSocket messages are not supported.' }));
+		socket.close(1003, 'Binary messages are not supported');
+		return;
+	}
+	let message: AgentWebSocketClientMessage;
+	try {
+		message = parseAgentWebSocketMessage(raw);
+	} catch (error) {
+		sendError(socket, error);
+		return;
+	}
+	if (message.type === 'ping') {
+		send(socket, { version: 1, type: 'pong', requestId: message.requestId });
+		return;
+	}
+	void invokeAgentPrompt(socket, request, target, message, options);
 }
 
 async function invokeAgentPrompt(
-	socket: WebSocket,
-	request: IncomingMessage,
+	socket: RoutedSocket,
+	request: Request,
 	target: Extract<SocketTarget, { kind: 'agent' }>,
 	message: Extract<AgentWebSocketClientMessage, { type: 'prompt' }>,
 	options: NodeWebSocketTransportOptions,
@@ -156,7 +155,7 @@ async function invokeAgentPrompt(
 			id: target.id,
 			runId,
 			payload: { message: message.message, session: message.session },
-			request: toRequest(request),
+			request,
 			handler: target.handler,
 			createContext: options.createContext,
 			runHandler: options.runHandler,
@@ -178,40 +177,13 @@ async function invokeAgentPrompt(
 	}
 }
 
-function handleWorkflowSocket(
-	socket: WebSocket,
-	request: IncomingMessage,
-	target: Extract<SocketTarget, { kind: 'workflow' }>,
-	options: NodeWebSocketTransportOptions,
-): void {
-	let invoked = false;
+function openWorkflowSocket(socket: RoutedSocket, target: Extract<SocketTarget, { kind: 'workflow' }>): void {
 	send(socket, { version: 1, type: 'ready', target: 'workflow', name: target.name });
-	socket.on('message', (raw, isBinary) => {
-		if (isBinary) {
-			sendError(socket, new InvalidRequestError({ reason: 'Binary WebSocket messages are not supported.' }));
-			socket.close(1003, 'Binary messages are not supported');
-			return;
-		}
-		let message: WorkflowWebSocketClientMessage;
-		try {
-			message = parseWorkflowWebSocketMessage(raw.toString());
-		} catch (error) {
-			sendError(socket, error);
-			return;
-		}
-		if (invoked) {
-			sendError(socket, new InvalidRequestError({ reason: 'Workflow WebSocket connections accept one invocation only.' }), message.requestId);
-			socket.close(1008, 'Workflow accepts one invocation only');
-			return;
-		}
-		invoked = true;
-		void invokeWorkflow(socket, request, target, message, options);
-	});
 }
 
 async function invokeWorkflow(
-	socket: WebSocket,
-	request: IncomingMessage,
+	socket: RoutedSocket,
+	request: Request,
 	target: Extract<SocketTarget, { kind: 'workflow' }>,
 	message: WorkflowWebSocketClientMessage,
 	options: NodeWebSocketTransportOptions,
@@ -224,7 +196,7 @@ async function invokeWorkflow(
 			id: runId,
 			runId,
 			payload: message.payload,
-			request: toRequest(request),
+			request,
 			handler: target.handler,
 			createContext: options.createContext,
 			runHandler: options.runHandler,
@@ -242,23 +214,27 @@ async function invokeWorkflow(
 	}
 }
 
-function toRequest(request: IncomingMessage): Request {
-	const headers = new Headers();
-	for (const [name, value] of Object.entries(request.headers)) {
-		if (Array.isArray(value)) {
-			for (const item of value) headers.append(name, item);
-		} else if (value !== undefined) {
-			headers.set(name, value);
+function installErrorEvent(): void {
+	if (typeof (globalThis as { ErrorEvent?: unknown }).ErrorEvent !== 'undefined') return;
+	class NodeErrorEvent extends Event {
+		readonly error: unknown;
+
+		constructor(type: string, init?: { error?: unknown }) {
+			super(type);
+			this.error = init?.error;
 		}
 	}
-	const host = request.headers.host ?? 'localhost';
-	return new Request(new URL(request.url ?? '/', `http://${host}`), { method: 'GET', headers });
+	Object.defineProperty(globalThis, 'ErrorEvent', { configurable: true, value: NodeErrorEvent });
 }
 
-function sendError(socket: WebSocket, error: unknown, requestId?: string, runId?: string): void {
+function terminateSocket(socket: RoutedSocket): void {
+	socket.raw?.terminate();
+}
+
+function sendError(socket: RoutedSocket, error: unknown, requestId?: string, runId?: string): void {
 	send(socket, createWebSocketErrorMessage(error, requestId, runId));
 }
 
-function send(socket: WebSocket, message: WebSocketServerMessage): void {
+function send(socket: RoutedSocket, message: WebSocketServerMessage): void {
 	if (socket.readyState === WebSocket.OPEN) socket.send(JSON.stringify(message));
 }

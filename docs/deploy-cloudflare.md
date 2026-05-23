@@ -132,7 +132,7 @@ console.log(await chat.prompt('Continue', { session: 'support' }));
 chat.close();
 ```
 
-WebSocket modules currently require Flue's generated default app; custom `.flue/app.ts` WebSocket mounting is not yet supported on Cloudflare. Generated WebSocket endpoints therefore do not currently provide an application-level upgrade authorization hook; protect production socket routes with an authenticated upstream gateway or proxy until custom mounting/authentication support is available.
+Custom `.flue/app.ts` applications can protect and mount WebSocket routes with ordinary Hono middleware. For example, apply `app.use('/api/agents/*', authenticate)` and `app.use('/api/workflows/*', authenticate)` before `app.route('/api', flue())` to cover both socket surfaces before Flue forwards accepted upgrades into their owning Durable Objects. The SDK socket helpers currently construct root-mounted socket URLs and do not automatically apply HTTP `token` or `headers` options during WebSocket upgrade; use a directly constructed/custom WebSocket client for prefixed or application-authenticated socket mounts for now. Without a custom app, generated socket routes have no application authentication hook and must be protected by an authenticated upstream gateway or proxy in production. Avoid header-mutating middleware such as CORS wrapping WebSocket upgrade routes, because WebSocket upgrade responses may have immutable headers.
 
 ## Subagents
 
@@ -403,6 +403,21 @@ When deploying to Cloudflare, Flue uses Durable Objects to automatically persist
 This is built in when you deploy with `--target cloudflare`. No extra configuration needed.
 
 WebSocket-exposed created agents use the same owning Durable Object scope. Flue's generated Cloudflare transport accepts hibernation-compatible sockets in that Durable Object so long-lived interactive connections retain the correct instance identity.
+
+## Interruption and recovery semantics
+
+A deployment or code update can reset a Durable Object while an operation is running. Flue handles interrupted Cloudflare operations according to their execution model:
+
+| Operation | After interruption |
+| --- | --- |
+| Created agent turn | Flue recovers the same admitted run from persisted session input and attempts to complete it. |
+| Flue workflow invocation | Flue terminalizes the interrupted attempt and restarts the workflow from its persisted payload as a new linked run. |
+
+Interruption recovery is **at-least-once**. For created agent turns, Flue persists the admitted user input before model execution and does not add a second copy of that input while recovering the same run. For workflows, the replacement run begins execution again from the start. In either case, an interruption after an external action has begun can cause that action to execute again. Side-effecting agent tools can use the stable recovered `runId` as an idempotency key. Because restarted workflows receive a new `runId`, workflow code should use an application-level idempotency key that remains stable across attempts.
+
+Flue persists the parsed invocation payload with the run record so interrupted execution can recover or restart and operators can inspect the original input through run inspection APIs. Workflow attempt records expose `restartedAsRunId` and `restartedFromRunId` links between interrupted and replacement attempts. Treat payloads as durable application data: do not submit secrets or sensitive values unless your application retention and access policy permits storing them.
+
+Flue workflows restart from the beginning after Durable Object interruption; they do not resume from checkpointed durable steps. For jobs that require durable step-level continuation rather than whole-invocation retry, implement those steps with [Cloudflare Workflows](https://developers.cloudflare.com/workflows/).
 
 ## Sandbox context
 

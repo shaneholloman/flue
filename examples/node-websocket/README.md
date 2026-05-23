@@ -25,4 +25,4 @@ await summarize.ready;
 console.log(await summarize.invoke({ text: 'Flue agents can be reached over WebSockets.' }));
 ```
 
-Agent sockets remain open for sequential prompts; workflow sockets accept one invocation and close after their result. This example intentionally omits `.flue/app.ts`: custom app WebSocket mounting is not supported yet. Generated socket routes have no application-level upgrade authorization hook yet, so protect production endpoints with an authenticated upstream gateway or proxy.
+Agent sockets remain open for sequential prompts; workflow sockets accept one invocation and close after their result. For production authentication or a mounted prefix, add `.flue/app.ts`, apply ordinary Hono middleware to every exposed agent/workflow socket path, and mount `flue()` beneath that prefix. Without a custom app, protect production sockets through an authenticated upstream gateway or proxy.

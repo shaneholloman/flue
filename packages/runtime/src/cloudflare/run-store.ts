@@ -46,8 +46,8 @@ class DurableRunStore implements RunStore {
 		const instanceId = input.owner.instanceId;
 		this.sql.exec(
 			`INSERT OR REPLACE INTO flue_runs
-			 (run_id, owner_kind, instance_id, agent_name, workflow_name, status, started_at, payload, ended_at, is_error, duration_ms, result, error)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL)`,
+			 (run_id, owner_kind, instance_id, agent_name, workflow_name, status, started_at, payload, restarted_from_run_id, ended_at, is_error, duration_ms, result, error, restarted_as_run_id)
+			 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, NULL, NULL, NULL)`,
 			input.runId,
 			input.owner.kind,
 			instanceId,
@@ -56,13 +56,14 @@ class DurableRunStore implements RunStore {
 			'active',
 			input.startedAt,
 			JSON.stringify(input.payload ?? null),
+			input.restartedFromRunId ?? null,
 		);
 	}
 
 	async endRun(input: EndRunInput): Promise<void> {
 		this.sql.exec(
 			`UPDATE flue_runs
-			 SET status = ?, ended_at = ?, is_error = ?, duration_ms = ?, result = ?, error = ?
+			 SET status = ?, ended_at = ?, is_error = ?, duration_ms = ?, result = ?, error = ?, restarted_as_run_id = ?
 			 WHERE run_id = ?`,
 			input.isError ? 'errored' : 'completed',
 			input.endedAt,
@@ -70,6 +71,7 @@ class DurableRunStore implements RunStore {
 			input.durationMs,
 			JSON.stringify(input.result ?? null),
 			JSON.stringify(input.error ?? null),
+			input.restartedAsRunId ?? null,
 			input.runId,
 		);
 		this.pruneCompletedRuns();
@@ -137,12 +139,13 @@ function ensureRunTables(sql: SqlStorage): void {
 			 status TEXT NOT NULL,
 			 started_at TEXT NOT NULL,
 			 payload TEXT,
+			 restarted_from_run_id TEXT,
+			 restarted_as_run_id TEXT,
 			 ended_at TEXT,
 			 is_error INTEGER,
-
-		 duration_ms INTEGER,
-		 result TEXT,
-		 error TEXT
+			 duration_ms INTEGER,
+			 result TEXT,
+			 error TEXT
 		)`,
 	);
 	ensureColumn(sql, 'flue_runs', 'owner_kind', "TEXT NOT NULL DEFAULT 'agent'");
@@ -152,6 +155,8 @@ function ensureRunTables(sql: SqlStorage): void {
 	// `instance_id`, but old rows may still have the runId in `owner_run_id`.
 	ensureColumn(sql, 'flue_runs', 'owner_run_id', 'TEXT');
 	ensureColumn(sql, 'flue_runs', 'payload', 'TEXT');
+	ensureColumn(sql, 'flue_runs', 'restarted_from_run_id', 'TEXT');
+	ensureColumn(sql, 'flue_runs', 'restarted_as_run_id', 'TEXT');
 	sql.exec(
 		`UPDATE flue_runs
 		 SET owner_kind = 'agent'
@@ -225,6 +230,8 @@ function rowToRunRecord(row: SqlRow): RunRecord {
 		status: row.status as RunRecord['status'],
 		startedAt: String(row.started_at),
 		payload,
+		restartedFromRunId: typeof row.restarted_from_run_id === 'string' ? row.restarted_from_run_id : undefined,
+		restartedAsRunId: typeof row.restarted_as_run_id === 'string' ? row.restarted_as_run_id : undefined,
 		endedAt: typeof row.ended_at === 'string' ? row.ended_at : undefined,
 		isError: row.is_error === null || row.is_error === undefined ? undefined : Boolean(row.is_error),
 		durationMs: typeof row.duration_ms === 'number' ? row.duration_ms : undefined,

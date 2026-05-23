@@ -188,6 +188,7 @@ export interface HandleWorkflowOptions {
 	runSubscribers?: RunSubscriberRegistry;
 	runRegistry?: RunRegistry;
 	runId?: string;
+	restartedFromRunId?: string;
 }
 
 /**
@@ -286,7 +287,7 @@ export async function handleAgentRequest(opts: HandleAgentOptions): Promise<Resp
 }
 
 export async function handleWorkflowRequest(opts: HandleWorkflowOptions): Promise<Response> {
-	const { request, workflowName, handler, createContext, runStore, runSubscribers, runRegistry } = opts;
+	const { request, workflowName, handler, createContext, runStore, runSubscribers, runRegistry, restartedFromRunId } = opts;
 	const startWebhook = opts.startWebhook ?? defaultStartWebhook;
 	const runHandler = opts.runHandler ?? defaultRunHandler;
 	const runId = opts.runId ?? generateWorkflowRunId(workflowName);
@@ -317,6 +318,7 @@ export async function handleWorkflowRequest(opts: HandleWorkflowOptions): Promis
 				runStore,
 				runSubscribers,
 				runRegistry,
+				restartedFromRunId,
 			});
 		}
 
@@ -334,6 +336,7 @@ export async function handleWorkflowRequest(opts: HandleWorkflowOptions): Promis
 				runStore,
 				runSubscribers,
 				runRegistry,
+				restartedFromRunId,
 			});
 		}
 
@@ -350,6 +353,7 @@ export async function handleWorkflowRequest(opts: HandleWorkflowOptions): Promis
 			runStore,
 			runSubscribers,
 			runRegistry,
+			restartedFromRunId,
 		});
 	} catch (err) {
 		const response = toHttpResponse(err);
@@ -373,6 +377,7 @@ interface ModeOptions {
 	runStore?: RunStore;
 	runSubscribers?: RunSubscriberRegistry;
 	runRegistry?: RunRegistry;
+	restartedFromRunId?: string;
 }
 
 export interface InvokeAttachedOptions {
@@ -389,6 +394,7 @@ export interface InvokeAttachedOptions {
 	runStore?: RunStore;
 	runSubscribers?: RunSubscriberRegistry;
 	runRegistry?: RunRegistry;
+	restartedFromRunId?: string;
 }
 
 export interface AttachedInvocationResult {
@@ -413,6 +419,7 @@ export interface RecoverRunOptions {
 
 export interface FailRecoveredRunOptions extends Omit<RecoverRunOptions, 'handler'> {
 	error: unknown;
+	restartedAsRunId?: string;
 }
 
 export interface RecoveredRunResult {
@@ -443,6 +450,7 @@ interface WebhookOptions {
 	runStore?: RunStore;
 	runSubscribers?: RunSubscriberRegistry;
 	runRegistry?: RunRegistry;
+	restartedFromRunId?: string;
 }
 
 async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
@@ -459,6 +467,7 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 		runStore,
 		runSubscribers,
 		runRegistry,
+		restartedFromRunId,
 	} = opts;
 
 	const releaseSessionLock = acquireAgentSessionLock(opts);
@@ -476,6 +485,7 @@ async function runWebhookMode(opts: WebhookOptions): Promise<Response> {
 			runStore,
 			runSubscribers,
 			runRegistry,
+			restartedFromRunId,
 		});
 	} catch (error) {
 		releaseSessionLock?.();
@@ -765,6 +775,7 @@ async function invokeAttachedUnlocked(opts: InvokeAttachedOptions): Promise<Atta
 		runStore: opts.runStore,
 		runSubscribers: opts.runSubscribers,
 		runRegistry: opts.runRegistry,
+		restartedFromRunId: opts.restartedFromRunId,
 	});
 	const { ctx } = lifecycle;
 	const runHandler = opts.runHandler ?? defaultRunHandler;
@@ -816,6 +827,8 @@ interface RunLifecycleOptions {
 	runStore?: RunStore;
 	runSubscribers?: RunSubscriberRegistry;
 	runRegistry?: RunRegistry;
+	restartedFromRunId?: string;
+	restartedAsRunId?: string;
 }
 
 interface RunLifecycle extends RunLifecycleOptions {
@@ -837,6 +850,7 @@ async function createRunLifecycle(options: RunLifecycleOptions): Promise<RunLife
 				owner,
 				startedAt,
 				payload: options.payload,
+				restartedFromRunId: options.restartedFromRunId,
 			}),
 		)
 		: false;
@@ -952,6 +966,7 @@ async function emitRunEnd(
 		? await safeRunStore('endRun', () =>
 			runStore.endRun({
 				runId,
+				restartedAsRunId: lifecycle.restartedAsRunId,
 				endedAt,
 				isError: input.isError,
 				durationMs,

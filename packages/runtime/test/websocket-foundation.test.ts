@@ -70,7 +70,7 @@ describe('WebSocket transport foundation', () => {
 		expect(await response.json()).toMatchObject({ error: { type: 'workflow_not_http' } });
 	});
 
-	it('forwards Cloudflare upgrades only for WebSocket-exposed targets', async () => {
+	it('forwards Cloudflare upgrades only for WebSocket-exposed targets and normalizes mounted paths', async () => {
 		const forwarded: string[] = [];
 		configureFlueRuntime({
 			target: 'cloudflare',
@@ -94,15 +94,39 @@ describe('WebSocket transport foundation', () => {
 			},
 		});
 		const app = new Hono();
-		app.route('/', flue());
+		app.route('/api', flue());
 		const upgrade = { method: 'GET', headers: { upgrade: 'websocket' } };
 
-		expect((await app.fetch(new Request('http://localhost/agents/assistant/one', upgrade))).status).toBe(200);
-		expect((await app.fetch(new Request('http://localhost/workflows/job', upgrade))).status).toBe(200);
-		expect((await app.fetch(new Request('http://localhost/agents/http-agent/one', upgrade))).status).toBe(404);
-		expect((await app.fetch(new Request('http://localhost/workflows/http-job', upgrade))).status).toBe(404);
+		expect((await app.fetch(new Request('http://localhost/api/agents/assistant/one', upgrade))).status).toBe(200);
+		expect((await app.fetch(new Request('http://localhost/api/workflows/job', upgrade))).status).toBe(200);
+		expect((await app.fetch(new Request('http://localhost/api/agents/http-agent/one', upgrade))).status).toBe(404);
+		expect((await app.fetch(new Request('http://localhost/api/workflows/http-job', upgrade))).status).toBe(404);
 		expect(forwarded[0]).toBe('/agents/assistant/one');
 		expect(forwarded[1]).toMatch(/^\/workflows\/job:workflow:job:/);
+	});
+
+	it('runs Cloudflare custom app middleware before a mounted socket upgrade is forwarded', async () => {
+		let forwarded = false;
+		configureFlueRuntime({
+			target: 'cloudflare',
+			manifest: { agents: [{ name: 'assistant', channels: { websocket: true }, receive: false, created: true }] },
+			routeAgentRequest: async () => {
+				forwarded = true;
+				return Response.json({ ok: true });
+			},
+		});
+		const app = new Hono();
+		app.use('/api/agents/*', async (c, next) => {
+			if (c.req.query('token') !== 'ok') return c.text('Unauthorized', 401);
+			await next();
+		});
+		app.route('/api', flue());
+		const upgrade = { method: 'GET', headers: { upgrade: 'websocket' } };
+
+		expect((await app.fetch(new Request('http://localhost/api/agents/assistant/one', upgrade))).status).toBe(401);
+		expect(forwarded).toBe(false);
+		expect((await app.fetch(new Request('http://localhost/api/agents/assistant/one?token=ok', upgrade))).status).toBe(200);
+		expect(forwarded).toBe(true);
 	});
 
 	it('rejects concurrent attached prompts to the same agent session', async () => {
@@ -423,13 +447,14 @@ describe('WebSocket transport foundation', () => {
 			request: new Request('http://localhost/workflows/removed', { method: 'POST' }),
 			createContext,
 			error: new Error('Handler unavailable'),
+			restartedAsRunId: 'workflow:removed:replacement',
 			runStore,
 			runRegistry,
 		});
 
 		const events = await runStore.getEvents(runId);
 		expect(events.map((event) => event.type)).toEqual(['run_end']);
-		expect(await runStore.getRun(runId)).toMatchObject({ status: 'errored', isError: true });
+		expect(await runStore.getRun(runId)).toMatchObject({ status: 'errored', isError: true, restartedAsRunId: 'workflow:removed:replacement' });
 		expect(await runRegistry.lookupRun(runId)).toMatchObject({ status: 'errored' });
 	});
 
@@ -447,6 +472,7 @@ describe('WebSocket transport foundation', () => {
 			id: runId,
 			runId,
 			payload: { day: 'today' },
+			restartedFromRunId: 'workflow:daily-report:previous',
 			request,
 			createContext,
 			handler: async (ctx) => {
@@ -465,7 +491,7 @@ describe('WebSocket transport foundation', () => {
 		expect(invocation).toEqual({ runId, result: { echoed: { day: 'today' } } });
 		expect(events.map((event) => event.type)).toEqual(['run_start', 'log', 'idle', 'run_end']);
 		expect(events.every((event) => event.runId === runId)).toBe(true);
-		expect(await runStore.getRun(runId)).toMatchObject({ status: 'completed', result: { echoed: { day: 'today' } } });
+		expect(await runStore.getRun(runId)).toMatchObject({ status: 'completed', restartedFromRunId: 'workflow:daily-report:previous', result: { echoed: { day: 'today' } } });
 		expect(await runRegistry.lookupRun(runId)).toMatchObject({ status: 'completed' });
 	});
 });

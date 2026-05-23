@@ -339,4 +339,4 @@ See `examples/cross-channel-routing` for a mock inbound routing example. It uses
 - Provider retries may produce duplicate deliveries; preserve provider ids in your input if idempotency matters.
 - Cloudflare external-channel dispatch processing is not durable yet and currently fails clearly for unsupported processing paths.
 - The direct HTTP payload shape is provisional; WebSocket clients should use the published SDK/protocol surface.
-- WebSocket modules currently require Flue's generated default app; custom `app.ts` WebSocket mounting is not yet supported, so protect production socket routes with an authenticated upstream gateway or proxy.
+- When using a custom `app.ts`, protect every exposed agent/workflow WebSocket route with ordinary application middleware before mounting `flue()`; without a custom app, protect production socket routes upstream. Avoid middleware that mutates WebSocket upgrade response headers.

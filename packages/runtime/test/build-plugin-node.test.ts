@@ -135,12 +135,39 @@ describe('Node build plugin', () => {
 		}
 	});
 
-	it('does not auto-mount raw WebSocket upgrades when app.ts owns the request pipeline', () => {
-		const entry = new NodePlugin().generateEntryPoint({ ...testBuildContext(), appEntry: '/tmp/app.ts' });
+	it('routes mounted custom-app WebSockets through middleware', async () => {
+		const root = createFixtureRoot('flue-custom-app-websocket-');
+		fs.mkdirSync(path.join(root, 'agents'));
+		fs.writeFileSync(
+			path.join(root, 'agents', 'assistant.ts'),
+			`import { createAgent, websocket } from '@flue/runtime';\n` +
+				`export const channels = [websocket()];\n` +
+				`export default createAgent(() => ({ model: false }));\n`,
+		);
+		fs.writeFileSync(
+			path.join(root, 'app.ts'),
+			`import { flue } from '@flue/runtime/app';\n` +
+				`import { Hono } from 'hono';\n` +
+				`const app = new Hono();\n` +
+				`app.use('/api/agents/*', async (c, next) => { if (c.req.query('token') !== 'ok') return c.text('Unauthorized', 401); await next(); });\n` +
+				`app.route('/api', flue());\n` +
+				`export default app;\n`,
+		);
+		await build({ root, target: 'node' });
 
-		expect(entry).not.toContain("import { createNodeWebSocketTransport } from '@flue/runtime/node';");
-		expect(entry).not.toContain('websocketTransport.attach(server);');
-		expect(entry).toContain('Custom app.ts WebSocket mounting is not yet supported.');
+		const { child, port } = await startGeneratedServer(root);
+		try {
+			const rejected = new WebSocket(`ws://localhost:${port}/api/agents/assistant/instance-1`);
+			expect(await waitForSocketFailure(rejected)).toBe(true);
+			const socket = new WebSocket(`ws://localhost:${port}/api/agents/assistant/instance-1?token=ok`);
+			const messages = collectMessages(socket);
+			await waitForOpen(socket);
+			const ready = await waitForMessage(messages, (message) => message.type === 'ready');
+			expect(ready).toMatchObject({ target: 'agent', name: 'assistant', instanceId: 'instance-1' });
+			socket.close();
+		} finally {
+			child.kill('SIGTERM');
+		}
 	});
 
 	it('rejects duplicate agent basenames', async () => {
