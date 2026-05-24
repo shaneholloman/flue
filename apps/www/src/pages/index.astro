@@ -386,21 +386,16 @@ const floatingSquares = [
 
         <div class="mt-10 grid lg:grid-cols-6 gap-5">
           <a href="#" class="lg:col-span-3 bg-white flex flex-col transition-colors hover:bg-gray-50 [&>div]:transition-colors hover:[&>div]:border-gray-400">
-            <div class="border border-cyan-700/50">
-              <svg class="block w-full" viewBox="0 0 480 168" fill="none" aria-hidden="true">
+            <div class="relative flex h-[184px] items-center justify-center overflow-hidden border border-slate-300 bg-[#e9eef4]">
+              <svg class="absolute inset-0 h-full w-full" aria-hidden="true">
                 <defs>
-                  <pattern id="agentsGrid" width="20" height="20" patternUnits="userSpaceOnUse">
-                    <path d="M20 0H0V20" stroke="#0891b2" stroke-opacity="0.5" stroke-width="0.8" stroke-dasharray="1 2"/>
+                  <pattern id="agentsPaperGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                    <path d="M20 0H0V20" fill="none" stroke="#64748b" stroke-opacity="0.72" stroke-width="0.8" stroke-dasharray="1 2"/>
                   </pattern>
-                  <radialGradient id="agentSphere" cx="36%" cy="30%" r="72%">
-                    <stop offset="0" stop-color="#eefafa"/>
-                    <stop offset="1" stop-color="#b4e2e5"/>
-                  </radialGradient>
                 </defs>
-                <rect width="480" height="168" fill="#d5eff1"/>
-                <rect width="480" height="168" fill="url(#agentsGrid)"/>
-                <circle cx="240" cy="84" r="32" fill="url(#agentSphere)" stroke="#0e7490" stroke-opacity="0.72"/>
+                <rect width="100%" height="100%" fill="url(#agentsPaperGrid)"/>
               </svg>
+              <img src="/feature-agents-holo.png" alt="" class="pattern-layer relative h-[120px] w-[120px] object-contain" style="--shadow-rgb: 99 102 241;" />
             </div>
             <div class="flex-1 border-x border-b border-gray-300 p-6">
               <h3 class="font-heading text-xl font-semibold tracking-tight text-gray-950">Agents</h3>
@@ -409,19 +404,16 @@ const floatingSquares = [
           </a>
 
           <a href="#" class="lg:col-span-3 bg-white flex flex-col transition-colors hover:bg-gray-50 [&>div]:transition-colors hover:[&>div]:border-gray-400">
-            <div class="border border-cyan-700/50">
-              <svg class="block w-full" viewBox="0 0 480 168" fill="none" aria-hidden="true">
+            <div class="relative flex h-[184px] items-center justify-center overflow-hidden border border-slate-300 bg-[#e9eef4]">
+              <svg class="absolute inset-0 h-full w-full" aria-hidden="true">
                 <defs>
-                  <pattern id="workflowsGrid" width="20" height="20" patternUnits="userSpaceOnUse">
-                    <path d="M20 0H0V20" stroke="#0891b2" stroke-opacity="0.5" stroke-width="0.8" stroke-dasharray="1 2"/>
+                  <pattern id="workflowsPaperGrid" width="20" height="20" patternUnits="userSpaceOnUse">
+                    <path d="M20 0H0V20" fill="none" stroke="#64748b" stroke-opacity="0.72" stroke-width="0.8" stroke-dasharray="1 2"/>
                   </pattern>
                 </defs>
-                <rect width="480" height="168" fill="#d5eff1"/>
-                <rect width="480" height="168" fill="url(#workflowsGrid)"/>
-                <path d="M240 44L270 61L240 78L210 61L240 44Z" fill="#d9f2f3" stroke="#0e7490" stroke-opacity="0.72"/>
-                <path d="M210 61V96L240 113V78L210 61Z" fill="#bde6e8" stroke="#0e7490" stroke-opacity="0.72"/>
-                <path d="M240 78L270 61V96L240 113V78Z" fill="#a9dfe2" stroke="#0e7490" stroke-opacity="0.72"/>
+                <rect width="100%" height="100%" fill="url(#workflowsPaperGrid)"/>
               </svg>
+              <img src="/feature-workflows-light.png" alt="" class="pattern-layer relative h-[94px] w-[118px] object-contain" style="--shadow-rgb: 99 102 241;" />
             </div>
             <div class="flex-1 border-x border-b border-gray-300 p-6">
               <h3 class="font-heading text-xl font-semibold tracking-tight text-gray-950">Workflows</h3>
