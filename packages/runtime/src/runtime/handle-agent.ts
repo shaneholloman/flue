@@ -35,8 +35,13 @@ export function createAgentDispatchProcessor(options: {
 		async process(input) {
 			const agent = options.agents[input.targetAgent];
 			if (!agent) throw new Error(`[flue] dispatch target agent "${input.targetAgent}" has no created agent.`);
-			const ctx = options.createContext(input.id, undefined, input, dispatchRequest(), undefined, input.dispatchId);
-			await createDispatchAgentHandler(agent, input)(ctx);
+			const releaseSessionLock = await reserveDispatchAgentSession({ agentName: input.targetAgent, instanceId: input.id }, input);
+			try {
+				const ctx = options.createContext(input.id, undefined, input, dispatchRequest(), undefined, input.dispatchId);
+				await createDispatchAgentHandler(agent, input)(ctx);
+			} finally {
+				releaseSessionLock();
+			}
 		},
 	};
 }

@@ -4,6 +4,7 @@ import {
 	validateAgentDispatchAdmission,
 	createAgentDispatchProcessor,
 	createFlueContext,
+	invokeDirectAttached,
 	configureFlueRuntime,
 	InMemoryDispatchQueue,
 	InMemoryRunStore,
@@ -195,6 +196,72 @@ describe('global dispatch', () => {
 		expect(processed[0]).toMatchObject({ targetAgent: 'moderator', id: 'guild:1', session: 'default', input: { type: 'global' } });
 	});
 
+	it('waits to process a Node dispatch until a direct prompt in the same session finishes', async () => {
+		let releaseDirect: (() => void) | undefined;
+		const directPending = new Promise<void>((resolve) => {
+			releaseDirect = resolve;
+		});
+		const processed: DispatchInput[] = [];
+		const processor = createAgentDispatchProcessor({
+			agents: { moderator: createAgent(() => ({ model: false })) },
+			createContext: (...args) => {
+				const ctx = createTestContext(...args);
+				ctx.initializeCreatedAgent = async () => fakeDispatchHarness([], processed);
+				return ctx;
+			},
+		});
+		const direct = invokeDirectAttached({
+			agentName: 'moderator',
+			id: 'guild:1',
+			payload: { message: 'hold', session: 'case:1' },
+			request: new Request('http://localhost/agents/moderator/guild:1', { method: 'POST' }),
+			createContext: createTestContext,
+			handler: async () => {
+				await directPending;
+				return null;
+			},
+		});
+		const processing = processor.process(dispatchInput('dispatch-after-direct'));
+
+		await new Promise((resolve) => setTimeout(resolve, 0));
+		expect(processed).toEqual([]);
+		releaseDirect?.();
+		await Promise.all([direct, processing]);
+		expect(processed.map((input) => input.dispatchId)).toEqual(['dispatch-after-direct']);
+	});
+
+	it('rejects a direct prompt while a Node dispatch owns the same session lock', async () => {
+		let markStarted: (() => void) | undefined;
+		const started = new Promise<void>((resolve) => {
+			markStarted = resolve;
+		});
+		let releaseDispatch: (() => void) | undefined;
+		const dispatchPending = new Promise<void>((resolve) => {
+			releaseDispatch = resolve;
+		});
+		const processor = createAgentDispatchProcessor({
+			agents: { moderator: createAgent(() => ({ model: false })) },
+			createContext: (...args) => {
+				const ctx = createTestContext(...args);
+				ctx.initializeCreatedAgent = async () => blockingDispatchHarness(() => markStarted?.(), dispatchPending);
+				return ctx;
+			},
+		});
+		const processing = processor.process(dispatchInput('dispatch-first'));
+		await started;
+
+		await expect(invokeDirectAttached({
+			agentName: 'moderator',
+			id: 'guild:1',
+			payload: { message: 'conflict', session: 'case:1' },
+			request: new Request('http://localhost/agents/moderator/guild:1', { method: 'POST' }),
+			createContext: createTestContext,
+			handler: async () => null,
+		})).rejects.toMatchObject({ details: 'This agent session already has an active prompt.' });
+		releaseDispatch?.();
+		await processing;
+	});
+
 	it('persists dispatched input once and reuses it during recovery', async () => {
 		const store = new InMemorySessionStore();
 		const harness = new Harness('guild:1', 'default', testAgentConfig(), fakeEnv(), store);
@@ -239,8 +306,28 @@ describe('global dispatch', () => {
 	});
 });
 
+function dispatchInput(dispatchId: string): DispatchInput {
+	return { dispatchId, targetAgent: 'moderator', agent: 'moderator', id: 'guild:1', session: 'case:1', input: { type: 'flagged' }, acceptedAt: '2026-05-21T00:00:00.000Z' };
+}
+
 function assistantMessage(): AgentMessage {
 	return { role: 'assistant', content: [{ type: 'text', text: 'processed' }], usage: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } }, timestamp: Date.now() } as AgentMessage;
+}
+
+function blockingDispatchHarness(onStart: () => void, pending: Promise<void>): FlueHarness {
+	return {
+		name: 'default',
+		session: async (name?: string) => ({
+			name: name ?? 'default',
+			processDispatchInput: async () => {
+				onStart();
+				await pending;
+			},
+		}) as unknown as FlueSession & { processDispatchInput(input: DispatchInput): Promise<void> },
+		sessions: {} as never,
+		shell: (() => Promise.resolve({ stdout: '', stderr: '', exitCode: 0 })) as never,
+		fs: {} as never,
+	};
 }
 
 function fakeDispatchHarness(sessions: string[], processed: DispatchInput[]): FlueHarness {
