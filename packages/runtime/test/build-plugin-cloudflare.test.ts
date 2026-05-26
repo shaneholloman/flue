@@ -31,28 +31,6 @@ describe('Cloudflare build plugin', () => {
 		expect(entry).not.toContain('createAgentDispatchProcessor');
 	});
 
-	it('routes awaited delegation privately to discovered target Durable Objects', async () => {
-		const entry = await new CloudflarePlugin().generateEntryPoint(testBuildContext());
-
-		expect(entry).toContain('invokeAgentDelegation,');
-		expect(entry).toContain("const INTERNAL_DELEGATION_PATH = '/__flue/internal/delegation';");
-		expect(entry).toContain('async function invokeDeployedAgentDelegation(agent, input, signal)');
-		expect(entry).toContain('const agentName = dispatchAgentNames.get(agent);');
-		expect(entry).toContain('delegate() target created agent is not a discovered default-exported agent in this built application.');
-		expect(entry).toContain("stub.fetch(new Request('https://flue.invalid' + INTERNAL_DELEGATION_PATH");
-		expect(entry).toContain('function createContextForRequest(id, runId, payload, doInstance, req, initialEventIndex, dispatchId, delegationId)');
-		expect(entry).toContain('delegationId,');
-		expect(entry).toContain('invokeAgentDelegation: invokeDeployedAgentDelegation,');
-		expect(entry).toContain('if (isInternalDelegationRequest(request)) {');
-		expect(entry).toContain('const agent = createdAgents[agentName];');
-		expect(entry).toContain('invokeAgentDelegation({');
-		expect(entry).toContain('signal: request.signal,');
-		const delegationBranch = entry.slice(entry.indexOf('if (isInternalDelegationRequest(request)) {'), entry.indexOf('const payload = await request.clone().json().catch(() => null);'));
-		expect(delegationBranch).not.toContain("startFiber('flue:dispatch'");
-		expect(delegationBranch).not.toContain('validateAgentDispatchAdmission');
-		expect(delegationBranch).not.toContain('createDispatchAgentHandler');
-	});
-
 	it('threads generated Durable Object identity through Cloudflare context', async () => {
 		const entry = await new CloudflarePlugin().generateEntryPoint(testBuildContext());
 

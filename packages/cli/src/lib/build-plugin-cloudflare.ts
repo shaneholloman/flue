@@ -208,7 +208,6 @@ import {
   configureFlueRuntime,
   createDefaultFlueApp,
   createDirectAgentHandler,
-  invokeAgentDelegation,
   hasRegisteredProvider,
 } from '@flue/runtime/internal';
 import {
@@ -326,7 +325,6 @@ function resolveSandbox(sandbox) {
 const memoryStore = new InMemorySessionStore();
 const memoryRunStore = new InMemoryRunStore();
 const INTERNAL_DISPATCH_PATH = '/__flue/internal/dispatch';
-const INTERNAL_DELEGATION_PATH = '/__flue/internal/delegation';
 const dispatchQueue = {
   async enqueue(input) {
     const binding = env?.[agentBindingNameFromAgentName(input.targetAgent)];
@@ -341,24 +339,6 @@ const dispatchQueue = {
     return response.json();
   },
 };
-
-async function invokeDeployedAgentDelegation(agent, input, signal) {
-  const agentName = dispatchAgentNames.get(agent);
-  if (!agentName) {
-    throw new Error('[flue] delegate() target created agent is not a discovered default-exported agent in this built application.');
-  }
-  const binding = env?.[agentBindingNameFromAgentName(agentName)];
-  if (!binding) throw new Error('[flue] delegate() target agent "' + agentName + '" Durable Object binding is unavailable.');
-  const stub = await getAgentByName(binding, input.id);
-  const response = await stub.fetch(new Request('https://flue.invalid' + INTERNAL_DELEGATION_PATH, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ targetAgent: agentName, input }),
-    signal,
-  }));
-  if (!response.ok) throw new Error('[flue] delegate() target agent "' + agentName + '" invocation failed with status ' + response.status + '.');
-  return response.json();
-}
 
 // Module-scoped per-isolate registry; run ids isolate buckets across DOs.
 const runSubscribers = createRunSubscriberRegistry();
@@ -388,7 +368,7 @@ function createDOStore(sql) {
   };
 }
 
-function createContextForRequest(id, runId, payload, doInstance, req, initialEventIndex, dispatchId, delegationId) {
+function createContextForRequest(id, runId, payload, doInstance, req, initialEventIndex, dispatchId) {
   // Use DO SQLite storage by default, fall back to in-memory
   const defaultStore = doInstance?.ctx?.storage?.sql
     ? createDOStore(doInstance.ctx.storage.sql)
@@ -398,7 +378,6 @@ function createContextForRequest(id, runId, payload, doInstance, req, initialEve
     id,
     runId,
     dispatchId,
-    delegationId,
     payload,
     env: doInstance?.env ?? {},
     req,
@@ -409,7 +388,6 @@ function createContextForRequest(id, runId, payload, doInstance, req, initialEve
     createDefaultEnv,
     defaultStore,
     resolveSandbox,
-    invokeAgentDelegation: invokeDeployedAgentDelegation,
   });
 }
 
@@ -641,22 +619,6 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
     });
     return Response.json({ dispatchId: input.dispatchId, acceptedAt: input.acceptedAt });
   }
-  if (isInternalDelegationRequest(request)) {
-    const body = await request.json();
-    const input = body?.input;
-    if (body?.targetAgent !== agentName || input?.id !== id) return new Response('Invalid internal delegation target.', { status: 400 });
-    const agent = createdAgents[agentName];
-    if (!agent) return new Response('Delegation target unavailable.', { status: 404 });
-    const identity = agentRuntimeIdentity(agentName);
-    const result = await runWithInstanceContext(doInstance, identity, () => invokeAgentDelegation({
-      agentName,
-      agent,
-      input,
-      signal: request.signal,
-      createContext: (id_, runId, payload, req, initialEventIndex, dispatchId, delegationId) => createContextForRequest(id_, runId, payload, doInstance, req, initialEventIndex, dispatchId, delegationId),
-    }));
-    return Response.json(result);
-  }
   const payload = await request.clone().json().catch(() => null);
   const session = typeof payload?.session === 'string' && payload.session.trim() !== '' ? payload.session : 'default';
   await assertNoPendingDispatchForDirectSession(doInstance, agentName, session);
@@ -780,10 +742,6 @@ function agentRuntimeIdentity(agentName) {
 
 function isInternalDispatchRequest(request) {
   return request.method === 'POST' && new URL(request.url).pathname === INTERNAL_DISPATCH_PATH;
-}
-
-function isInternalDelegationRequest(request) {
-  return request.method === 'POST' && new URL(request.url).pathname === INTERNAL_DELEGATION_PATH;
 }
 
 function parseWorkflowStart(request, workflowName) {
