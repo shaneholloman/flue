@@ -30,6 +30,36 @@ describe('Cloudflare Vite production Worker', () => {
 		}
 	}, 90000);
 
+	it('preserves the source Worker name when the Vite plugin selects an environment', async () => {
+		const previous = process.env.CLOUDFLARE_ENV;
+		delete process.env.CLOUDFLARE_ENV;
+		const wranglerConfig = {
+			name: 'support-seal-flue',
+			compatibility_date: '2026-04-01',
+			compatibility_flags: ['nodejs_compat'],
+			env: { staging: { name: 'support-seal-flue-staging' } },
+		};
+		try {
+			const production = await createGeneratedFixture('build', { wranglerConfig, cloudflareEnv: null });
+			const productionConfigPath = path.join(production.output, 'support_seal_flue', 'wrangler.json');
+			expect(JSON.parse(fs.readFileSync(productionConfigPath, 'utf8')).name).toBe('support-seal-flue');
+			expect(fs.existsSync(path.join(production.output, 'support_seal_flue_staging'))).toBe(false);
+
+			const staging = await createGeneratedFixture('build', { wranglerConfig, cloudflareEnv: 'staging' });
+			const inputConfig = JSON.parse(fs.readFileSync(cloudflareViteConfigPath(staging.root), 'utf8')) as { name: string; env: { staging: { name: string; main: string; durable_objects: { bindings: Array<{ class_name: string }> } } } };
+			expect(inputConfig.name).toBe('support-seal-flue');
+			expect(inputConfig.env.staging.name).toBe('support-seal-flue-staging');
+			expect(inputConfig.env.staging.main).toBe('.flue-vite/_entry.ts');
+			expect(inputConfig.env.staging.durable_objects.bindings.map((binding) => binding.class_name)).toEqual(expect.arrayContaining(['Assistant', 'SmokeWorkflow', 'FlueRegistry']));
+			const stagingConfigPath = path.join(staging.output, 'support_seal_flue', 'wrangler.json');
+			expect(JSON.parse(fs.readFileSync(stagingConfigPath, 'utf8')).name).toBe('support-seal-flue-staging');
+			expect(fs.existsSync(path.join(staging.output, 'support_seal_flue_staging'))).toBe(false);
+		} finally {
+			if (previous === undefined) delete process.env.CLOUDFLARE_ENV;
+			else process.env.CLOUDFLARE_ENV = previous;
+		}
+	}, 90000);
+
 	it('serves workflows and activates packaged skills through workerd in Vite development', async () => {
 		const { root } = await createGeneratedFixture('development');
 		const entryPath = path.join(cloudflareViteInputDir(root), '_entry.ts');
@@ -65,7 +95,10 @@ describe('Cloudflare Vite production Worker', () => {
 	}, 90000);
 });
 
-async function createGeneratedFixture(mode: 'build' | 'development'): Promise<{ root: string; output: string }> {
+async function createGeneratedFixture(
+	mode: 'build' | 'development',
+	options: { wranglerConfig?: Record<string, unknown>; cloudflareEnv?: string | null } = {},
+): Promise<{ root: string; output: string }> {
 	const root = fs.mkdtempSync(path.join(os.tmpdir(), 'flue-vite-cloudflare-'));
 	const output = path.join(root, 'generated');
 	fs.mkdirSync(path.join(root, 'node_modules', '@flue'), { recursive: true });
@@ -80,8 +113,10 @@ async function createGeneratedFixture(mode: 'build' | 'development'): Promise<{ 
 	fs.mkdirSync(path.join(root, 'agents'));
 	fs.mkdirSync(path.join(root, 'workflows'));
 	fs.mkdirSync(path.join(root, 'skills', 'review'), { recursive: true });
-	fs.writeFileSync(path.join(root, 'wrangler.jsonc'), JSON.stringify({ name: 'vite-cloudflare-integration', compatibility_date: '2026-04-01', compatibility_flags: ['nodejs_compat'] }));
-	fs.writeFileSync(path.join(root, mode === 'development' ? '.env.development' : '.env.production'), 'CLOUDFLARE_ENV=fixture-env\n');
+	fs.writeFileSync(path.join(root, 'wrangler.jsonc'), JSON.stringify(options.wranglerConfig ?? { name: 'vite-cloudflare-integration', compatibility_date: '2026-04-01', compatibility_flags: ['nodejs_compat'] }));
+	if (options.cloudflareEnv !== null) {
+		fs.writeFileSync(path.join(root, mode === 'development' ? '.env.development' : '.env.production'), `CLOUDFLARE_ENV=${options.cloudflareEnv ?? 'fixture-env'}\n`);
+	}
 	fs.writeFileSync(path.join(root, 'skills', 'review', 'SKILL.md'), `---\nname: review\ndescription: Reviews requested work.\n---\nReview it.\n`);
 	fs.writeFileSync(path.join(root, 'skills', 'review', 'LICENSE.txt'), 'License terms.\n');
 	fs.writeFileSync(path.join(root, 'agents', 'assistant.ts'), `import { createAgent } from '@flue/runtime';\nimport review from '../skills/review/SKILL.md' with { type: 'skill' };\nexport default createAgent(() => ({ model: 'fixture/reader', skills: [review] }));\n`);

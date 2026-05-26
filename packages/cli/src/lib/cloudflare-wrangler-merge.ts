@@ -7,13 +7,8 @@
  * untouched. The merged result is written as the official Vite plugin's
  * input configuration so its output Worker sees both.
  *
- * We delegate parsing and normalization to wrangler's own `unstable_readConfig`
- * (lazy-imported so Node-only Flue users don't pay for it). This gets us:
- *   - Both jsonc and TOML support for free.
- *   - Wrangler's own validation diagnostics (clearer errors than ours).
- *   - Path normalization: relative paths in fields like `containers[].image`
- *     are resolved to absolute paths against the user's config dir before
- *     we merge, so generated input configuration cannot alter their meaning.
+ * We delegate configuration parsing and validation to Wrangler, while retaining
+ * environment blocks in the generated input configuration for the Vite plugin.
  *
  * Flue still owns merge semantics (DO binding de-dup by `name`, migration
  * append-if-tag-absent) and Flue-specific validation (compat date floor,
@@ -21,7 +16,7 @@
  */
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import type { Unstable_Config } from 'wrangler';
+import type { Unstable_Config, Unstable_RawConfig } from 'wrangler';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -88,41 +83,12 @@ export interface FlueAdditions {
 // ─── Reading user config ────────────────────────────────────────────────────
 
 interface UserConfigRead {
-	/**
-	 * Normalized config from wrangler's reader, or an empty object if no user
-	 * file was found. Treated as `Record<string, unknown>` at our merge layer
-	 * because we touch only a handful of well-known fields and pass everything
-	 * else through unchanged. Typed loosely so we can survive shape drift in
-	 * wrangler's `Unstable_Config` between minor versions.
-	 */
 	config: Record<string, unknown>;
+	effectiveConfig: Record<string, unknown>;
 	/** Absolute path of the user config file that was read, or null if none existed. */
 	path: string | null;
 }
 
-/**
- * Read and normalize the user's wrangler config from `root`.
- *
- * Looks for `wrangler.jsonc`, `wrangler.json`, then `wrangler.toml` (jsonc is
- * Cloudflare's recommended format for new projects, but all three work).
- * Returns an empty config if no file is present.
- *
- * Delegates parsing + normalization to wrangler via `unstable_readConfig`. This
- * is async only because wrangler is a lazy import (it's a peer dep — Flue users
- * who only target Node should not pay for resolving it). The wrangler call
- * itself is synchronous under the hood.
- *
- * The returned config has been through wrangler's `normalizeAndValidateConfig`,
- * which:
- *   - Resolves relative paths to absolute (notably `containers[].image`).
- *   - Fills in defaults (`compatibility_date` if absent, etc.).
- *   - Merges `env.*` per-environment overrides.
- *   - Throws on validation errors via wrangler's own `UserError`.
- *
- * The verbose / defaulted output is intentional — the cost is a slightly bigger
- * generated Vite input config and the benefit is correctness without us reimplementing
- * Wrangler's path-resolution logic.
- */
 export async function readUserWranglerConfig(root: string): Promise<UserConfigRead> {
 	const candidates = ['wrangler.jsonc', 'wrangler.json', 'wrangler.toml'];
 	let foundPath: string | null = null;
@@ -135,7 +101,7 @@ export async function readUserWranglerConfig(root: string): Promise<UserConfigRe
 	}
 
 	if (!foundPath) {
-		return { config: {}, path: null };
+		return { config: {}, effectiveConfig: {}, path: null };
 	}
 
 	let wrangler: typeof import('wrangler');
@@ -150,19 +116,22 @@ export async function readUserWranglerConfig(root: string): Promise<UserConfigRe
 		);
 	}
 
-	let parsed: Unstable_Config;
+	let raw: Unstable_RawConfig;
+	let effective: Unstable_Config;
 	try {
-		parsed = wrangler.unstable_readConfig({ config: foundPath }, { hideWarnings: true });
+		raw = wrangler.experimental_readRawConfig({ config: foundPath }).rawConfig;
+		effective = wrangler.unstable_readConfig({ config: foundPath }, { hideWarnings: true });
 	} catch (err) {
-		// Wrangler throws `UserError` for validation/parse failures with an
-		// already-formatted message. Re-prefix for friendliness so the user
-		// can tell who's complaining.
 		throw new Error(
 			`[flue] Failed to read ${foundPath}: ${err instanceof Error ? err.message : String(err)}`,
 		);
 	}
 
-	return { config: parsed as unknown as Record<string, unknown>, path: foundPath };
+	return {
+		config: raw as unknown as Record<string, unknown>,
+		effectiveConfig: effective as unknown as Record<string, unknown>,
+		path: foundPath,
+	};
 }
 
 // ─── Validation ─────────────────────────────────────────────────────────────
@@ -257,10 +226,9 @@ export function validateUserWranglerConfig(config: Record<string, unknown>): voi
  * Returned in alphabetical order so a regenerated Vite input config is
  * byte-identical across machines and CI runs.
  *
- * Pure function: takes the current class list + the user's existing
- * migrations array (typically `userConfig.migrations` straight from
- * wrangler's reader) and returns the migrations to append. Doesn't read or
- * write any files.
+ * Pure function: takes the current class list + existing migrations for one
+ * emitted configuration scope and returns the migrations to append. Doesn't
+ * read or write any files.
  */
 export function computeFlueMigrations(
 	currentClasses: string[],
@@ -358,65 +326,74 @@ export function mergeFlueAdditions(
 	}
 	merged.compatibility_flags = existingFlags;
 
-	// durable_objects.bindings: concat user + Flue, de-dupe by `name` (user
-	// wins on conflict — they may be overriding a class_name intentionally).
-	const existingDo =
-		typeof merged.durable_objects === 'object' && merged.durable_objects !== null
-			? (merged.durable_objects as Record<string, unknown>)
-			: {};
-	const existingBindings = Array.isArray(existingDo.bindings)
-		? (existingDo.bindings as unknown[])
-		: [];
-	const existingBindingNames = new Set(
-		existingBindings
-			.filter((b): b is Record<string, unknown> => typeof b === 'object' && b !== null)
-			.map((b) => b.name)
-			.filter((n): n is string => typeof n === 'string'),
-	);
-	for (const binding of additions.doBindings) {
-		if (binding.name !== 'FLUE_REGISTRY') continue;
-		if (!existingBindingNames.has(binding.name)) continue;
-		const existing = existingBindings.find(
-			(b): b is Record<string, unknown> => {
-				if (typeof b !== 'object' || b === null) return false;
-				return (b as Record<string, unknown>).name === binding.name;
-			},
+	const mergeDurableObjectBindings = (config: Record<string, unknown>): void => {
+		const existingDo =
+			typeof config.durable_objects === 'object' && config.durable_objects !== null
+				? (config.durable_objects as Record<string, unknown>)
+				: {};
+		const existingBindings = Array.isArray(existingDo.bindings)
+			? (existingDo.bindings as unknown[])
+			: [];
+		const existingBindingNames = new Set(
+			existingBindings
+				.filter((b): b is Record<string, unknown> => typeof b === 'object' && b !== null)
+				.map((b) => b.name)
+				.filter((n): n is string => typeof n === 'string'),
 		);
-		if (existing?.class_name !== binding.class_name) {
-			throw new Error(
-				`[flue] wrangler.jsonc durable object binding "${binding.name}" is reserved by Flue. ` +
-					`Expected class_name "${binding.class_name}", received "${String(existing?.class_name)}".`,
+		for (const binding of additions.doBindings) {
+			if (binding.name !== 'FLUE_REGISTRY') continue;
+			if (!existingBindingNames.has(binding.name)) continue;
+			const existing = existingBindings.find(
+				(b): b is Record<string, unknown> => {
+					if (typeof b !== 'object' || b === null) return false;
+					return (b as Record<string, unknown>).name === binding.name;
+				},
 			);
+			if (existing?.class_name !== binding.class_name) {
+				throw new Error(
+					`[flue] wrangler.jsonc durable object binding "${binding.name}" is reserved by Flue. ` +
+						`Expected class_name "${binding.class_name}", received "${String(existing?.class_name)}".`,
+				);
+			}
 		}
-	}
-	const flueBindingsToAdd = additions.doBindings.filter((b) => !existingBindingNames.has(b.name));
-	merged.durable_objects = {
-		...existingDo,
-		bindings: [...existingBindings, ...flueBindingsToAdd],
+		const flueBindingsToAdd = additions.doBindings.filter((b) => !existingBindingNames.has(b.name));
+		config.durable_objects = {
+			...existingDo,
+			bindings: [...existingBindings, ...flueBindingsToAdd],
+		};
 	};
 
-	// migrations: append Flue's per-class migration entries, in order, skipping
-	// any whose tag is already present. Migration order matters to wrangler
-	// (Cloudflare applies them sequentially), so we append rather than
-	// prepend — user's historical migrations come first, Flue's new tagged
-	// entries come last.
-	const existingMigrations = Array.isArray(merged.migrations)
-		? (merged.migrations as unknown[])
-		: [];
-	const existingMigrationTags = new Set(
-		existingMigrations
-			.filter((m): m is Record<string, unknown> => typeof m === 'object' && m !== null)
-			.map((m) => m.tag)
-			.filter((t): t is string => typeof t === 'string'),
-	);
-	const migrationsOut = [...existingMigrations];
-	for (const migration of additions.migrations) {
-		if (!existingMigrationTags.has(migration.tag)) {
-			migrationsOut.push(migration);
-			existingMigrationTags.add(migration.tag);
+	mergeDurableObjectBindings(merged);
+	if (typeof merged.env === 'object' && merged.env !== null) {
+		const environments = { ...(merged.env as Record<string, unknown>) };
+		for (const [name, value] of Object.entries(environments)) {
+			if (typeof value !== 'object' || value === null) continue;
+			const environment = { ...(value as Record<string, unknown>) };
+			environment.main = additions.main;
+			mergeDurableObjectBindings(environment);
+			environments[name] = environment;
+		}
+		merged.env = environments;
+	}
+
+	const flueClasses = additions.migrations.flatMap((migration) => migration.new_sqlite_classes ?? []);
+	const mergeMigrations = (config: Record<string, unknown>): void => {
+		const existingMigrations = Array.isArray(config.migrations)
+			? (config.migrations as unknown[])
+			: [];
+		config.migrations = [
+			...existingMigrations,
+			...computeFlueMigrations(flueClasses, existingMigrations),
+		];
+	};
+
+	mergeMigrations(merged);
+	if (typeof merged.env === 'object' && merged.env !== null) {
+		for (const value of Object.values(merged.env as Record<string, unknown>)) {
+			if (typeof value !== 'object' || value === null || !('migrations' in value)) continue;
+			mergeMigrations(value as Record<string, unknown>);
 		}
 	}
-	merged.migrations = migrationsOut;
 
 	// containers: user owns the `containers` array entirely. Flue contributes
 	// nothing here — any entries the user declared pass through untouched via

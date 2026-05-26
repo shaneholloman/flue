@@ -169,8 +169,8 @@ export class CloudflarePlugin implements BuildPlugin {
 			.map((workflow) => `  ${JSON.stringify(workflow.name)}: ${JSON.stringify(workflowClassName(workflow.name))},`)
 			.join('\n');
 
-		const { config: userConfig } = await this.getUserConfig(ctx.root);
-		const sandboxClassNames = detectSandboxBindings(userConfig);
+		const { effectiveConfig } = await this.getUserConfig(ctx.root);
+		const sandboxClassNames = detectSandboxBindings(effectiveConfig);
 		const sandboxReExports = sandboxClassNames
 			.map((name) => `export { Sandbox as ${name} } from '@cloudflare/sandbox';`)
 			.join('\n');
@@ -877,22 +877,15 @@ export default {
 		// lives at the project root and is never modified; the composed Vite
 		// input config is also written at the project root so official local
 		// variable discovery continues to find `.dev.vars` and `.env` files.
-		const { config: userConfig, path: userConfigPath } = await this.getUserConfig(
+		const { config: userConfig, effectiveConfig, path: userConfigPath } = await this.getUserConfig(
 			ctx.root,
 		);
 		if (userConfigPath) {
 			console.log(`[flue] Merging with user wrangler config: ${userConfigPath}`);
 		}
-		validateUserWranglerConfig(userConfig);
+		validateUserWranglerConfig(effectiveConfig);
 
-		// Compute the migrations Flue wants to add for net-new agent classes.
-		// Cloudflare migration tags are immutable once deployed, so we emit
-		// one tag per class — that lets every redeploy be a no-op for already
-		// deployed classes and a single-tag append for the truly net-new ones.
-		// Renames and deletes are the user's responsibility (manual entries
-		// in their wrangler.jsonc); Flue never auto-emits destructive
-		// migrations.
-		const flueMigrations = computeFlueMigrations(flueSqliteClasses, userConfig.migrations);
+		const flueMigrations = computeFlueMigrations(flueSqliteClasses, []);
 
 		// Flue's contributions to the wrangler config. Everything else in the
 		// user's wrangler.jsonc passes through untouched during merge.
@@ -908,7 +901,7 @@ export default {
 		// Detect user-declared Sandbox bindings and verify the @cloudflare/sandbox
 		// package is available before the Vite build tries to resolve it. Log each
 		// binding we've auto-wired so users can see what Flue did on their behalf.
-		const sandboxClassNames = detectSandboxBindings(userConfig);
+		const sandboxClassNames = detectSandboxBindings(effectiveConfig);
 		if (sandboxClassNames.length > 0) {
 			assertSandboxPackageInstalled(sandboxClassNames, ctx.root);
 			for (const className of sandboxClassNames) {
