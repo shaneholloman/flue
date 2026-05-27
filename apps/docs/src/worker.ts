@@ -43,7 +43,7 @@ export default {
 			},
 			{
 				conversionOptions: {
-					html: { hostname: url.origin, cssSelector: '[data-markdown-content]' },
+					html: { hostname: url.origin, cssSelector: '[data-markdown-content], [data-markdown-navigation]' },
 				},
 			},
 		);

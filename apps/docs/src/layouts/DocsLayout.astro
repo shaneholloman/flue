@@ -4,7 +4,7 @@ import DocsHeader from '../components/docs/DocsHeader.astro';
 import DocsSidebar from '../components/docs/DocsSidebar.astro';
 import DocsTableOfContents from '../components/docs/DocsTableOfContents.astro';
 import MobileDocsNavigation from '../components/docs/MobileDocsNavigation.astro';
-import { getDocsSection } from '../lib/docs-navigation';
+import { docsHref, docsSections, getDocsSection } from '../lib/docs-navigation';
 import '../styles/global.css';
 
 interface Props {
@@ -89,6 +89,15 @@ const formattedReviewedDate = lastReviewedAt?.toLocaleDateString('en-US', {
 						<slot />
 					</div>
 				</article>
+				<section data-markdown-navigation class="hidden">
+					<h2>Docs Navigation</h2>
+					<p>Current page: <a href={docsHref(currentSlug)}>{title}</a></p>
+					<h3>Sections</h3>
+					<ul>
+						{docsSections.map((section) => <li><a href={docsHref(section.landingSlug)}>{section.title}</a></li>)}
+					</ul>
+					<DocsSidebar groups={currentSection.groups} currentSlug={currentSlug} groupHeadingLevel={3} />
+				</section>
 			</main>
 			<aside class="pt-[var(--docs-aside-top)] pr-2 pb-8 pl-7 max-2xl:hidden">
 				{showTableOfContents && <DocsTableOfContents headings={tableOfContents} />}
