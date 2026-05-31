@@ -395,7 +395,10 @@ function workflowRouteSpec() {
 						schema: resolver(WorkflowInvocationResponseSchema),
 					},
 					'text/event-stream': {
-						schema: { type: 'string', description: 'SSE-framed FlueEvent values.' },
+						schema: {
+							type: 'string',
+							description: 'SSE-framed FlueEvent values. A terminal stream-infrastructure event: error frame has data { error: { type, message, details, dev?, meta? } }.',
+						},
 					},
 				},
 			},
@@ -463,7 +466,7 @@ function runRouteSpec(action: HandleRunRouteOptions['action']) {
 						'text/event-stream': {
 							schema: {
 								type: 'string',
-								description: 'SSE-framed workflow run FlueEvent values.',
+								description: 'SSE-framed workflow run FlueEvent values. A terminal stream-infrastructure event: error frame has data { error: { type, message, details, dev?, meta? } }.',
 							},
 						},
 					},

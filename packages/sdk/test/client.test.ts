@@ -155,7 +155,7 @@ describe('createFlueClient', () => {
 	it('rejects run-stream SSE error frames instead of yielding them as events', async () => {
 		const client = createFlueClient({
 			baseUrl: 'https://flue.test',
-			fetch: async () => new Response(sse('event: error\nid: 1\ndata: {"message":"stream failed"}\n\n'), {
+			fetch: async () => new Response(sse('event: error\nid: 1\ndata: {"error":{"type":"internal_error","message":"stream failed","details":"failed"}}\n\n'), {
 				headers: { 'content-type': 'text/event-stream' },
 			}),
 		});

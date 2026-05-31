@@ -1,6 +1,6 @@
 /** Run-history HTTP endpoints shared by the Node and Cloudflare targets. */
 
-import { InvalidRequestError, RunNotFoundError, RunStoreUnavailableError } from '../errors.ts';
+import { InvalidRequestError, RunNotFoundError, RunStoreUnavailableError, toPublicError } from '../errors.ts';
 import type { FlueEvent } from '../types.ts';
 import type { RunOwner } from './run-registry.ts';
 import type { RunRecord, RunStore } from './run-store.ts';
@@ -299,11 +299,8 @@ function encodeSseEvent(event: FlueEvent): string {
 	return [`event: ${event.type}`, `id: ${id}`, `data: ${JSON.stringify(event)}`, '', ''].join('\n');
 }
 
-// TODO: Replace this raw message with a caller-safe shared public error envelope across runtime and SDK.
 function encodeSseError(error: unknown, lastSentIndex: number | undefined): string {
-	const data = {
-		message: error instanceof Error ? error.message : String(error),
-	};
+	const data = { error: toPublicError(error) };
 	const id = lastSentIndex ?? 0;
 	return [`event: error`, `id: ${id}`, `data: ${JSON.stringify(data)}`, '', ''].join('\n');
 }

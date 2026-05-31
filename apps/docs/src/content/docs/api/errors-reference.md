@@ -1,7 +1,7 @@
 ---
 title: Errors Reference
 description: Reference Flue transport errors, runtime failures, and development diagnostics.
-lastReviewedAt: 2026-05-30
+lastReviewedAt: 2026-05-31
 ---
 
 Flue exposes stable machine-readable error categories through its public transports. Runtime operations, workflow records, CLI commands, development servers, and builds also report failures, but not every surface uses the transport error vocabulary.
@@ -56,16 +56,17 @@ The following categories are stable for framework-owned transport failures. HTTP
 
 | Surface                               | Envelope                                                    |
 | ------------------------------------- | ----------------------------------------------------------- |
-| HTTP error response                   | `{ error: FluePublicError }`                                |
-| Attached-agent SSE terminal error     | `AttachedAgentStreamError`                                  |
-| WebSocket connection or request error | `WebSocketErrorMessage`                                     |
-| Workflow WebSocket run-scoped error   | `WorkflowWebSocketServerMessage` error variant with `runId` |
+| HTTP error response                       | `{ error: FluePublicError }`                                |
+| Attached-agent SSE terminal error         | `AttachedAgentStreamError`                                  |
+| Workflow-run SSE infrastructure error     | `{ error: FluePublicError }`                                |
+| WebSocket connection or request error     | `WebSocketErrorMessage`                                     |
+| Workflow WebSocket run-scoped error       | `WorkflowWebSocketServerMessage` error variant with `runId` |
 
 See [Events Reference](/docs/api/events-reference/) for attached-agent event streams and WebSocket protocol message types.
 
 ### Workflow-run streams
 
-Workflow failures normally appear in a terminal `run_end` event with `isError: true`. A workflow-run SSE stream can also terminate with a stream-infrastructure error frame whose payload is `{ message: string }`. That infrastructure frame is not part of the shared `FluePublicError` contract.
+Workflow failures normally appear in a terminal `run_end` event with `isError: true`. A workflow-run SSE stream can also terminate with a stream-infrastructure `event: error` frame whose payload is `{ error: FluePublicError }`. That infrastructure frame is a transport failure, not a workflow-run failure record.
 
 ## Workflow-run and operation failures
 

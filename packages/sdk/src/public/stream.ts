@@ -51,14 +51,8 @@ export async function* streamRunEvents(
 					const parsed = Number.parseInt(frame.id, 10);
 					if (Number.isFinite(parsed)) lastEventId = parsed;
 				}
-				const data = JSON.parse(frame.data) as FlueEvent | { message?: unknown };
-				if (frame.event === 'error') {
-					const message = typeof data === 'object' && data !== null && 'message' in data
-						? data.message
-						: undefined;
-					throw new Error(typeof message === 'string' ? message : 'SSE stream failed.');
-				}
-				const event = data as FlueEvent;
+				if (frame.event === 'error') throw new Error(parseSseErrorMessage(frame.data));
+				const event = JSON.parse(frame.data) as FlueEvent;
 				yield event;
 				if (event.type === 'run_end') {
 					sawTerminalEvent = true;
@@ -122,6 +116,27 @@ function parseFrame(raw: string): SseFrame | undefined {
 	if (data.length === 0) return undefined;
 	frame.data = data.join('\n');
 	return frame;
+}
+
+function parseSseErrorMessage(data: string): string {
+	try {
+		const value = JSON.parse(data) as unknown;
+		if (typeof value !== 'object' || value === null || !('error' in value)) throw new Error();
+		const error = value.error;
+		if (
+			typeof error !== 'object'
+			|| error === null
+			|| !('type' in error)
+			|| typeof error.type !== 'string'
+			|| !('message' in error)
+			|| typeof error.message !== 'string'
+			|| !('details' in error)
+			|| typeof error.details !== 'string'
+		) throw new Error();
+		return error.message;
+	} catch {
+		return 'SSE stream failed.';
+	}
 }
 
 function sleep(ms: number, signal: AbortSignal | undefined): Promise<void> {

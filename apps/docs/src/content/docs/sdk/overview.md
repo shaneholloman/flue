@@ -1,7 +1,7 @@
 ---
 title: SDK API
 description: Reference for consuming deployed Flue agents and workflows with @flue/sdk.
-lastReviewedAt: 2026-05-30
+lastReviewedAt: 2026-05-31
 ---
 
 The client SDK is exported from `@flue/sdk`. Use it from applications that consume deployed Flue agents and workflows.
@@ -235,7 +235,7 @@ stream(
 ): AsyncIterable<FlueEvent>;
 ```
 
-Streams workflow-run events over server-sent events until `run_end`, cancellation, or an unrecoverable error. Interrupted streams resume after the latest received event index.
+Streams workflow-run events over server-sent events until `run_end`, cancellation, or an unrecoverable error. Interrupted streams resume after the latest received event index. A stream-infrastructure `event: error` frame carries `{ error: FluePublicError }`; the SDK rejects iteration with `error.message` rather than yielding the envelope as a workflow event.
 
 | Option | Type | Default | Description |
 | --- | --- | --- | --- |
