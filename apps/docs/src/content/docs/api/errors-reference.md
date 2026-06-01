@@ -27,10 +27,10 @@ Caller-safe error details exposed by Flue transports. Unknown failures become a 
 | `type`    | Stable machine-readable error category.                                                   |
 | `message` | Short caller-facing summary.                                                              |
 | `details` | Caller-facing explanation.                                                                |
-| `dev`     | Additional local Node.js development guidance when available.                             |
+| `dev`     | Additional local development guidance when available.                                     |
 | `meta`    | Structured error-specific metadata when available. For example, validation issue details. |
 
-`dev` is omitted unless the runtime has additional guidance and is running locally with `FLUE_MODE=local`, as used by Node.js `flue dev` and `flue run`. Cloudflare development currently renders the production envelope.
+`dev` is omitted unless the runtime has additional guidance and is running locally. Node.js `flue dev` and `flue run` enable it with `FLUE_MODE=local`. Cloudflare Vite development enables it only in development-server mode; preview and production builds render the production envelope.
 
 ### Categories
 

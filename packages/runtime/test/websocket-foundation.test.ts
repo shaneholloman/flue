@@ -77,6 +77,50 @@ describe('WebSocket transport foundation', () => {
 		expect(await response.json()).toMatchObject({ error: { type: 'workflow_not_http' } });
 	});
 
+	it('renders developer guidance only when explicitly configured', async () => {
+		const previousMode = process.env.FLUE_MODE;
+		process.env.FLUE_MODE = 'local';
+		try {
+			const runtime: FlueRuntime = {
+				target: 'node',
+				manifest: {
+					agents: [],
+					workflows: [{ name: 'known-job', transports: { http: true } }],
+				},
+			};
+			const app = new Hono();
+			app.route('/', flue());
+
+			configureFlueRuntime({ ...runtime, devMode: false });
+			const productionResponse = await app.fetch(
+				new Request('http://localhost/workflows/missing', { method: 'POST' }),
+			);
+			expect(productionResponse.status).toBe(404);
+			expect(await productionResponse.json()).toEqual({
+				error: {
+					type: 'workflow_not_found',
+					message: 'Workflow "missing" is not registered.',
+					details: 'Verify the workflow name is correct.',
+				},
+			});
+
+			configureFlueRuntime({ ...runtime, devMode: true });
+			const developmentResponse = await app.fetch(
+				new Request('http://localhost/workflows/missing', { method: 'POST' }),
+			);
+			expect(developmentResponse.status).toBe(404);
+			expect(await developmentResponse.json()).toMatchObject({
+				error: {
+					type: 'workflow_not_found',
+					dev: expect.stringContaining('Available workflows: "known-job"'),
+				},
+			});
+		} finally {
+			if (previousMode === undefined) delete process.env.FLUE_MODE;
+			else process.env.FLUE_MODE = previousMode;
+		}
+	});
+
 	it('forwards Cloudflare upgrades only for WebSocket-exposed targets and normalizes mounted paths', async () => {
 		const forwarded: string[] = [];
 		configureFlueRuntime({

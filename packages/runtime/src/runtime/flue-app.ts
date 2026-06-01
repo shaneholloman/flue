@@ -8,6 +8,7 @@ import {
 	validator,
 } from 'hono-openapi';
 import {
+	configureErrorRendering,
 	MethodNotAllowedError,
 	RouteNotFoundError,
 	RunNotFoundError,
@@ -55,6 +56,7 @@ import {
 
 export interface FlueRuntime {
 	target: 'node' | 'cloudflare';
+	devMode?: boolean;
 
 	// ─── Node-only ──────────────────────────────────────────────────────────
 
@@ -238,6 +240,7 @@ let runtimeConfig: FlueRuntime | undefined;
  */
 export function configureFlueRuntime(cfg: FlueRuntime): void {
 	runtimeConfig = cfg;
+	configureErrorRendering({ devMode: cfg.devMode ?? false });
 }
 
 export function getFlueRuntime(): FlueRuntime | undefined {

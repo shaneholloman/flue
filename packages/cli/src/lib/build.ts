@@ -165,12 +165,15 @@ async function buildApplication(options: BuildOptions): Promise<BuildResult> {
 		const generatedConfigPath = cloudflareViteConfigPath(root);
 		const { createBuilder } = await import('vite');
 		const viteConfig = createCloudflareViteConfig(root, generatedConfigPath, [entryPath]);
-		const builder = await createBuilder({
-			...viteConfig,
-			logLevel: 'warn',
-			build: { outDir: output, emptyOutDir: true },
+		await withTemporaryProcessEnv({ NODE_ENV: 'production' }, async () => {
+			const builder = await createBuilder({
+				...viteConfig,
+				mode: 'production',
+				logLevel: 'warn',
+				build: { outDir: output, emptyOutDir: true },
+			});
+			await builder.buildApp();
 		});
-		await builder.buildApp();
 		console.log(`[flue] Built Cloudflare application: ${output}`);
 		anyChanged = true;
 	}

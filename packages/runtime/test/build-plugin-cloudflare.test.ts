@@ -37,6 +37,7 @@ describe('Cloudflare build plugin', () => {
 		);
 		expect(entry).toContain('createDispatchAgentHandler(agent, input)(ctx)');
 		expect(entry).toContain('resolveDispatchAgentName: (agent) => dispatchAgentNames.get(agent),');
+		expect(entry).toContain('devMode: import.meta.env.DEV,');
 		expect(entry).not.toContain('runId: input.dispatchId');
 		expect(entry).not.toContain('createDurableDispatchRunStore');
 		expect(entry).not.toContain('createAgentDispatchProcessor');

@@ -29,6 +29,7 @@ describe('Node build plugin', () => {
 		expect(entry).toContain('const dispatchAgentNames = new Map();');
 		expect(entry).toContain('dispatchAgentNames.set(mod.default, name);');
 		expect(entry).toContain('resolveDispatchAgentName: (agent) => dispatchAgentNames.get(agent),');
+		expect(entry).toContain('devMode: isLocalMode,');
 		expect(entry).toContain(
 			'const normalized = normalizeBuiltModules(agentModules, workflowModules);',
 		);

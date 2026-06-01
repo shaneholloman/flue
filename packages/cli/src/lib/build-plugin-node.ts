@@ -165,6 +165,7 @@ const websocketTransport = isLocalCliMode ? undefined : createNodeWebSocketTrans
 // only when a request arrives.
 configureFlueRuntime({
   target: 'node',
+  devMode: isLocalMode,
   runtimeVersion: ${runtimeVersion},
   manifest,
   handlers: directHandlers,

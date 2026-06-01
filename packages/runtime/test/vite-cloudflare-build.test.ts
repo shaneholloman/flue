@@ -40,10 +40,17 @@ describe('Cloudflare Vite production Worker', () => {
 			.readdirSync(output, { recursive: true })
 			.filter((entry) => String(entry).endsWith('wrangler.json'));
 		expect(outputConfigs).not.toHaveLength(0);
-		const outputConfig = JSON.parse(
-			fs.readFileSync(path.join(output, String(outputConfigs[0])), 'utf8'),
-		) as { migrations?: unknown };
+		const outputConfigPath = path.join(output, String(outputConfigs[0]));
+		const outputConfig = JSON.parse(fs.readFileSync(outputConfigPath, 'utf8')) as {
+			migrations?: unknown;
+		};
 		expect(outputConfig.migrations).toEqual(AUTHORED_MIGRATIONS);
+		const outputEntry = fs.readFileSync(
+			path.join(path.dirname(outputConfigPath), 'index.mjs'),
+			'utf8',
+		);
+		expect(outputEntry).toContain('devMode: false,');
+		expect(outputEntry).not.toContain('devMode: true,');
 		expect(JSON.stringify(outputConfig.migrations)).not.toContain('flue-class-');
 		const deployRedirect = JSON.parse(
 			fs.readFileSync(path.join(root, '.wrangler', 'deploy', 'config.json'), 'utf8'),
@@ -162,6 +169,16 @@ describe('Cloudflare Vite production Worker', () => {
 					},
 					hasBody: false,
 					hasFiles: false,
+				},
+			});
+			const missingWorkflowResponse = await fetch(new URL('/workflows/missing', localUrl), {
+				method: 'POST',
+			});
+			expect(missingWorkflowResponse.status).toBe(404);
+			expect(await missingWorkflowResponse.json()).toMatchObject({
+				error: {
+					type: 'workflow_not_found',
+					dev: expect.stringContaining('Available workflows: "smoke"'),
 				},
 			});
 			const skillResponse = await fetch(new URL('/workflows/use-skill?wait=result', localUrl), {

@@ -31,8 +31,8 @@ import type { FluePublicError } from './types.ts';
  *     Sees `message` and `details` always.
  *
  *   - The *developer*: the human running the service (`flue dev`, `flue run`,
- *     local debugging). Sees `dev` in addition, but only when the server is
- *     running in local/dev mode (gated by `FLUE_MODE=local`).
+ *     local debugging). Sees `dev` in addition, but only when the generated
+ *     runtime is configured for local development.
  *
  * Every error class must classify its prose by audience. The required-but-
  * possibly-empty shape of both `details` and `dev` is the discipline:
@@ -53,7 +53,7 @@ import type { FluePublicError } from './types.ts';
  *                     - build-time or runtime mechanics
  *   - `dev`         Longer dev-audience prose. Available alternatives,
  *                   filesystem layout, framework guidance, source-code-level
- *                   fix instructions. Rendered ONLY when FLUE_MODE=local.
+ *                   fix instructions. Rendered ONLY in local development.
  *
  * When in doubt, put information in `dev`. The default is conservative.
  *
@@ -145,7 +145,7 @@ interface FlueErrorOptions {
 	details: string;
 	/**
 	 * Developer-audience longer-form explanation. Rendered on the wire ONLY
-	 * when the server is running in local/dev mode (FLUE_MODE=local).
+	 * when the generated runtime is configured for local development.
 	 *
 	 * Use this for everything that helps the developer running the service
 	 * but shouldn't reach a public caller: available alternatives, filesystem
@@ -421,10 +421,10 @@ export class ValidationError extends FlueHttpError {
  *
  * Field rules:
  *   - `type`, `message`, `details` are always present on the wire.
- *   - `dev` is gated by `FLUE_MODE === 'local'` (set by `flue run` and
- *     `flue dev --target node`). Even in dev mode, `dev` is omitted when
- *     the error class set it to `''` — so its presence is not a reliable
- *     signal of mode by itself; clients should not depend on it that way.
+ *   - `dev` is gated by explicit generated-runtime configuration. Even in
+ *     local development, `dev` is omitted when the error class set it to
+ *     `''` — so its presence is not a reliable signal of mode by itself;
+ *     clients should not depend on it that way.
  *     See the error classes above for the two-audience rationale.
  *   - `meta` is included on the wire only when an error subclass sets it
  *     (rare).
@@ -485,20 +485,10 @@ interface WireEnvelope {
 	};
 }
 
-/**
- * Detect whether the server is running in local/dev mode. Gates whether the
- * `dev` field is included on the wire — see the convention doc in the error
- * classes above.
- *
- * Currently keyed off the `FLUE_MODE=local` env var, which is set by
- * `flue run` and `flue dev --target node`. On Cloudflare workers there is
- * no global `process` and no current "local mode" plumbing for the worker —
- * so deployed CF and `flue dev --target cloudflare` both currently render
- * the prod envelope. Threading a dev-mode signal through to the worker
- * fetch handler is left as a follow-up.
- */
-function isDevMode(): boolean {
-	return typeof process !== 'undefined' && process.env?.FLUE_MODE === 'local';
+let devMode = false;
+
+export function configureErrorRendering(options: { devMode: boolean }): void {
+	devMode = options.devMode;
 }
 
 function envelope(err: FlueError): WireEnvelope {
@@ -515,7 +505,7 @@ function envelope(err: FlueError): WireEnvelope {
 	// useful is already in `details` — those render the same in dev and
 	// prod. So `dev`'s presence on the wire is NOT a reliable mode signal;
 	// it just means "this error has dev-only guidance to share."
-	if (isDevMode() && err.dev) out.error.dev = err.dev;
+	if (devMode && err.dev) out.error.dev = err.dev;
 	if (err.meta) out.error.meta = err.meta;
 	return out;
 }

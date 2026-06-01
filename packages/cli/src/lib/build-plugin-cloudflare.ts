@@ -780,6 +780,7 @@ ${sandboxReExports}
 
 configureFlueRuntime({
   target: 'cloudflare',
+  devMode: import.meta.env.DEV,
   runtimeVersion: ${runtimeVersion},
   manifest,
   handlers: directHandlers,
