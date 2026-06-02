@@ -285,95 +285,6 @@ describe('workflow run store', () => {
 		]);
 	});
 
-	it.skip('prunes the oldest completed records visible to an instance when completed-run retention is exceeded', async () => {
-		const store: RunStore = new InMemoryRunStore({ maxCompletedRuns: 1 });
-		await store.createRun({
-			runId: 'workflow:daily-report:01',
-			owner: {
-				kind: 'workflow',
-				workflowName: 'daily-report',
-				instanceId: 'workflow:daily-report:01',
-			},
-			startedAt: '2026-06-01T10:00:00.000Z',
-			payload: {},
-		});
-		await store.endRun({
-			runId: 'workflow:daily-report:01',
-			endedAt: '2026-06-01T10:01:00.000Z',
-			durationMs: 60_000,
-			isError: false,
-		});
-		await store.createRun({
-			runId: 'workflow:daily-report:02',
-			owner: {
-				kind: 'workflow',
-				workflowName: 'daily-report',
-				instanceId: 'workflow:daily-report:02',
-			},
-			startedAt: '2026-06-01T10:02:00.000Z',
-			payload: {},
-		});
-		await store.endRun({
-			runId: 'workflow:daily-report:02',
-			endedAt: '2026-06-01T10:03:00.000Z',
-			durationMs: 60_000,
-			isError: false,
-		});
-
-		expect(await store.getRun('workflow:daily-report:01')).toBeNull();
-		expect(await store.getRun('workflow:daily-report:02')).not.toBeNull();
-	});
-
-	it.skip('retains active records visible to an instance when completed-run retention is exceeded', async () => {
-		const store: RunStore = new InMemoryRunStore({ maxCompletedRuns: 1 });
-		await store.createRun({
-			runId: 'workflow:daily-report:active',
-			owner: {
-				kind: 'workflow',
-				workflowName: 'daily-report',
-				instanceId: 'workflow:daily-report:active',
-			},
-			startedAt: '2026-06-01T10:00:00.000Z',
-			payload: {},
-		});
-		await store.createRun({
-			runId: 'workflow:daily-report:01',
-			owner: {
-				kind: 'workflow',
-				workflowName: 'daily-report',
-				instanceId: 'workflow:daily-report:01',
-			},
-			startedAt: '2026-06-01T10:01:00.000Z',
-			payload: {},
-		});
-		await store.endRun({
-			runId: 'workflow:daily-report:01',
-			endedAt: '2026-06-01T10:02:00.000Z',
-			durationMs: 60_000,
-			isError: false,
-		});
-		await store.createRun({
-			runId: 'workflow:daily-report:02',
-			owner: {
-				kind: 'workflow',
-				workflowName: 'daily-report',
-				instanceId: 'workflow:daily-report:02',
-			},
-			startedAt: '2026-06-01T10:03:00.000Z',
-			payload: {},
-		});
-		await store.endRun({
-			runId: 'workflow:daily-report:02',
-			endedAt: '2026-06-01T10:04:00.000Z',
-			durationMs: 60_000,
-			isError: false,
-		});
-
-		expect(await store.getRun('workflow:daily-report:active')).not.toBeNull();
-		expect(await store.getRun('workflow:daily-report:01')).toBeNull();
-		expect(await store.getRun('workflow:daily-report:02')).not.toBeNull();
-	});
-
 	it('rejects oversized events when serialized persistence exceeds the supported limit', async () => {
 		const store: RunStore = new InMemoryRunStore();
 		await store.createRun({
@@ -1118,7 +1029,7 @@ describe('workflow run routes', () => {
 			error: {
 				type: 'run_not_found',
 				message: 'Run "workflow:daily-report:missing" was not found.',
-				details: 'Verify the run id is correct and still within retention.',
+				details: 'Verify the run id is correct and its history is still available.',
 			},
 		});
 	});
@@ -1156,7 +1067,7 @@ describe('workflow run routes', () => {
 			error: {
 				type: 'run_not_found',
 				message: 'Run "workflow:daily-report:01" was not found.',
-				details: 'Verify the run id is correct and still within retention.',
+				details: 'Verify the run id is correct and its history is still available.',
 			},
 		});
 	});

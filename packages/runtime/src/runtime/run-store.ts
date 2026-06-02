@@ -42,11 +42,6 @@ export interface RunStore {
 	getRun(runId: string): Promise<RunRecord | null>;
 }
 
-export interface RunStoreOptions {
-	maxCompletedRuns?: number;
-}
-
-export const DEFAULT_MAX_COMPLETED_RUNS = 50;
 const MAX_EVENT_BYTES = 1024 * 1024;
 const ENCODER = new TextEncoder();
 

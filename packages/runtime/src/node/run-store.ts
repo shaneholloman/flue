@@ -1,10 +1,8 @@
 import {
 	type CreateRunInput,
-	DEFAULT_MAX_COMPLETED_RUNS,
 	type EndRunInput,
 	type RunRecord,
 	type RunStore,
-	type RunStoreOptions,
 	serializedEventForPersistence,
 } from '../runtime/run-store.ts';
 import type { FlueEvent } from '../types.ts';
@@ -21,11 +19,6 @@ interface StoredRunEvent {
 
 export class InMemoryRunStore implements RunStore {
 	private instances = new Map<string, InstanceRuns>();
-	private maxCompletedRuns: number;
-
-	constructor(options: RunStoreOptions = {}) {
-		this.maxCompletedRuns = options.maxCompletedRuns ?? DEFAULT_MAX_COMPLETED_RUNS;
-	}
 
 	async createRun(input: CreateRunInput): Promise<void> {
 		if (input.owner.instanceId !== input.runId) {
@@ -57,7 +50,6 @@ export class InMemoryRunStore implements RunStore {
 			result: input.result,
 			error: input.error,
 		});
-		this.pruneCompletedRuns(instance);
 	}
 
 	async appendEvent(runId: string, event: FlueEvent): Promise<void> {
@@ -97,18 +89,6 @@ export class InMemoryRunStore implements RunStore {
 			this.instances.set(key, instance);
 		}
 		return instance;
-	}
-
-	private pruneCompletedRuns(instance: InstanceRuns): void {
-		const completed = [...instance.runs.values()]
-			.filter((run) => run.status !== 'active')
-			.sort((a, b) => a.startedAt.localeCompare(b.startedAt));
-		const deleteCount = completed.length - this.maxCompletedRuns;
-		if (deleteCount <= 0) return;
-		for (const run of completed.slice(0, deleteCount)) {
-			instance.runs.delete(run.runId);
-			instance.events.delete(run.runId);
-		}
 	}
 }
 

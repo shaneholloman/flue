@@ -1,10 +1,8 @@
 import {
 	type CreateRunInput,
-	DEFAULT_MAX_COMPLETED_RUNS,
 	type EndRunInput,
 	type RunRecord,
 	type RunStore,
-	type RunStoreOptions,
 	serializedEventForPersistence,
 } from '../runtime/run-store.ts';
 import type { FlueEvent } from '../types.ts';
@@ -19,20 +17,13 @@ interface SqlStorage {
 	exec(query: string, ...bindings: unknown[]): SqlResult;
 }
 
-export function createDurableRunStore(sql: SqlStorage, options: RunStoreOptions = {}): RunStore {
+export function createDurableRunStore(sql: SqlStorage): RunStore {
 	ensureRunTables(sql);
-	return new DurableRunStore(sql, options);
+	return new DurableRunStore(sql);
 }
 
 class DurableRunStore implements RunStore {
-	private maxCompletedRuns: number;
-
-	constructor(
-		private sql: SqlStorage,
-		options: RunStoreOptions,
-	) {
-		this.maxCompletedRuns = options.maxCompletedRuns ?? DEFAULT_MAX_COMPLETED_RUNS;
-	}
+	constructor(private sql: SqlStorage) {}
 
 	async createRun(input: CreateRunInput): Promise<void> {
 		if (input.owner.instanceId !== input.runId) {
@@ -66,7 +57,6 @@ class DurableRunStore implements RunStore {
 			JSON.stringify(input.error ?? null),
 			input.runId,
 		);
-		this.pruneCompletedRuns();
 	}
 
 	async appendEvent(runId: string, event: FlueEvent): Promise<void> {
@@ -104,22 +94,6 @@ class DurableRunStore implements RunStore {
 		const row = rows[0];
 		if (!row) return null;
 		return rowToRunRecord(row);
-	}
-
-	private pruneCompletedRuns(): void {
-		const rows = this.sql
-			.exec(
-				`SELECT run_id FROM flue_runs
-				 WHERE status != 'active'
-				 ORDER BY started_at ASC`,
-			)
-			.toArray();
-		const deleteCount = rows.length - this.maxCompletedRuns;
-		if (deleteCount <= 0) return;
-		for (const row of rows.slice(0, deleteCount)) {
-			this.sql.exec('DELETE FROM flue_run_events WHERE run_id = ?', row.run_id);
-			this.sql.exec('DELETE FROM flue_runs WHERE run_id = ?', row.run_id);
-		}
 	}
 }
 

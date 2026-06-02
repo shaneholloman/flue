@@ -334,7 +334,7 @@ export class RunNotFoundError extends FlueHttpError {
 		super({
 			type: 'run_not_found',
 			message: `Run "${runId}" was not found.`,
-			details: 'Verify the run id is correct and still within retention.',
+			details: 'Verify the run id is correct and its history is still available.',
 			dev: '',
 			status: 404,
 		});
