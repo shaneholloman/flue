@@ -8,6 +8,7 @@
 
 ### Fixes & Other Changes
 
+- **OpenTelemetry: Attach Flue roots to application spans explicitly.** `createOpenTelemetryObserver(...)` now accepts an optional `resolveRootContext(event, ctx)` callback for parenting workflow and standalone operation spans beneath application-owned OpenTelemetry spans while preserving independent roots by default.
 - **Retry transient model-provider failures automatically.** Prompt operations now retry transient failures such as overloads, rate limits, server errors, and network interruptions up to three times with exponential backoff. Retry waits are abortable, and persisted dispatched inputs can continue retrying safely when replayed.
 - **CLI: Report unsupported Bun runtimes accurately.** When Bun's reported Node.js compatibility level is below Flue's required floor, the CLI now asks users to upgrade Bun instead of Node.js.
 - **Cloudflare: Preserve workflow-run history parity.** Cloudflare workflow storage now ignores events for unknown runs, resets same-ID event history when a run is initialized, preserves absent optional fields separately from explicit `null`, and retains explicit terminal `null` results during recovery.

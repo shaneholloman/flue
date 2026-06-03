@@ -1,6 +1,7 @@
 import {
 	type AttributeValue,
 	type Context,
+	context,
 	type Exception,
 	type Link,
 	type Span,
@@ -193,6 +194,7 @@ describe('createOpenTelemetryObserver', () => {
 		expect(tracer.spans[0]?.attributes).toMatchObject({
 			'flue.workflow.name': 'report',
 		});
+		expect(tracer.spans[0]?.options?.root).toBe(true);
 		expect(tracer.spans[0]?.attributes).not.toHaveProperty('flue.workflow.restarted_from_run_id');
 		expect(tracer.spans[0]?.attributes).not.toHaveProperty('flue.workflow.payload');
 		expect(tracer.spans[2]?.attributes).toMatchObject({
@@ -203,9 +205,112 @@ describe('createOpenTelemetryObserver', () => {
 		expect(tracer.spans.every((span) => span.ended)).toBe(true);
 	});
 
+	it('uses a resolved parent context for workflow roots without changing nested span parenting', () => {
+		const tracer = new RecordingTracer();
+		const parent = new RecordingSpan('application.request', undefined, undefined);
+		const parentContext = trace.setSpan(context.active(), parent);
+		const resolvedEvents: string[] = [];
+		const observe = createOpenTelemetryObserver({
+			tracer: tracer as never,
+			resolveRootContext: (event) => {
+				resolvedEvents.push(event.type);
+				return parentContext;
+			},
+		});
+		observe(
+			{
+				type: 'run_start',
+				runId: 'run-1',
+				owner: { kind: 'workflow', workflowName: 'report', instanceId: 'run-1' },
+				instanceId: 'run-1',
+				workflowName: 'report',
+				startedAt: '2026-05-27T00:00:00.000Z',
+				payload: {},
+				timestamp: '2026-05-27T00:00:00.000Z',
+			},
+			{} as never,
+		);
+		observe(
+			{
+				type: 'operation_start',
+				runId: 'run-1',
+				operationId: 'op-1',
+				operationKind: 'prompt',
+				timestamp: '2026-05-27T00:00:00.010Z',
+			},
+			{} as never,
+		);
+
+		expect(tracer.spans).toHaveLength(2);
+		expect(tracer.spans[0]?.parent).toBe(parent);
+		expect(tracer.spans[0]?.options?.root).toBe(false);
+		expect(tracer.spans[1]?.parent).toBe(tracer.spans[0]);
+		expect(tracer.spans[1]?.options?.root).toBe(false);
+		expect(resolvedEvents).toEqual(['run_start']);
+	});
+
+	it('resolves a parent context selectively for dispatched operation roots', () => {
+		const tracer = new RecordingTracer();
+		const parent = new RecordingSpan('application.dispatch', undefined, undefined);
+		const parentContext = trace.setSpan(context.active(), parent);
+		const observe = createOpenTelemetryObserver({
+			tracer: tracer as never,
+			resolveRootContext: (event) =>
+				event.dispatchId === 'dispatch-1' ? parentContext : undefined,
+		});
+		observe(
+			{
+				type: 'operation_start',
+				instanceId: 'agent-1',
+				operationId: 'op-1',
+				operationKind: 'prompt',
+				timestamp: '2026-05-27T00:00:00.000Z',
+			},
+			{} as never,
+		);
+		observe(
+			{
+				type: 'operation',
+				instanceId: 'agent-1',
+				operationId: 'op-1',
+				operationKind: 'prompt',
+				durationMs: 5,
+				isError: false,
+				timestamp: '2026-05-27T00:00:00.010Z',
+			},
+			{} as never,
+		);
+		observe(
+			{
+				type: 'operation_start',
+				instanceId: 'agent-1',
+				dispatchId: 'dispatch-1',
+				operationId: 'op-2',
+				operationKind: 'prompt',
+				timestamp: '2026-05-27T00:00:00.020Z',
+			},
+			{} as never,
+		);
+
+		expect(tracer.spans).toHaveLength(2);
+		expect(tracer.spans[0]?.parent).toBeUndefined();
+		expect(tracer.spans[0]?.options?.root).toBe(true);
+		expect(tracer.spans[1]?.parent).toBe(parent);
+		expect(tracer.spans[1]?.options?.root).toBe(false);
+		expect(tracer.spans[1]?.attributes).toMatchObject({
+			'flue.instance_id': 'agent-1',
+			'flue.dispatch_id': 'dispatch-1',
+		});
+	});
+
 	it('starts a recovered run-handling segment when terminalization continues after interruption', () => {
 		const tracer = new RecordingTracer();
-		const observe = createOpenTelemetryObserver({ tracer: tracer as never });
+		const parent = new RecordingSpan('application.request', undefined, undefined);
+		const parentContext = trace.setSpan(context.active(), parent);
+		const observe = createOpenTelemetryObserver({
+			tracer: tracer as never,
+			resolveRootContext: () => parentContext,
+		});
 		observe(
 			{
 				type: 'run_start',
@@ -255,6 +360,8 @@ describe('createOpenTelemetryObserver', () => {
 			'flue.workflow.recovery_handling': true,
 			'flue.workflow.started_at': '2026-05-27T00:00:00.000Z',
 		});
+		expect(tracer.spans[1]?.parent).toBe(parent);
+		expect(tracer.spans[1]?.options?.root).toBe(false);
 		expect(tracer.spans[1]?.attributes).not.toHaveProperty('flue.workflow.resumed');
 		expect(tracer.spans.every((span) => span.ended)).toBe(true);
 	});

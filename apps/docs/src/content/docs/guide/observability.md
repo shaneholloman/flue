@@ -101,6 +101,8 @@ export default app;
 
 The adapter turns workflow runs, agent operations, model turns, tools, delegated tasks, compaction, and logs into trace activity. You can also consume `observe(...)` directly to send terminal failures to an error reporter or derive metrics such as operation latency, workflow failures, and model usage or cost.
 
+Workflow and standalone operation spans start as independent roots by default. To attach them beneath application-owned spans, pass `resolveRootContext` to `createOpenTelemetryObserver(...)`. The resolver runs only when a Flue span has no tracked Flue parent; return `undefined` to preserve root behavior selectively. Dispatched input does not carry trace context automatically, so resolve any dispatched parent from application-owned correlation state.
+
 Start with signals that describe outcomes: failed workflows, explicit application error logs, slow operations, and completed model usage. A model turn or tool call may fail before an agent recovers, so treating every nested error as an incident can create noisy alerts.
 
 Telemetry can include sensitive application and model data, including workflow payloads, log attributes, prompts, output, and tool arguments or results. Prefer exporting timing, error, token, and cost metadata unless content is necessary for your investigation. If you enable content capture in an exporter or write your own observer, redact secrets and personal data before sending events to an external service.

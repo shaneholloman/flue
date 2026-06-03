@@ -25,6 +25,20 @@ Pass a tracer when the application already owns a configured tracer instance:
 observe(createOpenTelemetryObserver({ tracer }));
 ```
 
+Workflow and standalone operation spans start as independent roots by default. To attach them to an application-owned span, explicitly resolve an OpenTelemetry parent context:
+
+```ts
+import { context } from '@opentelemetry/api';
+
+observe(
+  createOpenTelemetryObserver({
+    resolveRootContext: () => context.active(),
+  }),
+);
+```
+
+The resolver runs only when a Flue span has no tracked Flue parent. Return `undefined` to preserve root behavior selectively. Dispatched input does not carry trace context automatically; resolve any dispatched parent from application-owned correlation state.
+
 ## Span mapping
 
 | Flue events                            | Span                                                                                                      |

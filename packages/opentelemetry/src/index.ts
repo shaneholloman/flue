@@ -1,10 +1,11 @@
-import type { FlueEvent, FlueEventSubscriber } from '@flue/runtime';
+import type { FlueContext, FlueEvent, FlueEventSubscriber } from '@flue/runtime';
 import {
 	type Attributes,
 	type Context,
 	context,
 	type Span,
 	SpanKind,
+	type SpanOptions,
 	SpanStatusCode,
 	type Tracer,
 	trace,
@@ -13,6 +14,7 @@ import {
 export interface OpenTelemetryObserverOptions {
 	tracer?: Tracer;
 	captureContent?: boolean;
+	resolveRootContext?: (event: FlueEvent, ctx: FlueContext) => Context | undefined;
 }
 
 export function createOpenTelemetryObserver(
@@ -20,6 +22,7 @@ export function createOpenTelemetryObserver(
 ): FlueEventSubscriber {
 	const tracer = options.tracer ?? trace.getTracer('@flue/opentelemetry');
 	const captureContent = options.captureContent === true;
+	const resolveRootContext = options.resolveRootContext;
 	const runs = new Map<string, Span>();
 	const recoveryHandledRuns = new Set<string>();
 	const operations = new Map<string, Span>();
@@ -28,13 +31,12 @@ export function createOpenTelemetryObserver(
 	const tasks = new Map<string, Span>();
 	const compactions = new Map<string, Span>();
 
-	return (event) => {
+	return (event, ctx) => {
 		const time = timestamp(event);
 		if (event.type === 'run_start') {
 			runs.set(
 				event.runId,
-				tracer.startSpan(`flue.workflow ${event.workflowName}`, {
-					root: true,
+				startSpan(tracer, `flue.workflow ${event.workflowName}`, undefined, event, ctx, resolveRootContext, {
 					kind: SpanKind.INTERNAL,
 					startTime: new Date(event.startedAt),
 					attributes: {
@@ -58,8 +60,7 @@ export function createOpenTelemetryObserver(
 			recoveryHandledRuns.add(event.runId);
 			runs.set(
 				event.runId,
-				tracer.startSpan(`flue.workflow ${event.workflowName}`, {
-					root: true,
+				startSpan(tracer, `flue.workflow ${event.workflowName}`, undefined, event, ctx, resolveRootContext, {
 					kind: SpanKind.INTERNAL,
 					startTime: time,
 					attributes: {
@@ -76,7 +77,7 @@ export function createOpenTelemetryObserver(
 			const parent = event.taskId ? tasks.get(event.taskId) : workflowSpan(event, runs);
 			operations.set(
 				event.operationId,
-				startSpan(tracer, `flue.operation ${event.operationKind}`, parent, {
+				startSpan(tracer, `flue.operation ${event.operationKind}`, parent, event, ctx, resolveRootContext, {
 					startTime: time,
 					attributes: { ...identifiers(event), 'flue.operation.kind': event.operationKind },
 				}),
@@ -87,7 +88,7 @@ export function createOpenTelemetryObserver(
 			const parent = operationSpan(event, operations) ?? workflowSpan(event, runs);
 			tasks.set(
 				event.taskId,
-				startSpan(tracer, event.agent ? `flue.task ${event.agent}` : 'flue.task', parent, {
+				startSpan(tracer, event.agent ? `flue.task ${event.agent}` : 'flue.task', parent, event, ctx, resolveRootContext, {
 					startTime: time,
 					attributes: {
 						...identifiers(event),
@@ -103,7 +104,7 @@ export function createOpenTelemetryObserver(
 			const parent = operationSpan(event, operations) ?? workflowSpan(event, runs);
 			compactions.set(
 				compactionKey(event),
-				startSpan(tracer, 'flue.compaction', parent, {
+				startSpan(tracer, 'flue.compaction', parent, event, ctx, resolveRootContext, {
 					startTime: time,
 					attributes: {
 						...identifiers(event),
@@ -123,7 +124,7 @@ export function createOpenTelemetryObserver(
 						workflowSpan(event, runs));
 			turns.set(
 				event.turnId,
-				startSpan(tracer, 'gen_ai.generate', parent, {
+				startSpan(tracer, 'gen_ai.generate', parent, event, ctx, resolveRootContext, {
 					startTime: time,
 					attributes: {
 						...identifiers(event),
@@ -146,7 +147,7 @@ export function createOpenTelemetryObserver(
 				workflowSpan(event, runs);
 			tools.set(
 				toolKey(event),
-				startSpan(tracer, `flue.tool ${event.toolName}`, parent, {
+				startSpan(tracer, `flue.tool ${event.toolName}`, parent, event, ctx, resolveRootContext, {
 					startTime: time,
 					attributes: {
 						...identifiers(event),
@@ -274,13 +275,15 @@ function startSpan(
 	tracer: Tracer,
 	name: string,
 	parent: Span | undefined,
-	options: { startTime: Date; attributes: Attributes },
+	event: FlueEvent,
+	ctx: FlueContext,
+	resolveRootContext: OpenTelemetryObserverOptions['resolveRootContext'],
+	options: SpanOptions,
 ): Span {
-	return tracer.startSpan(name, { ...options, root: parent === undefined }, parentContext(parent));
-}
-
-function parentContext(parent: Span | undefined): Context | undefined {
-	return parent ? trace.setSpan(context.active(), parent) : undefined;
+	const parentContext = parent
+		? trace.setSpan(context.active(), parent)
+		: resolveRootContext?.(event, ctx);
+	return tracer.startSpan(name, { ...options, root: parentContext === undefined }, parentContext);
 }
 
 function workflowSpan(event: FlueEvent, runs: Map<string, Span>): Span | undefined {
