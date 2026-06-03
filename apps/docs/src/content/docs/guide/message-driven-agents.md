@@ -162,7 +162,7 @@ Fields:
 
 - `agent`: target agent module name in the named overload; use `dispatch(createdAgent, request)` when a created-agent reference is available.
 - `id`: target agent instance id.
-- `session`: target session name; defaults to `default`.
+- `session`: target session name; defaults to `default`. Names beginning with `task:` are reserved for framework-owned delegated tasks.
 - `input`: JSON-like structured payload.
 
 `await dispatch(...)` means the input was accepted and queued for the target session according to the current runtime's guarantees. It does not mean the model finished processing, produced a reply, or completed tool calls. The returned `dispatchId` identifies asynchronous delivery and any delivery recovery or idempotency behavior; it is not a run ID.

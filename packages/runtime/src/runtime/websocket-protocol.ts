@@ -1,4 +1,5 @@
 import { InvalidRequestError, toPublicError } from '../errors.ts';
+import { isTaskSessionName } from '../session-identity.ts';
 import type {
 	AgentWebSocketClientMessage,
 	WebSocketErrorMessage,
@@ -29,6 +30,11 @@ export function parseAgentWebSocketMessage(raw: string): AgentWebSocketClientMes
 	if (value.session !== undefined && !isNonBlankString(value.session)) {
 		throw new InvalidRequestError({
 			reason: 'Agent WebSocket prompt session must be a non-empty string when provided.',
+		});
+	}
+	if (typeof value.session === 'string' && isTaskSessionName(value.session)) {
+		throw new InvalidRequestError({
+			reason: 'Agent WebSocket prompt session names beginning with "task:" are reserved for delegated tasks.',
 		});
 	}
 	return {

@@ -585,7 +585,10 @@ export interface FlueHarness {
 	/** Harness name selected by {@link AgentHarnessOptions.name}. */
 	readonly name: string;
 
-	/** Get or create a session in this harness. Defaults to the `'default'` session. */
+	/**
+	 * Get or create a session in this harness. Defaults to the `'default'`
+	 * session. Names beginning with `'task:'` are reserved for delegated tasks.
+	 */
 	session(name?: string): Promise<FlueSession>;
 
 	/** Explicit session management helpers. */
@@ -601,7 +604,10 @@ export interface FlueHarness {
 	readonly fs: FlueFs;
 }
 
-/** Explicit session management helpers exposed by {@link FlueHarness.sessions}. */
+/**
+ * Explicit session management helpers exposed by {@link FlueHarness.sessions}.
+ * Names beginning with `'task:'` are reserved for delegated tasks.
+ */
 export interface FlueSessions {
 	/** Load an existing session. Defaults to `'default'`. Throws if it does not exist. */
 	get(name?: string): Promise<FlueSession>;
@@ -668,6 +674,7 @@ export interface FlueSession {
 	/**
 	 * Delegate work to a detached child session. Pass `options.agent` to select
 	 * a named subagent profile and `options.result` to require validated data.
+	 * Persisted child history remains parent-owned until the parent is deleted.
 	 */
 	task<S extends v.GenericSchema>(
 		text: string,

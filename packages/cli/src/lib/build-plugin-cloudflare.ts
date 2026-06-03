@@ -598,6 +598,7 @@ async function dispatchAgent(request, doInstance, agentName, handler) {
     assertCurrentDispatchInput(input);
     if (input.agent !== agentName || input.id !== id) return new Response('Invalid internal dispatch target.', { status: 400 });
     if (!createdAgents[agentName]) return new Response('Dispatch target unavailable.', { status: 404 });
+    await validateAgentDispatchAdmission({ input });
     assertAgentsDurabilityApi(doInstance, 'startFiber');
     assertAgentsDurabilityApi(doInstance, 'inspectFiberByKey');
     const idempotencyKey = 'flue:dispatch:' + input.dispatchId;

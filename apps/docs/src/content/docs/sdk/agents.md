@@ -4,7 +4,7 @@ description: Invoke persistent agent instances over HTTP or WebSockets.
 lastReviewedAt: 2026-06-02
 ---
 
-Direct agent APIs interact with persistent agent instances. They use an agent name, instance id, and optional session name. They do not create workflow runs and do not emit `runId`.
+Direct agent APIs interact with persistent agent instances. They use an agent name, instance id, and optional session name. Session names beginning with `task:` are reserved for framework-owned delegated-task history. Direct agent interactions do not create workflow runs and do not emit `runId`.
 
 ## `client.agents.invoke(...)`
 

@@ -409,6 +409,37 @@ describe('flue()', () => {
 		});
 	});
 
+	it('rejects a direct agent body when it targets a reserved task session name', async () => {
+		configureFlueRuntime({
+			target: 'node',
+			manifest: {
+				agents: [{ name: 'assistant', transports: { http: true }, created: true }],
+			},
+			handlers: { assistant: () => ({ shouldNotRun: true }) },
+			createContext: createTestContext,
+		});
+		const app = new Hono();
+		app.route('/api', flue());
+
+		const response = await app.fetch(
+			new Request('http://localhost/api/agents/assistant/customer-123', {
+				method: 'POST',
+				headers: { 'content-type': 'application/json' },
+				body: JSON.stringify({ message: 'Hello', session: 'task:default:child' }),
+			}),
+		);
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({
+			error: {
+				type: 'invalid_request',
+				message: 'Request is malformed.',
+				details:
+					'Direct agent request "session" names beginning with "task:" are reserved for delegated tasks.',
+			},
+		});
+	});
+
 	it('rejects an HTTP workflow when the workflow is built but not exposed over HTTP', async () => {
 		configureFlueRuntime({
 			target: 'node',

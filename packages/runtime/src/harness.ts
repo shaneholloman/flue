@@ -4,6 +4,11 @@ import { formatBashResult } from './agent.ts';
 import { discoverSessionContext } from './context.ts';
 import { generateSessionAffinityKey } from './runtime/ids.ts';
 import { createCwdSessionEnv, createFlueFs } from './sandbox.ts';
+import {
+	assertPublicSessionName,
+	createSessionStorageKey,
+	createTaskSessionName,
+} from './session-identity.ts';
 import { type CreateTaskSessionOptions, deleteSessionTree, Session } from './session.ts';
 import type {
 	AgentConfig,
@@ -103,8 +108,9 @@ export class Harness implements FlueHarness {
 		});
 	}
 
-	private openSession(name: string | undefined, mode: OpenMode): Promise<FlueSession> {
+	private async openSession(name: string | undefined, mode: OpenMode): Promise<FlueSession> {
 		const sessionName = normalizeSessionName(name);
+		assertPublicSessionName(sessionName);
 		return this.runSessionOperation(sessionName, () => this.loadSession(sessionName, mode));
 	}
 
@@ -169,8 +175,9 @@ export class Harness implements FlueHarness {
 		return session;
 	}
 
-	private deleteSession(name: string | undefined): Promise<void> {
+	private async deleteSession(name: string | undefined): Promise<void> {
 		const sessionName = normalizeSessionName(name);
+		assertPublicSessionName(sessionName);
 		return this.runSessionOperation(sessionName, async () => {
 			const open = this.openSessions.get(sessionName);
 			if (open) {
@@ -185,7 +192,7 @@ export class Harness implements FlueHarness {
 	}
 
 	private async createTaskSession(options: CreateTaskSessionOptions): Promise<Session> {
-		const sessionName = `task:${options.parentSession}:${options.taskId}`;
+		const sessionName = createTaskSessionName(options.parentSession, options.taskId);
 		const taskEnv = options.cwd
 			? createCwdSessionEnv(options.parentEnv, options.parentEnv.resolvePath(options.cwd))
 			: options.parentEnv;
@@ -224,8 +231,6 @@ export class Harness implements FlueHarness {
 			agent: taskAgent?.name,
 			depth: options.depth,
 		};
-		await this.store.save(storageKey, data);
-
 		const eventCallback: FlueEventCallback | undefined = this.eventCallback
 			? (event) => {
 					this.eventCallback?.({
@@ -278,10 +283,6 @@ function redactEnvValues(env: Record<string, string>): Record<string, string> {
 
 function normalizeSessionName(name: string | undefined): string {
 	return name ?? DEFAULT_SESSION_NAME;
-}
-
-function createSessionStorageKey(instanceId: string, harness: string, sessionName: string): string {
-	return `agent-session:${JSON.stringify([instanceId, harness, sessionName])}`;
 }
 
 function createEmptySessionData(): SessionData {

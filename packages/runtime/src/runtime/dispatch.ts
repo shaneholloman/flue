@@ -1,3 +1,4 @@
+import { isTaskSessionName } from '../session-identity.ts';
 import type { DispatchReceipt, NamedAgentDispatchRequest } from '../types.ts';
 import type { DispatchQueue } from './dispatch-queue.ts';
 
@@ -45,6 +46,9 @@ function validateAndCloneDispatchRequest(
 		throw new Error(
 			'[flue] dispatch() requires a non-empty "session" target session id when provided.',
 		);
+	}
+	if (typeof request.session === 'string' && isTaskSessionName(request.session)) {
+		throw new Error('[flue] dispatch() session names beginning with "task:" are reserved for delegated tasks.');
 	}
 	if (request.input === undefined) {
 		throw new Error(

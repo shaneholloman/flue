@@ -176,6 +176,31 @@ describe('agent WebSocket protocol', () => {
 		});
 	});
 
+	it('rejects a reserved task session name when an agent WebSocket prompt supplies a session', () => {
+		let thrown: unknown;
+		try {
+			parseAgentWebSocketMessage(
+				JSON.stringify({
+					version: 1,
+					type: 'prompt',
+					requestId: 'request-1',
+					message: 'Hello',
+					session: 'task:default:child',
+				}),
+			);
+		} catch (error) {
+			thrown = error;
+		}
+
+		expect(thrown).toMatchObject({
+			type: 'invalid_request',
+			message: 'Request is malformed.',
+			details:
+				'Agent WebSocket prompt session names beginning with "task:" are reserved for delegated tasks.',
+			status: 400,
+		});
+	});
+
 	it('rejects a whitespace-only request id when an agent WebSocket ping supplies a blank correlation id', () => {
 		let thrown: unknown;
 		try {

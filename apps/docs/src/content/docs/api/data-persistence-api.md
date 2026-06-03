@@ -103,7 +103,7 @@ A persisted conversation does not make sandbox files durable. A durable workspac
 
 ## Identity and deletion
 
-Session data is stored under keys derived from Flue identity boundaries: agent instance or workflow invocation ownership, harness name, and session name. The stored record contains a separate opaque provider-affinity key. Deleting a session removes its stored conversation data and stored child task-session tree; it does not undo external effects or remove sandbox files.
+Session data is stored under keys derived from Flue identity boundaries: agent instance or workflow invocation ownership, harness name, and session name. The stored record contains a separate opaque provider-affinity key. Delegated `task(...)` calls use internal child sessions whose retained history remains parent-owned; names beginning with `task:` are reserved for those children and cannot be selected as ordinary sessions. Deleting a parent session removes its stored conversation data and retained child task-session tree; application-owned stores may apply broader retention separately. Deletion does not undo external effects or remove sandbox files.
 
 ## Implementing a store
 

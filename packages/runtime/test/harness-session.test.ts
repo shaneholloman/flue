@@ -243,6 +243,22 @@ describe('FlueHarness', () => {
 			);
 		});
 
+		it('rejects reserved task names when ordinary session APIs receive an internal session name', async () => {
+			const store = new TrackingSessionStore();
+			const harness = await createContext(createEnv(), store).init(
+				createAgent(() => ({ model: false })),
+			);
+
+			await expect(harness.session('task:default:child')).rejects.toThrow(
+				'Session names beginning with "task:" are reserved for delegated tasks',
+			);
+			await expect(harness.sessions.delete('task:default:child')).rejects.toThrow(
+				'Session names beginning with "task:" are reserved for delegated tasks',
+			);
+			expect(store.saveCalls).toEqual([]);
+			expect(store.deleteCalls).toEqual([]);
+		});
+
 		it('deletes stored conversation state when delete() targets an existing name', async () => {
 			const store = new TrackingSessionStore();
 			const harness = await createContext(createEnv(), store).init(

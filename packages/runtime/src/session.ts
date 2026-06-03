@@ -51,6 +51,7 @@ import type { DispatchInput } from './runtime/dispatch-queue.ts';
 import { generateOperationId, generateTurnId } from './runtime/ids.ts';
 import { getProviderConfiguration, getRegisteredApiKey } from './runtime/providers.ts';
 import { createFlueFs } from './sandbox.ts';
+import { childTaskSessionStorageKey } from './session-identity.ts';
 import type {
 	AgentConfig,
 	AgentProfile,
@@ -606,6 +607,7 @@ export class Session implements FlueSession {
 	private taskDepth: number;
 	private createTaskSession: CreateTaskSession | undefined;
 	private onDelete: (() => void) | undefined;
+	private pendingSave: Promise<void> = Promise.resolve();
 
 	private emitTurnRequestAndStream: StreamFn = (model, context, options) => {
 		if (this.activeTurnId === undefined) this.activeTurnId = generateTurnId();
@@ -1415,7 +1417,8 @@ export class Session implements FlueSession {
 				agent: taskAgent,
 				depth: this.taskDepth + 1,
 			});
-			await this.recordTaskSession(child.name, child.storageKey, taskId);
+			await this.recordTaskSession(child.name, taskId);
+			await child.save();
 			this.activeTasks.add(child);
 
 			// Aborts during sandbox bring-up — child.prompt's own
@@ -1634,22 +1637,25 @@ export class Session implements FlueSession {
 	}
 
 	private async save(): Promise<void> {
-		const now = new Date().toISOString();
-		const data = this.history.toData(this.affinityKey, this.metadata, this.createdAt ?? now, now);
-		if (!this.createdAt) this.createdAt = now;
-		await this.store.save(this.storageKey, data);
+		const result = this.pendingSave.then(async () => {
+			const now = new Date().toISOString();
+			const data = this.history.toData(this.affinityKey, this.metadata, this.createdAt ?? now, now);
+			if (!this.createdAt) this.createdAt = now;
+			await this.store.save(this.storageKey, data);
+		});
+		this.pendingSave = result.then(
+			() => {},
+			() => {},
+		);
+		await result;
 	}
 
-	private async recordTaskSession(
-		session: string,
-		storageKey: string,
-		taskId: string,
-	): Promise<void> {
+	private async recordTaskSession(session: string, taskId: string): Promise<void> {
 		const taskSessions = Array.isArray(this.metadata.taskSessions)
 			? this.metadata.taskSessions
 			: [];
 		if (!taskSessions.some((task) => task?.session === session)) {
-			taskSessions.push({ session, taskId, storageKey });
+			taskSessions.push({ session, taskId });
 			this.metadata.taskSessions = taskSessions;
 			await this.save();
 		}
@@ -2210,9 +2216,8 @@ export async function deleteSessionTree(
 		? data.metadata.taskSessions
 		: [];
 	for (const task of taskSessions) {
-		if (typeof task?.storageKey === 'string') {
-			await deleteSessionTree(store, task.storageKey, seen);
-		}
+		const childStorageKey = childTaskSessionStorageKey(storageKey, task);
+		if (childStorageKey) await deleteSessionTree(store, childStorageKey, seen);
 	}
 	await store.delete(storageKey);
 }

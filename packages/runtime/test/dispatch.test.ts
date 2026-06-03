@@ -12,6 +12,7 @@ import {
 	createFlueContext,
 	type DispatchInput,
 	InMemoryDispatchQueue,
+	validateAgentDispatchAdmission,
 	InMemorySessionStore,
 	resetFlueRuntimeForTests,
 } from '../src/internal.ts';
@@ -264,6 +265,38 @@ describe('dispatch()', () => {
 		await expect(
 			dispatch({ agent: 'moderator', id: 'guild:blank-session', session: '  ', input: null }),
 		).rejects.toThrow('requires a non-empty "session" target session id');
+	});
+
+	it('rejects a reserved task session name when dispatch() receives a session', async () => {
+		configureFlueRuntime({
+			target: 'node',
+			dispatchQueue: new InMemoryDispatchQueue(),
+			manifest: { agents: [{ name: 'moderator', transports: {}, created: true }] },
+		});
+
+		await expect(
+			dispatch({
+				agent: 'moderator',
+				id: 'guild:task-session',
+				session: 'task:default:child',
+				input: null,
+			}),
+		).rejects.toThrow('session names beginning with "task:" are reserved for delegated tasks');
+	});
+
+	it('rejects a reserved task session name when durable dispatch admission receives internal input', async () => {
+		await expect(
+			validateAgentDispatchAdmission({
+				input: {
+					dispatchId: 'dispatch:task-session',
+					agent: 'moderator',
+					id: 'guild:task-session',
+					session: 'task:default:child',
+					input: null,
+					acceptedAt: '2026-06-02T00:00:00.000Z',
+				},
+			}),
+		).rejects.toThrow('session names beginning with "task:" are reserved for delegated tasks');
 	});
 
 	it('rejects calls when the runtime has no dispatch queue', async () => {

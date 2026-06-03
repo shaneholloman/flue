@@ -1,6 +1,7 @@
 /** Shared per-agent HTTP dispatcher for the Node and Cloudflare targets. */
 
 import type { FlueContextInternal } from '../client.ts';
+import { isTaskSessionName } from '../session-identity.ts';
 import {
 	InvalidRequestError,
 	parseJsonBody,
@@ -89,6 +90,11 @@ export async function validateAgentDispatchAdmission(
 	assertCurrentDispatchInput(input);
 	if (!isDispatchInput(input))
 		throw new Error('[flue] Internal dispatch admission received an invalid payload.');
+	if (isTaskSessionName(input.session)) {
+		throw new Error(
+			'[flue] Internal dispatch admission session names beginning with "task:" are reserved for delegated tasks.',
+		);
+	}
 	return { dispatchId: input.dispatchId, acceptedAt: input.acceptedAt };
 }
 
@@ -185,6 +191,11 @@ function parseDirectAgentPayload(payload: unknown): DirectAgentPayload {
 	) {
 		throw new InvalidRequestError({
 			reason: 'Direct agent request "session" must be a non-empty string when provided.',
+		});
+	}
+	if (typeof value.session === 'string' && isTaskSessionName(value.session)) {
+		throw new InvalidRequestError({
+			reason: 'Direct agent request "session" names beginning with "task:" are reserved for delegated tasks.',
 		});
 	}
 	return { message: value.message, session: value.session };

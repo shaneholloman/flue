@@ -295,7 +295,7 @@ interface FlueHarness {
 session(name?: string): Promise<FlueSession>;
 ```
 
-Gets or creates a session in this harness. Defaults to the `'default'` session.
+Gets or creates a session in this harness. Defaults to the `'default'` session. Names beginning with `task:` are reserved for framework-owned detached task sessions.
 
 ### `harness.sessions.get(...)`
 
@@ -465,7 +465,7 @@ Opaque imported packaged-skill reference accepted by `session.skill()`. Import a
 task(text: string, options?: TaskOptions): CallHandle<PromptResponse>;
 ```
 
-Delegates work to a detached child session. Pass `options.agent` to select a named subagent profile and `options.result` to require validated data.
+Delegates work to a detached child session. Pass `options.agent` to select a named subagent profile and `options.result` to require validated data. Completed child history remains parent-owned until the parent session is deleted or application-owned retention removes it.
 
 #### `TaskOptions`
 

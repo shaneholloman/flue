@@ -459,6 +459,73 @@ describe('session.task()', () => {
 		expect(providerSessionIds).toEqual([childEntry?.[1].affinityKey]);
 	});
 
+	it('records retained delegated-task relationships before persisting child state', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		provider.setResponses([fauxAssistantMessage('Delegated response.')]);
+		const store = new RecordingSessionStore();
+		const save = store.save.bind(store);
+		store.save = async (id, data) => {
+			if (id.includes('task:default:')) {
+				const parent = store.records.get(
+					'agent-session:["session-operations-instance","default","default"]',
+				);
+				expect(parent?.metadata.taskSessions).toContainEqual({
+					session: expect.stringMatching(/^task:default:/),
+					taskId: expect.any(String),
+				});
+			}
+			await save(id, data);
+		};
+		const ctx = createContext(provider, { store });
+		const harness = await ctx.init(
+			createAgent(() => ({
+				model: `${provider.getModel().provider}/reviewer`,
+				persist: store,
+			})),
+		);
+		const session = await harness.session();
+
+		await session.task('Review the persisted child state.');
+
+		expect([...store.records.keys()]).toHaveLength(2);
+	});
+
+	it('retains every delegated-task relationship when parallel model tasks persist', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		provider.setResponses([
+			fauxAssistantMessage(
+				[
+					fauxToolCall('task', { prompt: 'Review the runtime package.' }),
+					fauxToolCall('task', { prompt: 'Review the SDK package.' }),
+				],
+				{ stopReason: 'toolUse' },
+			),
+			fauxAssistantMessage('Runtime review complete.'),
+			fauxAssistantMessage('SDK review complete.'),
+			fauxAssistantMessage('Both reviews complete.'),
+		]);
+		const store = new RecordingSessionStore();
+		const ctx = createContext(provider, { store });
+		const harness = await ctx.init(
+			createAgent(() => ({
+				model: `${provider.getModel().provider}/reviewer`,
+				persist: store,
+			})),
+		);
+		const session = await harness.session();
+
+		await session.prompt('Review both packages.');
+
+		const parent = store.records.get(
+			'agent-session:["session-operations-instance","default","default"]',
+		);
+		expect(parent?.metadata.taskSessions).toHaveLength(2);
+		expect(parent?.metadata.taskSessions).toEqual([
+			{ session: expect.stringMatching(/^task:default:/), taskId: expect.any(String) },
+			{ session: expect.stringMatching(/^task:default:/), taskId: expect.any(String) },
+		]);
+	});
+
 	it('removes persisted delegated-task state when the parent session is deleted', async () => {
 		const provider = createProvider([{ id: 'reviewer' }]);
 		provider.setResponses([fauxAssistantMessage('Delegated response.')]);
@@ -478,6 +545,40 @@ describe('session.task()', () => {
 		expect([...store.records.keys()].some((key) => key.includes('task:default:'))).toBe(true);
 		await session.delete();
 		expect([...store.records.keys()]).toEqual([]);
+	});
+
+	it('derives recursive deletion keys from validated task relationships', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		provider.setResponses([fauxAssistantMessage('Delegated response.')]);
+		const store = new RecordingSessionStore();
+		const ctx = createContext(provider, { store });
+		const harness = await ctx.init(
+			createAgent(() => ({
+				model: `${provider.getModel().provider}/reviewer`,
+				persist: store,
+			})),
+		);
+		const session = await harness.session();
+		await session.task('Review the persisted child state.');
+		const parentKey = 'agent-session:["session-operations-instance","default","default"]';
+		const unrelatedKey = 'agent-session:["session-operations-instance","default","unrelated"]';
+		const parent = store.records.get(parentKey);
+		const task = parent?.metadata.taskSessions[0];
+		await store.save(unrelatedKey, {
+			version: 5,
+			affinityKey: 'aff_01J00000000000000000000000',
+			entries: [],
+			leafId: null,
+			metadata: {},
+			createdAt: '2026-06-02T00:00:00.000Z',
+			updatedAt: '2026-06-02T00:00:00.000Z',
+		});
+		task.storageKey = unrelatedKey;
+		await store.save(parentKey, parent as SessionData);
+
+		await session.delete();
+
+		expect([...store.records.keys()]).toEqual([unrelatedKey]);
 	});
 
 	it('rejects recursive delegation when task depth exceeds the supported limit', async () => {
