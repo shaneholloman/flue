@@ -3,6 +3,12 @@
 	"version": "0.10.1",
 	"type": "module",
 	"license": "Apache-2.0",
+	"homepage": "https://flueframework.com/",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/withastro/flue",
+		"directory": "packages/postgres"
+	},
 	"exports": {
 		".": {
 			"types": "./dist/index.d.mts",
