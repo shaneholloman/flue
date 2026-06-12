@@ -659,6 +659,65 @@ leaseExpiresAt: 1,
 				nowSpy.mockRestore();
 			}
 		}, 30_000);
+
+		it('deletes the interrupted turn chunk segments when reconciliation terminalizes the submission', async () => {
+			const dbPath = createTempDbPath();
+			// Slow streaming so shutdown deterministically lands mid-turn with
+			// partial output already persisted to durable chunk segments.
+			const provider = registerFauxProvider({
+				provider: `node-coordinator-test-${crypto.randomUUID()}`,
+				tokensPerSecond: 50,
+			});
+			providers.push(provider);
+			provider.setResponses([
+				fauxAssistantMessage(`The full answer that never finishes. ${'lorem ipsum dolor '.repeat(250)}`),
+			]);
+			// A timeout shorter than the restart's clock advance, so the
+			// reconciliation terminalizes instead of resuming.
+			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider, {
+				timeoutMs: 30_000,
+			});
+
+			const input = makeDispatchInput();
+			await coordinator.admitDispatch(input);
+			let streamKey: string | undefined;
+			await vi.waitFor(
+				async () => {
+					const journal = await executionStore.submissions.getTurnJournal(input.dispatchId);
+					streamKey = journal?.streamKey;
+					if (!streamKey) throw new Error('Stream has not started yet.');
+					const segments = await executionStore.submissions.getStreamChunkSegments(streamKey);
+					expect(segments.length).toBeGreaterThan(0);
+				},
+				{ timeout: 10_000, interval: 50 },
+			);
+			await coordinator.shutdown();
+			if (!streamKey) throw new Error('Expected a stream key.');
+			expect(
+				(await executionStore.submissions.getStreamChunkSegments(streamKey)).length,
+			).toBeGreaterThan(0);
+
+			// "Restart": advance the clock past both the lease and the timeout.
+			const realNow = Date.now.bind(Date);
+			const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60_000);
+			try {
+				const { coordinator: restarted, executionStore: store2 } = await createFauxCoordinator(
+					dbPath,
+					provider,
+					{ timeoutMs: 30_000 },
+				);
+				await restarted.reconcileSubmissions();
+
+				const submission = await store2.submissions.getSubmission(input.dispatchId);
+				expect(submission).toMatchObject({ status: 'settled' });
+				expect(submission?.error).toContain('exceeded the configured timeout');
+				// Terminal settlement leaves no orphaned chunk segments behind:
+				// nothing will ever recover or supersede them after this point.
+				expect(await store2.submissions.getStreamChunkSegments(streamKey)).toEqual([]);
+			} finally {
+				nowSpy.mockRestore();
+			}
+		}, 30_000);
 	});
 
 	describe('attempt exhaustion', () => {

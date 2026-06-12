@@ -327,13 +327,22 @@ export async function reconcileInterruptedSubmission(
 		};
 	})(ctx)) as { state: AgentSubmissionInspection; result: unknown };
 	const state = inspected.state;
+	// Fetch the turn journal up front: every terminal settlement below must
+	// also delete the journal's surviving chunk segments — the in-memory
+	// staging set that would normally delete them at the next durable
+	// checkpoint died with the interrupted process, and a settled submission
+	// gets no later checkpoint.
+	const journal = await submissions.getTurnJournal(submission.submissionId);
 	if (state === 'completed') {
 		// Settle as success and surface the persisted result. When the
 		// settlement CAS is lost (another claimant settled first) the result
 		// is still real — return it so a live observer resolves instead of
 		// hanging; only the CAS winner emits the durable settlement event.
 		const settled = await submissions.completeSubmission(attempt);
-		if (settled) emitSubmissionSettled(ctx, submission.submissionId, 'completed');
+		if (settled) {
+			emitSubmissionSettled(ctx, submission.submissionId, 'completed');
+			if (journal?.streamKey) await submissions.deleteStreamChunkSegments(journal.streamKey);
+		}
 		return { disposition: 'completed', result: inspected.result };
 	}
 
@@ -357,6 +366,7 @@ export async function reconcileInterruptedSubmission(
 					});
 		return failInterruptedSubmission(
 			submissions, submission, attempt, agent, 'exhausted_retry_budget', error, createContext,
+			journal?.streamKey,
 		);
 	}
 
@@ -365,6 +375,7 @@ export async function reconcileInterruptedSubmission(
 		const error = new SubmissionTimeoutError();
 		return failInterruptedSubmission(
 			submissions, submission, attempt, agent, 'exceeded_timeout', error, createContext,
+			journal?.streamKey,
 		);
 	}
 
@@ -383,7 +394,6 @@ export async function reconcileInterruptedSubmission(
 	// idempotency guard to repairInterruptedToolCalls. This is safe today
 	// because Cloudflare DOs are single-threaded and multi-process Node is
 	// not a supported configuration.
-	const journal = await submissions.getTurnJournal(submission.submissionId);
 	if (
 		journal?.phase === 'provider_started' &&
 		journal.committed === false &&
@@ -465,7 +475,7 @@ export async function reconcileInterruptedSubmission(
 		const error = new SubmissionInterruptedError({ phase: 'before_input_marker' });
 		return failInterruptedSubmission(
 			submissions, submission, attempt, agent,
-			'interrupted_before_input_marker', error, createContext,
+			'interrupted_before_input_marker', error, createContext, journal?.streamKey,
 		);
 	}
 
@@ -481,7 +491,7 @@ export async function reconcileInterruptedSubmission(
 	});
 	return failInterruptedSubmission(
 		submissions, submission, attempt, agent,
-		'interrupted_after_input_application', error, createContext, interruptedTools,
+		'interrupted_after_input_application', error, createContext, journal?.streamKey, interruptedTools,
 	);
 }
 
@@ -655,6 +665,7 @@ async function failInterruptedSubmission(
 	reason: AgentSubmissionInterruption['reason'],
 	error: Error,
 	createContext: (payload: unknown, dispatchId: string | undefined) => FlueContextInternal,
+	journalStreamKey: string | undefined,
 	interruptedTools?: ReadonlyArray<{ readonly name: string; readonly id: string }>,
 ): Promise<ReconciliationResult> {
 	const { input } = submission;
@@ -685,6 +696,11 @@ async function failInterruptedSubmission(
 	const settled = await submissions.failSubmission(attempt, error);
 	if (!settled) return { disposition: 'stale' };
 	emitSubmissionSettled(ctx, submission.submissionId, 'failed', error);
+	// Terminal settlement supersedes any chunk segments an interrupted turn
+	// left durable for recovery; no later checkpoint will delete them. Only
+	// the settlement CAS winner deletes — a lost CAS means another live
+	// attempt may still need the segments.
+	if (journalStreamKey) await submissions.deleteStreamChunkSegments(journalStreamKey);
 	return { disposition: 'failed', error };
 }
 
