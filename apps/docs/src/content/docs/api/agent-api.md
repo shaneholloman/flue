@@ -579,8 +579,10 @@ Paths may be absolute or relative. Relative paths use the configured `cwd`, or t
 interface FileStat {
   isFile: boolean;
   isDirectory: boolean;
-  isSymbolicLink: boolean;
-  size: number;
-  mtime: Date;
+  isSymbolicLink?: boolean;
+  size?: number;
+  mtime?: Date;
 }
 ```
+
+`isSymbolicLink`, `size`, and `mtime` are omitted when the sandbox connector's provider does not expose them.

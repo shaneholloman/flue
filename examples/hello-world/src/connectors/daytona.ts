@@ -48,13 +48,15 @@ class DaytonaSandboxApi implements SandboxApi {
 
 	async stat(path: string): Promise<FileStat> {
 		const info = await this.sandbox.fs.getFileDetails(path);
-		return {
+		// The Daytona SDK does not expose symlink information; omit unknown
+		// fields rather than fabricating values.
+		const stat: FileStat = {
 			isFile: !info.isDir,
 			isDirectory: info.isDir ?? false,
-			isSymbolicLink: false,
-			size: info.size ?? 0,
-			mtime: info.modTime ? new Date(info.modTime) : new Date(),
 		};
+		if (info.size !== undefined) stat.size = info.size;
+		if (info.modTime) stat.mtime = new Date(info.modTime);
+		return stat;
 	}
 
 	async readdir(path: string): Promise<string[]> {

@@ -144,13 +144,19 @@ export interface ToolDefinition<TParams extends ToolParameters = ToolParameters>
 
 // ─── File Stat ──────────────────────────────────────────────────────────────
 
-/** File metadata returned by {@link FlueFs.stat}. */
+/**
+ * File metadata returned by {@link FlueFs.stat}.
+ *
+ * `isSymbolicLink`, `size`, and `mtime` are omitted when the sandbox
+ * connector's provider does not expose them — connectors must never
+ * fabricate placeholder values.
+ */
 export interface FileStat {
 	isFile: boolean;
 	isDirectory: boolean;
-	isSymbolicLink: boolean;
-	size: number;
-	mtime: Date;
+	isSymbolicLink?: boolean;
+	size?: number;
+	mtime?: Date;
 }
 
 // ─── Session Environment ────────────────────────────────────────────────────

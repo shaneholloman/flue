@@ -108,9 +108,9 @@ Use this optional factory when the sandbox exposes provider-specific model-facin
 export interface FileStat {
   isFile: boolean;
   isDirectory: boolean;
-  isSymbolicLink: boolean;
-  size: number;
-  mtime: Date;
+  isSymbolicLink?: boolean;
+  size?: number;
+  mtime?: Date;
 }
 ```
 
@@ -138,7 +138,7 @@ Connectors need not create parent directories; the runtime guarantees it. When a
 
 ### `stat(path)`
 
-Return a `FileStat`. If the provider SDK does not expose modification time or size, use sensible defaults such as `new Date()` and `0`. Use `isSymbolicLink: false` if the SDK does not expose symlink information.
+Return a `FileStat`. `isFile` and `isDirectory` are required. If the provider SDK does not expose modification time, size, or symlink information, omit those fields — never fabricate placeholder values such as `new Date()`, `0`, or `false`, since callers cannot distinguish them from real metadata.
 
 ### `readdir(path)`
 
