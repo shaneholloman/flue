@@ -11,6 +11,7 @@
  */
 
 import type {
+	AgentAttemptMarker,
 	AgentDispatchAdmission,
 	AgentDispatchReceipt,
 	AgentExecutionStore,
@@ -464,6 +465,42 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 				.toArray(),
 			'active',
 		);
+	}
+
+	// ── Attempt markers ──────────────────────────────────────────────────
+
+	async insertAttemptMarker(attempt: SubmissionAttemptRef): Promise<void> {
+		this.sql.exec(
+			`INSERT OR IGNORE INTO flue_agent_attempt_markers (submission_id, attempt_id, created_at)
+			 VALUES (?, ?, ?)`,
+			attempt.submissionId,
+			attempt.attemptId,
+			Date.now(),
+		);
+	}
+
+	async deleteAttemptMarker(attempt: SubmissionAttemptRef): Promise<void> {
+		this.sql.exec(
+			'DELETE FROM flue_agent_attempt_markers WHERE submission_id = ? AND attempt_id = ?',
+			attempt.submissionId,
+			attempt.attemptId,
+		);
+	}
+
+	async listAttemptMarkers(): Promise<AgentAttemptMarker[]> {
+		const rows = this.sql
+			.exec('SELECT submission_id, attempt_id, created_at FROM flue_agent_attempt_markers')
+			.toArray();
+		return rows.map((row) => {
+			if (
+				typeof row.submission_id !== 'string' ||
+				typeof row.attempt_id !== 'string' ||
+				typeof row.created_at !== 'number'
+			) {
+				throw new Error('[flue] Persisted attempt marker row is malformed.');
+			}
+			return { submissionId: row.submission_id, attemptId: row.attempt_id, createdAt: row.created_at };
+		});
 	}
 
 	// ── Lease management ────────────────────────────────────────────────
@@ -1166,6 +1203,14 @@ function ensureSubmissionTable(sql: SqlStorage): void {
 		`CREATE TABLE IF NOT EXISTS flue_agent_dispatch_receipts (
 		 dispatch_id TEXT PRIMARY KEY,
 		 accepted_at INTEGER NOT NULL
+		)`,
+	);
+	sql.exec(
+		`CREATE TABLE IF NOT EXISTS flue_agent_attempt_markers (
+		 submission_id TEXT NOT NULL,
+		 attempt_id TEXT NOT NULL,
+		 created_at INTEGER NOT NULL,
+		 PRIMARY KEY (submission_id, attempt_id)
 		)`,
 	);
 	sql.exec(

@@ -18,6 +18,7 @@
 // ─── Store interfaces and vocabulary types ──────────────────────────────────
 
 export type {
+	AgentAttemptMarker,
 	AgentDispatchAdmission,
 	AgentDispatchReceipt,
 	AgentExecutionStore,

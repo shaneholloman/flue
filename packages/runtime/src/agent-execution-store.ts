@@ -60,6 +60,19 @@ export interface SubmissionDurability {
 	readonly timeoutAt: number;
 }
 
+/**
+ * Flue-owned durable evidence that a submission attempt was started and has
+ * not yet settled. The Cloudflare coordinator inserts a marker immediately
+ * before starting an attempt fiber and deletes it when the attempt settles;
+ * reconciliation treats a fresh marker as proof that the attempt may still
+ * be running and must not be reconciled as interrupted.
+ */
+export interface AgentAttemptMarker {
+	readonly submissionId: string;
+	readonly attemptId: string;
+	readonly createdAt: number;
+}
+
 // ─── Dispatch admission ─────────────────────────────────────────────────────
 
 export interface AgentDispatchReceipt {
@@ -156,6 +169,11 @@ export interface AgentSubmissionStore {
 	requeueSubmissionBeforeInputApplied(attempt: SubmissionAttemptRef): Promise<boolean>;
 	completeSubmission(attempt: SubmissionAttemptRef): Promise<boolean>;
 	failSubmission(attempt: SubmissionAttemptRef, error: unknown): Promise<boolean>;
+
+	// Attempt markers
+	insertAttemptMarker(attempt: SubmissionAttemptRef): Promise<void>;
+	deleteAttemptMarker(attempt: SubmissionAttemptRef): Promise<void>;
+	listAttemptMarkers(): Promise<AgentAttemptMarker[]>;
 
 	// Lease management
 	renewLeases(ownerId: string, submissionIds: string[]): Promise<void>;

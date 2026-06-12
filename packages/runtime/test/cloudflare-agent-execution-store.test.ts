@@ -113,6 +113,7 @@ describe('createSqlAgentExecutionStore()', () => {
 			.prepare("SELECT name FROM sqlite_schema WHERE type = 'table' ORDER BY name")
 			.all(),
 		).toEqual([
+			{ name: 'flue_agent_attempt_markers' },
 			{ name: 'flue_agent_dispatch_receipts' },
 			{ name: 'flue_agent_session_deletions' },
 			{ name: 'flue_agent_stream_chunks' },

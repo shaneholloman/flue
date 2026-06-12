@@ -691,6 +691,46 @@ export function defineStoreContractTests(
 			});
 		});
 
+		// ── Attempt markers ──────────────────────────────────────────────
+
+		describe('attempt markers', () => {
+			it('lists inserted markers with creation timestamps', async () => {
+				const store = await create();
+				const before = Date.now();
+				await store.submissions.insertAttemptMarker(attempt('dispatch-1', 'attempt-1'));
+				const markers = await store.submissions.listAttemptMarkers();
+				expect(markers).toEqual([
+					{ submissionId: 'dispatch-1', attemptId: 'attempt-1', createdAt: expect.any(Number) },
+				]);
+				expect(markers[0]!.createdAt).toBeGreaterThanOrEqual(before);
+			});
+
+			it('keeps one marker with the original timestamp when the same attempt is inserted twice', async () => {
+				const store = await create();
+				await store.submissions.insertAttemptMarker(attempt('dispatch-1', 'attempt-1'));
+				const first = await store.submissions.listAttemptMarkers();
+				await store.submissions.insertAttemptMarker(attempt('dispatch-1', 'attempt-1'));
+				expect(await store.submissions.listAttemptMarkers()).toEqual(first);
+			});
+
+			it('deletes only the marker matching both submission and attempt', async () => {
+				const store = await create();
+				await store.submissions.insertAttemptMarker(attempt('dispatch-1', 'attempt-1'));
+				await store.submissions.insertAttemptMarker(attempt('dispatch-1', 'attempt-2'));
+				await store.submissions.deleteAttemptMarker(attempt('dispatch-1', 'attempt-1'));
+				expect(await store.submissions.listAttemptMarkers()).toEqual([
+					expect.objectContaining({ submissionId: 'dispatch-1', attemptId: 'attempt-2' }),
+				]);
+			});
+
+			it('silently handles deleting nonexistent markers', async () => {
+				const store = await create();
+				await expect(
+					store.submissions.deleteAttemptMarker(attempt('missing', 'attempt-1')),
+				).resolves.toBeUndefined();
+			});
+		});
+
 		// ── Lease management ────────────────────────────────────────────────
 
 		describe('renewLeases()', () => {

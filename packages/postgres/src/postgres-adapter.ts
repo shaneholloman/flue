@@ -9,6 +9,7 @@
  */
 
 import type {
+	AgentAttemptMarker,
 	AgentDispatchAdmission,
 	AgentSubmission,
 	AgentSubmissionStore,
@@ -311,6 +312,15 @@ async function ensureTables(runner: PgRunner): Promise<void> {
 			CREATE TABLE IF NOT EXISTS flue_agent_dispatch_receipts (
 				dispatch_id TEXT PRIMARY KEY,
 				accepted_at BIGINT NOT NULL
+			)
+		`);
+
+		await tx.query(`
+			CREATE TABLE IF NOT EXISTS flue_agent_attempt_markers (
+				submission_id TEXT NOT NULL,
+				attempt_id TEXT NOT NULL,
+				created_at BIGINT NOT NULL,
+				PRIMARY KEY (submission_id, attempt_id)
 			)
 		`);
 
@@ -786,6 +796,42 @@ class PgSubmissionStore implements AgentSubmissionStore {
 			],
 		);
 		return rows.length > 0;
+	}
+
+	// ── Attempt markers ──────────────────────────────────────────────────
+
+	async insertAttemptMarker(attempt: SubmissionAttemptRef): Promise<void> {
+		await this.runner.query(
+			`INSERT INTO flue_agent_attempt_markers (submission_id, attempt_id, created_at)
+			 VALUES ($1, $2, $3)
+			 ON CONFLICT (submission_id, attempt_id) DO NOTHING`,
+			[attempt.submissionId, attempt.attemptId, Date.now()],
+		);
+	}
+
+	async deleteAttemptMarker(attempt: SubmissionAttemptRef): Promise<void> {
+		await this.runner.query(
+			'DELETE FROM flue_agent_attempt_markers WHERE submission_id = $1 AND attempt_id = $2',
+			[attempt.submissionId, attempt.attemptId],
+		);
+	}
+
+	async listAttemptMarkers(): Promise<AgentAttemptMarker[]> {
+		const rows = await this.runner.query(
+			'SELECT submission_id, attempt_id, created_at FROM flue_agent_attempt_markers',
+		);
+		return rows.map((row) => {
+			// Postgres returns BIGINT as string; coerce to number.
+			const createdAt = Number(row.created_at);
+			if (
+				typeof row.submission_id !== 'string' ||
+				typeof row.attempt_id !== 'string' ||
+				!Number.isFinite(createdAt)
+			) {
+				throw new Error('[flue] Persisted attempt marker row is malformed.');
+			}
+			return { submissionId: row.submission_id, attemptId: row.attempt_id, createdAt };
+		});
 	}
 
 	// ── Lease management ────────────────────────────────────────────────

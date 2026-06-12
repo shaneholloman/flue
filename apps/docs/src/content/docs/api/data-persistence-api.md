@@ -120,13 +120,16 @@ interface AgentSubmissionStore {
   requeueSubmissionBeforeInputApplied(attempt: SubmissionAttemptRef): Promise<boolean>;
   completeSubmission(attempt: SubmissionAttemptRef): Promise<boolean>;
   failSubmission(attempt: SubmissionAttemptRef, error: unknown): Promise<boolean>;
+  insertAttemptMarker(attempt: SubmissionAttemptRef): Promise<void>;
+  deleteAttemptMarker(attempt: SubmissionAttemptRef): Promise<void>;
+  listAttemptMarkers(): Promise<AgentAttemptMarker[]>;
   renewLeases(ownerId: string, submissionIds: string[]): Promise<void>;
   listExpiredSubmissions(): Promise<AgentSubmission[]>;
   deleteSession(sessionKey: string, deleteSessionTree: () => Promise<void>): Promise<void>;
 }
 ```
 
-The submission store owns ordered admission, claim ownership, turn journals, stream chunks, recovery, lease renewal, and deletion coordination for direct prompts and `dispatch(...)` input.
+The submission store owns ordered admission, claim ownership, turn journals, stream chunks, recovery, attempt markers, lease renewal, and deletion coordination for direct prompts and `dispatch(...)` input. Attempt markers are durable evidence that an attempt was started and has not yet settled; coordinators insert one before starting an attempt and delete it at settlement, and reconciliation treats a fresh marker as proof that the attempt may still be running.
 
 ## `RunStore`
 
