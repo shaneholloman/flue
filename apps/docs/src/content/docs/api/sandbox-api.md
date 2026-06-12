@@ -87,6 +87,8 @@ export interface SandboxFactory {
 }
 ```
 
+`createSessionEnv` is called once per initialized harness — one call per `init()` — and every session and task session of that harness shares the returned `SessionEnv`. The `id` option is the context id (`ctx.id`): the agent instance id for direct agent requests, or the workflow run id inside a workflow. Multiple harnesses initialized in the same context receive the same `id`, so a connector that keys provider resources on `id` must tolerate repeated calls with the same value.
+
 `tools` replaces the framework's default model-facing tool list for this sandbox. Omit it for the standard filesystem and shell tools.
 
 ### `SessionToolFactory`

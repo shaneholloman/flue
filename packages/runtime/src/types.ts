@@ -868,6 +868,16 @@ export type SessionToolFactory = (
 
 /** Wraps external sandboxes (Daytona, CF Containers, etc.) into Flue's SessionEnv. */
 export interface SandboxFactory {
+	/**
+	 * Called once per initialized harness — one call per `init()` — and every
+	 * session and task session of that harness shares the returned env.
+	 *
+	 * `id` is the context id (`ctx.id`): the agent instance id for direct
+	 * agent requests, or the workflow run id inside a workflow. Multiple
+	 * harnesses initialized in the same context receive the same `id`, so a
+	 * connector that keys provider resources on `id` must tolerate repeated
+	 * calls with the same value.
+	 */
 	createSessionEnv(options: { id: string }): Promise<SessionEnv>;
 	/** Replaces the framework default tool list for this sandbox. */
 	tools?: SessionToolFactory;
