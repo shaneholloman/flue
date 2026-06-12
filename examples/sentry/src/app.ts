@@ -208,7 +208,7 @@ function flueCorrelationTags(event: FlueEvent): Record<string, string> {
 	if (event.operationId) tags['flue.operation_id'] = event.operationId;
 	if (event.taskId) tags['flue.task_id'] = event.taskId;
 	if (event.type === 'run_start') {
-		const ownerTags = { 'flue.workflow': event.owner.workflowName };
+		const ownerTags = { 'flue.workflow': event.workflowName };
 		Object.assign(tags, ownerTags);
 		runOwnerTags.set(event.runId, ownerTags);
 	}

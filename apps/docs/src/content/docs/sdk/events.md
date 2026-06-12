@@ -16,8 +16,7 @@ lastReviewedAt: 2026-06-02
 
 | Type                 | Description                                                                                     |
 | -------------------- | ----------------------------------------------------------------------------------------------- |
-| `RunOwner`           | Workflow identity recorded for a run.                                                           |
-| `RunRecord`          | Persisted workflow-run record, including status, timestamps, payload, result, and error fields. |
+| `RunRecord`          | Persisted workflow-run record, including the workflow name, status, timestamps, payload, result, and error fields. |
 | `RunPointer`         | Workflow-run summary returned by admin listing routes.                                          |
 | `RunStatus`          | Workflow-run status: `'active'`, `'completed'`, or `'errored'`.                                 |
 | `AgentManifestEntry` | Agent discovery metadata returned by the read-only admin route.                                 |
