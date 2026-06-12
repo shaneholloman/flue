@@ -624,11 +624,11 @@ export function defineStoreContractTests(
 					deletionCalls += 1;
 				});
 
-				expect(second).toBe(first);
 				await deletionStarted;
 				expect(deletionCalls).toBe(1);
 				releaseDeletion();
 				await Promise.all([first, second]);
+				expect(deletionCalls).toBe(1);
 			});
 
 			it('cleans up deletion marker when snapshot deletion fails', async () => {

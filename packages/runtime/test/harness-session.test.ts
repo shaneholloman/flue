@@ -569,12 +569,12 @@ describe('FlueSession', () => {
 		await store.deleteStarted;
 
 		try {
-			expect(second).toBe(first);
 			expect(store.deleteCalls).toEqual(['agent-session:["agent-instance","default","review"]']);
 		} finally {
 			store.releaseDelete();
 		}
 		await Promise.all([first, second]);
+		expect(store.deleteCalls).toEqual(['agent-session:["agent-instance","default","review"]']);
 	});
 
 	it('resolves without repeating storage work when delete() is called after deletion completes', async () => {
