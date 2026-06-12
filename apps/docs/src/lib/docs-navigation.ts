@@ -158,15 +158,6 @@ export const docsSections: DocsSection[] = [
 							{ title: 'stream(...)', slug: 'sdk/runs', anchor: 'clientrunsstream' },
 						],
 					},
-					{
-						title: 'client.admin',
-						slug: 'sdk/admin',
-						items: [
-							{ title: 'agents.list()', slug: 'sdk/admin', anchor: 'clientadminagentslist' },
-							{ title: 'runs.list(...)', slug: 'sdk/admin', anchor: 'clientadminrunslist' },
-							{ title: 'runs.get(...)', slug: 'sdk/admin', anchor: 'clientadminrunsget' },
-						],
-					},
 					{ title: 'Events and records', slug: 'sdk/events' },
 				{ title: 'Errors', slug: 'sdk/errors' },
 				],

@@ -159,10 +159,11 @@ When a workflow is invoked through a running application, its `runId` lets you i
 | ------------------------------------------------- | ----------------------------------------------------------------------- |
 | `flue logs <runId>`                               | Inspect or follow events for a workflow run from the command line.      |
 | `GET /runs/<runId>`                               | Stream run events via the Durable Streams protocol.                     |
-| `client.runs.get()`, `.events()`, and `.stream()` | Build application tooling around a known workflow run. `runs.get()` requires the admin mount. |
-| `client.admin.runs.list()`                        | List workflow runs for protected administrative tooling.                |
+| `GET /runs/<runId>?meta`                          | Read the workflow-run record as plain JSON.                             |
+| `client.runs.get()`, `.events()`, and `.stream()` | Build application tooling around a known workflow run.                  |
+| `listRuns()` from `@flue/runtime`                 | List workflow runs from your own protected server-side endpoints. See [compose your own admin endpoints](/docs/api/routing-api/#compose-your-own-admin-endpoints). |
 
-Administrative run listing can reveal workflow payloads, results, model activity, and application logs. Only publish an administrative listing surface behind an authorization boundary appropriate for that data.
+Run listing can reveal workflow payloads, results, model activity, and application logs. Only publish a listing surface behind an authorization boundary appropriate for that data.
 
 Only workflows create workflow runs. Direct HTTP prompts to an agent instance, and asynchronous input delivered through `dispatch(...)`, are operations in persistent agent sessions; they are not queried through workflow run history or `flue logs`.
 

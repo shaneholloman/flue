@@ -49,43 +49,31 @@ Creates a mountable Hono sub-app for Flue's public HTTP API. Routes are relative
 | `HEAD /agents/:name/:id`   | Return agent stream metadata (tail offset, closed status).           |
 | `POST /workflows/:name`    | Start an HTTP-exposed workflow run.                                  |
 | `GET /runs/:runId`         | Stream workflow-run events via the Durable Streams protocol.         |
+| `GET /runs/:runId?meta`    | Retrieve the workflow-run record as plain JSON.                      |
 | `HEAD /runs/:runId`        | Return run stream metadata (tail offset, closed status).             |
 
 Agent and workflow invocation routes are available only when the corresponding module exports a `route` handler. Run routes inspect workflow runs only and are available beneath `flue()` after a run is admitted, regardless of whether that workflow exposes HTTP invocation. They may expose payloads, results, errors, and events. Applications publishing them should authorize access to the selected run. Direct agent prompts and dispatched agent inputs are not runs.
 
 `POST /agents/:name/:id?wait=result` waits for the terminal result and returns `200 { result, streamUrl, offset }`. Without `?wait=result`, the same route returns `202 { streamUrl, offset }` after admission. `POST /workflows/:name?wait=result` similarly waits for the workflow result; without it, the route returns `202 { runId }`.
 
-## `admin()`
+`GET /runs/:runId?meta` selects the run-record view of the run resource: the persisted record (`runId`, `workflowName`, `status`, timestamps, `payload`, `result`, `error`) as a plain JSON object. The `?meta` response carries no Durable Streams headers, and stream parameters (`offset`, `live`) are ignored on this view. Both views of `/runs/:runId` are guarded by the same workflow `route` middleware: if a caller can read the run's event stream, it can read the run record.
 
-```ts
-function admin(): Hono;
-```
+## Compose your own admin endpoints
 
-Creates a mountable Hono sub-app for read-only deployment inspection. Mount it explicitly beneath an application-chosen prefix and protect that mount with application-owned authorization.
+Flue ships no admin HTTP surface. Build deployment-inspection endpoints from the server-side primitives exported by `@flue/runtime` — [`listRuns()`, `getRun()`, and `listAgents()`](/docs/api/data-persistence-api/#inspection-primitives) — behind your own authorization:
 
 ```ts title="src/app.ts"
-import { admin, flue } from '@flue/runtime/routing';
-import { Hono, type MiddlewareHandler } from 'hono';
-import { authenticateOperator } from './auth.ts';
-
-const requireOperator: MiddlewareHandler = async (c, next) => {
-  if (!(await authenticateOperator(c.req.raw))) {
-    return c.json({ error: 'Unauthorized' }, 401);
-  }
-
-  await next();
-};
+import { listAgents, listRuns } from '@flue/runtime';
+import { flue } from '@flue/runtime/routing';
+import { Hono } from 'hono';
+import { requireOperator } from './auth.ts';
 
 const app = new Hono();
 app.route('/', flue());
 app.use('/admin/*', requireOperator);
-app.route('/admin', admin());
+app.get('/admin/agents', async (c) => c.json(await listAgents()));
+app.get('/admin/runs', async (c) => c.json(await listRuns({ limit: 100 })));
 export default app;
 ```
 
-| Route               | Purpose                                                                |
-| ------------------- | ---------------------------------------------------------------------- |
-| `GET /openapi.json` | Return the administrative OpenAPI document.                            |
-| `GET /agents`       | List all built agents and their transport metadata without pagination. |
-| `GET /runs`         | List workflow run summaries.                                           |
-| `GET /runs/:runId`  | Retrieve a workflow run record.                                        |
+The endpoints, their shapes, and their authorization are application-owned — add filters, pagination params, or projections as your operators need them.

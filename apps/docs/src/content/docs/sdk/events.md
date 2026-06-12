@@ -12,15 +12,12 @@ lastReviewedAt: 2026-06-02
 
 `AttachedAgentEvent` is emitted by direct interactions with persistent agent instances. It excludes workflow-run lifecycle events, requires `instanceId`, and does not include `runId`.
 
-## Run and discovery types
+## Run types
 
 | Type                 | Description                                                                                     |
 | -------------------- | ----------------------------------------------------------------------------------------------- |
 | `RunRecord`          | Persisted workflow-run record, including the workflow name, status, timestamps, payload, result, and error fields. |
-| `RunPointer`         | Workflow-run summary returned by admin listing routes.                                          |
 | `RunStatus`          | Workflow-run status: `'active'`, `'completed'`, or `'errored'`.                                 |
-| `AgentManifestEntry` | Agent discovery metadata returned by the read-only admin route.                                 |
-| `ListResponse<T>`    | Cursor-paginated response with `items` and optional `nextCursor`.                               |
 
 ## Normalized model-turn types
 

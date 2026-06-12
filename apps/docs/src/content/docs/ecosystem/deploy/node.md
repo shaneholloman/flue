@@ -265,9 +265,9 @@ The default root-mounted Flue application can expose:
 - `POST /agents/:name/:id` — send an attached prompt to an agent module that exports `route`;
 - `GET /agents/:name/:id` — stream agent events via the Durable Streams protocol;
 - `POST /workflows/:name` — invoke a workflow module that exports `route`;
-- `GET /runs/:runId` — stream workflow-run events via the Durable Streams protocol.
+- `GET /runs/:runId` — stream workflow-run events via the Durable Streams protocol (`?meta` reads the run record).
 
-Flue does not add a health endpoint or administrative agent listing by default. Define a host-required health route in `app.ts`, and mount `admin()` separately behind operator authorization if deployment-wide inspection is required. Agent prompt routes advance sessions without creating runs; workflow invocations are the executions represented by workflow run IDs and inspectable through run tooling.
+Flue does not add a health endpoint or deployment-inspection routes by default. Define a host-required health route in `app.ts`, and [compose your own admin endpoints](/docs/api/routing-api/#compose-your-own-admin-endpoints) behind operator authorization if deployment-wide inspection is required. Agent prompt routes advance sessions without creating runs; workflow invocations are the executions represented by workflow run IDs and inspectable through run tooling.
 
 ### Deploying with Docker
 

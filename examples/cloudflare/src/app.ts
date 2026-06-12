@@ -56,9 +56,11 @@ app.get('/api/ping', (c) => c.json({ pong: true, at: new Date().toISOString() })
 // the appropriate generated per-agent Durable Object binding.
 app.route('/', flue());
 
-// To expose admin endpoints, import `admin` from `@flue/runtime/routing`, then
-// uncomment this and add your own auth middleware first:
+// To expose deployment-inspection endpoints, compose them from the
+// `listRuns`/`getRun`/`listAgents` primitives exported by `@flue/runtime`,
+// behind your own auth middleware:
 // app.use('/admin/*', myAuthMiddleware);
-// app.route('/admin', admin());
+// app.get('/admin/agents', async (c) => c.json(await listAgents()));
+// app.get('/admin/runs', async (c) => c.json(await listRuns({ limit: 100 })));
 
 export default app;

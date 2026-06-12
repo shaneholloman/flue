@@ -35,7 +35,7 @@ export type CloudflareRunIndex = Pick<RunStore, 'lookupRun' | 'listRuns'>;
 
 /**
  * Request-scoped client for the `FlueRegistry` index DO, used by the outer
- * worker for `/runs/:runId` lookups and admin run listing.
+ * worker for `/runs/:runId` lookups and `listRuns()`.
  */
 export function createCloudflareRunIndex(
 	namespace: FlueRegistryNamespace | undefined,

@@ -11,7 +11,7 @@ Run APIs inspect workflow runs only. Direct agent prompts and dispatched agent i
 get(runId: string): Promise<RunRecord>;
 ```
 
-Retrieves one workflow-run record from the admin mount path.
+Retrieves one workflow-run record via the public `GET /runs/:runId?meta` view. The record is guarded by the same workflow `route` middleware as the run's event stream.
 
 ## `client.runs.events(...)`
 

@@ -23,7 +23,8 @@ const client = createFlueClient({
 - [`client.agents`](/docs/sdk/agents/) invokes persistent agent instances and streams their events.
 - [`client.workflows`](/docs/sdk/workflows/) starts workflow runs.
 - [`client.runs`](/docs/sdk/runs/) inspects and streams workflow runs.
-- [`client.admin`](/docs/sdk/admin/) reads agent discovery metadata and workflow-run records from an explicitly mounted admin route.
+
+Deployment-wide listing (all runs, all agents) is a server-side concern: compose your own endpoints from the `listRuns()`, `getRun()`, and `listAgents()` primitives exported by `@flue/runtime`. See [compose your own admin endpoints](/docs/api/routing-api/#compose-your-own-admin-endpoints).
 
 ## Shared types
 

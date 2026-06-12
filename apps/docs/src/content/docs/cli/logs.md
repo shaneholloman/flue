@@ -39,7 +39,7 @@ Runs are workflow-only. Direct HTTP agent prompts and dispatched agent inputs ar
 | `--limit <n>`                     | Unlimited                        | Limit emitted events. Applied client-side in both replay and follow modes.                                                |
 | `--format <pretty\|json\|ndjson>` | `pretty`                         | Select human-readable or line-delimited JSON output.                                                                      |
 
-When neither follow option is passed, `flue logs` queries the admin endpoint to determine run status: active runs are followed, terminal runs are replayed once. The selected server must publish the admin mount used by the CLI, usually `/admin`; otherwise automatic follow selection fails before reading the stream. Use `--follow` or `--no-follow` when only the public `flue()` mount is available.
+When neither follow option is passed, `flue logs` reads the run record from the public `GET /runs/<runId>?meta` view to determine run status: active runs are followed, terminal runs are replayed once. The record and the event stream are served by the same public `flue()` mount behind the same middleware, so no extra mount or option is required.
 
 Run routes may expose sensitive payloads, results, errors, and events. Use repeatable `--header 'Name: value'` options to forward credentials required by application-owned middleware. Use the final HTTPS URL for remote servers to avoid credential exposure via redirects. `flue logs` rejects duplicate header names and the protocol-reserved `Accept` header.
 

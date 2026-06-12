@@ -140,7 +140,7 @@ interface RunStore {
 }
 ```
 
-The run store persists workflow-run records and serves run lookup and listing for `/runs`, `flue logs`, and administrative routes. Event payloads live in `EventStreamStore`. Agent prompts and dispatched agent input do not create workflow runs.
+The run store persists workflow-run records and serves run lookup and listing for `/runs`, `flue logs`, and the [inspection primitives](#inspection-primitives). Event payloads live in `EventStreamStore`. Agent prompts and dispatched agent input do not create workflow runs.
 
 | Method | Contract |
 | --- | --- |
@@ -151,6 +151,18 @@ The run store persists workflow-run records and serves run lookup and listing fo
 | `listRuns()` | List run pointers newest first (`startedAt` descending, then `runId` descending), filtered by `status`/`workflowName` and paginated via the opaque `nextCursor`. |
 
 Single-database adapters back all five methods from one run-records table; pointers are a column-subset select. Verify a custom implementation with `defineRunStoreContractTests` from `@flue/runtime/test-utils`.
+
+## Inspection primitives
+
+```ts
+import { getRun, listAgents, listRuns } from '@flue/runtime';
+
+function listRuns(options?: ListRunsOpts): Promise<ListRunsResponse>;
+function getRun(runId: string): Promise<RunRecord | null>;
+function listAgents(): Promise<AgentManifestEntry[]>;
+```
+
+Server-side free functions for application code running inside a Flue-built server. Like `dispatch(...)`, they read the generated runtime: `listRuns()` and `getRun()` read the configured run store, and `listAgents()` returns the built agents (`{ name, transports, created }`) from the deployment manifest. Use them to [compose your own admin endpoints](/docs/api/routing-api/#compose-your-own-admin-endpoints) behind application-owned authorization — Flue ships no inspection HTTP surface of its own.
 
 ## `EventStreamStore`
 

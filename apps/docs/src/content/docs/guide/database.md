@@ -22,7 +22,7 @@ Flue discovers `db.ts` at build time and wires the exported `PersistenceAdapter`
 - agent session snapshots;
 - accepted direct prompts and `dispatch(...)` submissions;
 - workflow-run records and events;
-- workflow-run indexing for `/runs` and administrative listing.
+- workflow-run indexing for `/runs` lookups and `listRuns()`.
 
 Without `db.ts`, the Node target keeps all of this state — sessions, submissions, run records, and run indexing — in in-memory SQLite. That gives one running process ordered state handling, but all of that state disappears when the process exits.
 
@@ -73,7 +73,7 @@ A Flue database stores runtime state, not your whole application.
 | Agent session messages and compaction state | Sandbox files and installed dependencies |
 | Accepted direct prompts and `dispatch(...)` submissions | External API side effects |
 | Workflow-run records and persisted events | Application-owned business data unless your own tools store it |
-| Run indexing for `/runs` and admin listing | Provider credentials or secrets |
+| Run indexing for `/runs` lookups and `listRuns()` | Provider credentials or secrets |
 
 A persisted session does not make a sandbox durable. A durable workspace does not preserve conversation history by itself. Keep customer records, payments, tickets, and other business data in your own application database or external system.
 
