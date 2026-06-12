@@ -678,6 +678,14 @@ leaseExpiresAt: 1,
 		expect(claimed).toBeTruthy();
 		if (!claimed) throw new Error('Expected claimed submission.');
 
+			// Mark input applied: journal-attempt replacement only happens after
+			// input application, and pre-input exhaustion settles with its own
+			// interrupted-before-input error instead of this message.
+			await store.submissions.markSubmissionInputApplied({
+				submissionId: input.dispatchId,
+				attemptId: 'attempt-0',
+			});
+
 			// Create a journal so replaceTurnJournalAttempt can work.
 			await store.submissions.beginTurnJournal({
 				submissionId: input.dispatchId,
@@ -725,6 +733,56 @@ leaseExpiresAt: 1,
 			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
 			expect(submission).toMatchObject({ status: 'settled' });
 			expect(submission?.error).toContain('exceeded maximum recovery attempts');
+		});
+
+		it('terminalizes with an interrupted-before-input error when repeated pre-input requeue cycles exhaust the budget', async () => {
+			const dbPath = createTempDbPath();
+			const provider = createFauxProvider();
+			const store = await openExecutionStore(dbPath);
+
+			const input = makeDispatchInput();
+			await store.submissions.admitDispatch(input);
+
+			// Simulate repeated pre-input interruption cycles: each restart
+			// claims the submission (incrementing attemptCount), is interrupted
+			// before input application, and reconciliation requeues it. Default
+			// maxAttempts is 10 — nine full cycles plus a final interrupted
+			// claim exhaust the budget without input ever being applied.
+			for (let i = 0; i < 9; i++) {
+				const attemptId = `attempt-preinput-${i}`;
+				const claimed = await store.submissions.claimSubmission({
+					submissionId: input.dispatchId,
+					attemptId,
+					ownerId: 'test-owner',
+					leaseExpiresAt: 1,
+				});
+				expect(claimed).toBeTruthy();
+				const requeued = await store.submissions.requeueSubmissionBeforeInputApplied({
+					submissionId: input.dispatchId,
+					attemptId,
+				});
+				expect(requeued).toBe(true);
+			}
+			const finalClaim = await store.submissions.claimSubmission({
+				submissionId: input.dispatchId,
+				attemptId: 'attempt-preinput-final',
+				ownerId: 'test-owner',
+				leaseExpiresAt: 1,
+			});
+			expect(finalClaim?.attemptCount).toBeGreaterThanOrEqual(finalClaim?.maxRetry ?? 0);
+
+			// "Restart": reconciliation terminalizes — and the terminal error
+			// must say the submission was interrupted before input application,
+			// not that recovery attempts were exhausted (no provider work ever
+			// started, so there was nothing to recover).
+			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
+			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
+			await coordinator.reconcileSubmissions();
+
+			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
+			expect(submission).toMatchObject({ status: 'settled' });
+			expect(submission?.error).toContain('interrupted before input application');
+			expect(submission?.error).not.toContain('exceeded maximum recovery attempts');
 		});
 
 		it('settles a completed canonical response as success when the retry budget is exhausted', async () => {

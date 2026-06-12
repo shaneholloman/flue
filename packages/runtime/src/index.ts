@@ -13,6 +13,7 @@ export {
 	SessionNotFoundError,
 	SkillNotRegisteredError,
 	SubagentNotDeclaredError,
+	SubmissionInterruptedError,
 	SubmissionTimeoutError,
 	TaskDepthExceededError,
 	ToolInputValidationError,

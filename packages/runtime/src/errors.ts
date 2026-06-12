@@ -634,6 +634,32 @@ export class OperationFailedError extends FlueError {
 	}
 }
 
+/**
+ * A durable submission exhausted its retry budget before its input was ever
+ * applied: every attempt was interrupted (process crash, restart, or
+ * shutdown) while the submission was claimed but unstarted. Thrown by
+ * reconciliation in place of the generic retry-exhaustion error, which would
+ * misdescribe the failure — no provider work happened, so there was nothing
+ * to "recover". The shared `attemptCount`/`maxAttempts` budget is
+ * intentional; only the terminal vocabulary distinguishes the pre-input case.
+ */
+export class SubmissionInterruptedError extends FlueError {
+	constructor({ attemptCount, maxAttempts }: { attemptCount: number; maxAttempts: number }) {
+		super({
+			type: 'submission_interrupted',
+			message: 'Submission was repeatedly interrupted before input application and exhausted its retry budget.',
+			details:
+				'Every processing attempt was interrupted before the submission input was applied to the session. ' +
+				'The input was never processed and no model call was started.',
+			dev:
+				'Repeated pre-input interruptions usually mean the process kept restarting or crashing while the ' +
+				"submission waited to start. Each claim consumes one attempt from the agent definition's " +
+				'`durability.maxAttempts` budget.',
+			meta: { attemptCount, maxAttempts },
+		});
+	}
+}
+
 /** A durable submission exceeded its configured processing timeout. */
 export class SubmissionTimeoutError extends FlueError {
 	constructor() {

@@ -6,6 +6,7 @@ import type {
 } from '../agent-execution-store.ts';
 import { SUBMISSION_SESSION_NAME } from '../adapter-helpers.ts';
 import type { FlueContextInternal } from '../client.ts';
+import { SubmissionInterruptedError } from '../errors.ts';
 import { getInternalSession } from '../session.ts';
 import type {
 	AttachedAgentEvent,
@@ -332,11 +333,22 @@ export async function reconcileInterruptedSubmission(
 		return { disposition: 'completed', result: inspected.result };
 	}
 
-	// Check retry budget.
+	// Check retry budget. Pre-input exhaustion gets its own terminal error:
+	// when the input was never applied, every attempt was consumed by a
+	// claim/interruption cycle (crash, restart, or shutdown) before any
+	// provider work started, so "exceeded maximum recovery attempts" would
+	// misdescribe work that never happened. The shared budget itself is
+	// intentional — only the message distinguishes the case.
 	if (submission.attemptCount >= submission.maxRetry) {
-		const error = new Error(
-			`[flue] Agent submission exceeded maximum recovery attempts (${submission.attemptCount}/${submission.maxRetry}).`,
-		);
+		const error =
+			submission.inputAppliedAt === undefined
+				? new SubmissionInterruptedError({
+						attemptCount: submission.attemptCount,
+						maxAttempts: submission.maxRetry,
+					})
+				: new Error(
+						`[flue] Agent submission exceeded maximum recovery attempts (${submission.attemptCount}/${submission.maxRetry}).`,
+					);
 		return failInterruptedSubmission(
 			submissions, submission, attempt, agent, 'exhausted_retry_budget', error, createContext,
 		);
