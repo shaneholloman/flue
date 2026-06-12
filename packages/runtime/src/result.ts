@@ -265,7 +265,7 @@ function needsEnvelope(schema: v.GenericSchema): boolean {
 	// Valibot's runtime `type` discriminator. Tool parameters must be an
 	// object at the top level; anything else gets wrapped in `{ result: ... }`.
 	const type = (schema as { type?: string }).type;
-	return type !== 'object';
+	return !['object', 'strict_object', 'loose_object', 'object_with_rest'].includes(type ?? '');
 }
 
 function stripJsonSchemaMeta(jsonSchema: Record<string, unknown>): Record<string, unknown> {

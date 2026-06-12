@@ -99,6 +99,22 @@ describe('structured operation results', () => {
 		}
 	});
 
+	it('accepts an unwrapped payload when the result schema is a strictObject', async () => {
+		const provider = createProvider();
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('finish', { verdict: 'approved' }), {
+				stopReason: 'toolUse',
+			}),
+		]);
+		const session = await createSession(provider);
+
+		const response = await session.prompt('Review the request.', {
+			result: v.strictObject({ verdict: v.string() }),
+		});
+
+		expect(response.data).toEqual({ verdict: 'approved' });
+	});
+
 	it('returns validated scalar data when a structured result schema is not an object', async () => {
 		const provider = createProvider();
 		provider.setResponses([
