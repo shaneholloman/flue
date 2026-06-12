@@ -546,9 +546,6 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, SimpleSt
 			if (options?.signal?.aborted) {
 				throw new Error('Request was aborted');
 			}
-			if (output.stopReason === 'aborted') {
-				throw new Error('Request was aborted');
-			}
 			if (output.stopReason === 'error') {
 				throw new Error(output.errorMessage ?? 'Provider returned an error stop reason');
 			}
@@ -556,7 +553,17 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, SimpleSt
 				throw new Error('Stream ended without finish_reason');
 			}
 
-			stream.push({ type: 'done', reason: output.stopReason, message: output });
+			// `aborted` is statically possible on AssistantMessage but unreachable
+			// here: only the catch handler assigns it (mapStopReason never returns
+			// it), and `error` was thrown above.
+			stream.push({
+				type: 'done',
+				reason: output.stopReason as Extract<
+					AssistantMessage['stopReason'],
+					'stop' | 'length' | 'toolUse'
+				>,
+				message: output,
+			});
 			stream.end();
 		} catch (error) {
 			// Cancel an unconsumed body so workerd doesn't keep the underlying AI
