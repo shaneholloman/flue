@@ -38,6 +38,14 @@ const channels: DirectoryItem[] = [
 ];
 channels.sort(sortDirectoryItems);
 
+const deploy: DirectoryItem[] = [
+	{ name: 'Cloudflare', href: '/docs/ecosystem/deploy/cloudflare/', icon: 'https://svgl.app/library/cloudflare.svg', background: '#ffffff', keywords: 'workers' },
+	{ name: 'GitHub Actions', href: '/docs/ecosystem/deploy/github-actions/', icon: 'https://svgl.app/library/github_light.svg', background: '#181717', iconClass: 'invert', keywords: 'ci cd' },
+	{ name: 'GitLab CI/CD', href: '/docs/ecosystem/deploy/gitlab-ci/', icon: 'https://svgl.app/library/gitlab.svg', background: '#ffffff', keywords: 'ci cd' },
+	{ name: 'Render', href: '/docs/ecosystem/deploy/render/', icon: 'https://svgl.app/library/render_black.svg', background: '#ffffff', iconClass: 'ecosystem-logo-large', keywords: 'hosting node' },
+];
+deploy.sort(sortDirectoryItems);
+
 const sandboxes: DirectoryItem[] = [
 	{ name: 'boxd', href: '/docs/ecosystem/sandboxes/boxd/', mark: 'b', background: '#121212' },
 	{ name: 'Cloudflare Sandbox', href: '/docs/ecosystem/sandboxes/cloudflare/', icon: 'https://svgl.app/library/cloudflare.svg', background: '#ffffff' },
@@ -56,7 +64,7 @@ sandboxes.sort(sortDirectoryItems);
 
 <DocsLayout
 	title="Ecosystem"
-	description="Browse channels and sandbox connectors for Flue applications."
+	description="Browse deployment guides, channels, and sandbox connectors for Flue applications."
 	currentSlug="ecosystem"
 	headings={[]}
 	showTableOfContents={false}
@@ -65,7 +73,7 @@ sandboxes.sort(sortDirectoryItems);
 	<div class="ecosystem-directory">
 		<header class="mb-4">
 			<h1 class="m-0 text-5xl font-bold leading-[1.08] tracking-[-0.05em] text-gray-950 max-docs-desktop:text-[2.375rem]">Ecosystem</h1>
-			<p class="mt-4 max-w-175 text-base leading-7 text-gray-600">Extend your Flue applications with channels, sandbox environments, and the tools your agents already use.</p>
+			<p class="mt-4 max-w-175 text-base leading-7 text-gray-600">Deploy Flue applications and extend them with channels, sandbox environments, and the tools your agents already use.</p>
 		</header>
 
 		<label class="relative mb-14 block" for="ecosystem-search">
@@ -104,6 +112,22 @@ sandboxes.sort(sortDirectoryItems);
 								) : (
 									<span class="ecosystem-mark">{item.mark}</span>
 								)}
+							</span>
+							<span class="ecosystem-name">{item.name}</span>
+						</a>
+					</li>
+				))}
+			</ul>
+		</section>
+
+		<section class="ecosystem-section mb-14" data-ecosystem-section>
+			<h2 id="deploy" class="mb-6 scroll-mt-20 text-3xl font-semibold tracking-[-0.03em] text-gray-950">Deploy</h2>
+			<ul class="ecosystem-grid ecosystem-grid-left" role="list">
+				{deploy.map((item) => (
+					<li data-ecosystem-item data-search={`${item.name} ${item.keywords ?? ''}`.toLowerCase()}>
+						<a class="ecosystem-item group" href={item.href} aria-label={item.name}>
+							<span class="ecosystem-icon" style={`--ecosystem-icon-bg: ${item.background}`}>
+								<img class:list={['ecosystem-logo', item.iconClass]} src={item.icon} alt="" loading="lazy" />
 							</span>
 							<span class="ecosystem-name">{item.name}</span>
 						</a>
@@ -210,7 +234,8 @@ sandboxes.sort(sortDirectoryItems);
 		list-style: none;
 	}
 
-	.ecosystem-grid.is-filtering {
+	.ecosystem-grid.is-filtering,
+	.ecosystem-grid-left {
 		justify-content: start;
 	}
 
@@ -259,6 +284,11 @@ sandboxes.sort(sortDirectoryItems);
 
 	.ecosystem-logo.invert {
 		filter: invert(1);
+	}
+
+	.ecosystem-logo.ecosystem-logo-large {
+		width: 70%;
+		height: 70%;
 	}
 
 	.ecosystem-logo.monochrome-white {

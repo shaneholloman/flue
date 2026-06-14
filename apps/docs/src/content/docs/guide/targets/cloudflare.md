@@ -1,5 +1,5 @@
 ---
-title: Cloudflare Target
+title: Cloudflare
 description: Understand the Cloudflare-specific runtime behavior and APIs for Flue applications.
 ---
 

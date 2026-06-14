@@ -62,7 +62,7 @@ A shared Postgres database is the right choice when another Node process must re
 
 On Cloudflare, generated agent and workflow Durable Objects use SQLite automatically. Agent session history, accepted submissions, and workflow-run records are stored in Durable Object SQLite; run indexing is stored in Flue's generated `FlueRegistry` Durable Object. No `db.ts` file is needed, and Cloudflare builds reject one if present.
 
-Cloudflare Durable Objects also provide the ownership boundary for agent execution: one agent instance owns its own ordered submission queue. See [Cloudflare Target](/docs/guide/targets/cloudflare/) for generated Durable Object behavior and [Deploy Agents on Cloudflare](/docs/ecosystem/deploy/cloudflare/) for Wrangler migrations.
+Cloudflare Durable Objects also provide the ownership boundary for agent execution: one agent instance owns its own ordered submission queue. See [Cloudflare](/docs/guide/targets/cloudflare/) for generated Durable Object behavior and [Deploy Agents on Cloudflare](/docs/ecosystem/deploy/cloudflare/) for Wrangler migrations.
 
 ## What the database stores
 

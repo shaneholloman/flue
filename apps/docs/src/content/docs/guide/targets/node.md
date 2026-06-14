@@ -1,5 +1,5 @@
 ---
-title: Node.js Target
+title: Node.js
 description: Understand the Node.js-specific runtime behavior and APIs for Flue applications.
 ---
 

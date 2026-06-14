@@ -61,13 +61,10 @@ export const docsSections: DocsSection[] = [
 				items: [{ title: 'React', slug: 'guide/react' }],
 			},
 			{
-				title: 'Build & Deploy',
+				title: 'Targets',
 				items: [
 					{ title: 'Cloudflare', slug: 'guide/targets/cloudflare' },
 					{ title: 'Node.js', slug: 'guide/targets/node' },
-					{ title: 'GitHub Actions', slug: 'ecosystem/deploy/github-actions' },
-					{ title: 'GitLab CI/CD', slug: 'ecosystem/deploy/gitlab-ci' },
-					{ title: 'Render', slug: 'ecosystem/deploy/render' },
 				],
 			},
 		],
@@ -219,6 +216,15 @@ export const docsSections: DocsSection[] = [
 					{ title: 'Twilio', slug: 'ecosystem/channels/twilio' },
 					{ title: 'WhatsApp', slug: 'ecosystem/channels/whatsapp' },
 					{ title: 'Zendesk', slug: 'ecosystem/channels/zendesk' },
+				],
+			},
+			{
+				title: 'Deploy',
+				items: [
+					{ title: 'Cloudflare', slug: 'ecosystem/deploy/cloudflare' },
+					{ title: 'GitHub Actions', slug: 'ecosystem/deploy/github-actions' },
+					{ title: 'GitLab CI/CD', slug: 'ecosystem/deploy/gitlab-ci' },
+					{ title: 'Render', slug: 'ecosystem/deploy/render' },
 				],
 			},
 			{
