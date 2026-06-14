@@ -27,6 +27,7 @@ https://example.com/channels/telegram/webhook
 import { createTelegramChannel, type TelegramConversationRef } from '@flue/telegram';
 import { defineTool, dispatch } from '@flue/runtime';
 import { Api } from 'grammy';
+import type { Message } from 'grammy/types';
 import assistant from '../agents/assistant.ts';
 
 export const client = new Api(process.env.TELEGRAM_BOT_TOKEN!);
@@ -36,37 +37,57 @@ export const channel = createTelegramChannel({
 
   // Path: /channels/telegram/webhook
   async webhook({ update }) {
-    switch (update.type) {
-      case 'message': {
-        if (!update.conversation || update.kind !== 'message') return;
-        await dispatch(assistant, {
-          id: channel.conversationKey(update.conversation),
-          input: {
-            type: 'telegram.message',
-            updateId: update.updateId,
-            message: update.message,
-          },
-        });
-        return;
-      }
-      case 'callback_query': {
-        await client.answerCallbackQuery(update.callback.id);
-        if (!update.conversation) return;
-        await dispatch(assistant, {
-          id: channel.conversationKey(update.conversation),
-          input: {
-            type: 'telegram.callback_query',
-            updateId: update.updateId,
-            data: update.callback.data,
-          },
-        });
-        return;
-      }
-      default:
-        return;
+    const incoming =
+      update.message ?? update.channel_post ?? update.business_message;
+    if (incoming) {
+      await dispatch(assistant, {
+        id: channel.conversationKey(conversationFromMessage(incoming)),
+        input: {
+          type: 'telegram.message',
+          updateId: update.update_id,
+          message: incoming,
+        },
+      });
+      return;
+    }
+
+    if (update.callback_query) {
+      const query = update.callback_query;
+      await client.answerCallbackQuery(query.id);
+      if (!query.message) return;
+      await dispatch(assistant, {
+        id: channel.conversationKey(conversationFromMessage(query.message)),
+        input: {
+          type: 'telegram.callback_query',
+          updateId: update.update_id,
+          data: query.data,
+          from: query.from,
+        },
+      });
+      return;
     }
   },
 });
+
+// Build the canonical destination identity from a native Telegram Message.
+function conversationFromMessage(message: Message): TelegramConversationRef {
+  const topic = {
+    ...(message.message_thread_id === undefined
+      ? {}
+      : { messageThreadId: message.message_thread_id }),
+    ...(message.direct_messages_topic?.topic_id === undefined
+      ? {}
+      : { directMessagesTopicId: message.direct_messages_topic.topic_id }),
+  };
+  return message.business_connection_id
+    ? {
+        type: 'business-chat',
+        businessConnectionId: message.business_connection_id,
+        chatId: message.chat.id,
+        ...topic,
+      }
+    : { type: 'chat', chatId: message.chat.id, ...topic };
+}
 
 export function postMessage(ref: TelegramConversationRef) {
   return defineTool({
@@ -140,15 +161,28 @@ one secret across bots.
 Webhook delivery and `getUpdates` polling are mutually exclusive. Polling is
 outside the HTTP channel package.
 
-## Update behavior
+## Verified inbound
 
-Each delivery contains one Update and invokes the callback once. Known message,
-callback, and reaction families receive typed normalized variants. Other
-verified variants remain available as `type: 'unknown'`.
+Flue owns one job on the inbound side: it verifies the
+`X-Telegram-Bot-Api-Secret-Token` header, enforces the body limit, parses the
+JSON, and forwards a single provider-native Bot API `Update` to your callback.
+There is no parallel normalized model — the update keeps Telegram's own field
+names, nesting, and discriminants. The authoritative type is the
+spec-generated [`@grammyjs/types`](https://github.com/grammyjs/types) `Update`,
+which `@flue/telegram` re-exports (the same type grammY uses).
 
-`updateId` is Telegram's ordering and duplicate-detection key. The package does
-not persist it; claim it in application storage before dispatch when duplicate
-admission is unacceptable.
+Because at most one of an `Update`'s optional fields is present per delivery,
+branch on those fields instead of a discriminant. The example above reads
+`update.message ?? update.channel_post ?? update.business_message` for incoming
+messages and `update.callback_query` for callbacks; widen the branches to the
+update families your bot enabled in `allowed_updates`. Each native `Message`
+carries its own conversation identity, which `conversationFromMessage` reads to
+build the `TelegramConversationRef`.
+
+Each delivery contains one Update and invokes the callback once.
+`update.update_id` is Telegram's ordering and duplicate-detection key. The
+package does not persist it; claim it in application storage before dispatch
+when duplicate admission is unacceptable.
 
 Telegram retries unsuccessful webhook requests. Returning nothing produces an
 empty `200`. Return JSON to use Telegram's webhook-reply method format, or use
@@ -156,15 +190,17 @@ the Hono context for explicit status control.
 
 ## Conversation identity
 
-Regular chats, business chats, forum threads, and channel direct-message topics
-produce distinct canonical keys. Business identity includes
-`businessConnectionId` because Telegram warns that business chat ids can match
-ordinary bot chat ids.
+`conversationFromMessage` derives a canonical key from the native `Message`:
+regular chats, business chats, forum threads, and channel direct-message topics
+produce distinct keys. Business identity includes `businessConnectionId`
+because Telegram warns that business chat ids can match ordinary bot chat ids,
+and a thread id (`message_thread_id`) and direct-message topic id
+(`direct_messages_topic.topic_id`) are mutually exclusive.
 
-Guest messages are typed but do not expose `conversation`. Their
-`capabilities.guestQueryId` authorizes one short-lived `answerGuestQuery`
-response and must not enter model context, logs, durable session data, or agent
-identity. Inline callback queries likewise omit a conversation when Telegram
-provides no accessible chat message.
+Some native updates have no durable chat destination, so do not build a
+conversation key from them. A guest message's `guest_query_id` authorizes one
+short-lived `answerGuestQuery` response and must not enter model context, logs,
+durable session data, or agent identity. An inline `callback_query` without a
+`message` likewise supplies no accessible chat.
 
 See the [`@flue/telegram` API reference](/docs/api/telegram-channel/).

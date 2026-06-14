@@ -1,3 +1,4 @@
+import type { Update } from '@grammyjs/types';
 import type { Context, Env, Handler } from 'hono';
 import {
 	InvalidTelegramConversationKeyError,
@@ -9,6 +10,15 @@ export {
 	InvalidTelegramConversationKeyError,
 	InvalidTelegramInputError,
 } from './errors.ts';
+
+/**
+ * Provider-native Telegram Bot API `Update`.
+ *
+ * Re-exported from the official, spec-generated `@grammyjs/types` package. At
+ * most one of its optional fields is present per update. Authenticated updates
+ * are forwarded with Telegram's own field names, nesting, and discriminants.
+ */
+export type { Update };
 
 export type JsonValue =
 	| null
@@ -34,29 +44,17 @@ export interface TelegramChannelOptions<E extends Env = Env> {
 	secretToken: string;
 	/** Maximum request-body size in bytes. Defaults to 1 MiB. */
 	bodyLimit?: number;
-	/** Receives one verified Telegram Update per callback. */
+	/** Receives one verified provider-native Telegram Update per callback. */
 	webhook(input: TelegramWebhookHandlerInput<E>): TelegramHandlerResult;
 }
 
-export interface TelegramUserRef {
-	id: number;
-	isBot: boolean;
-	firstName: string;
-	lastName?: string;
-	username?: string;
-	languageCode?: string;
-}
-
-export interface TelegramChatRef {
-	id: number;
-	type: 'private' | 'group' | 'supergroup' | 'channel';
-	title?: string;
-	username?: string;
-	firstName?: string;
-	lastName?: string;
-}
-
-/** Stable Telegram destination suitable for a Flue agent-instance id. */
+/**
+ * Canonical Telegram destination suitable for a Flue agent-instance id.
+ *
+ * This is an identifier, not an authorization capability. A caller able to
+ * choose an agent id by another route must be authorized before its
+ * conversation key is trusted to derive destinations or tools.
+ */
 export type TelegramConversationRef =
 	| {
 			type: 'chat';
@@ -72,143 +70,22 @@ export type TelegramConversationRef =
 			directMessagesTopicId?: number;
 	  };
 
-export interface TelegramCommand {
-	name: string;
-	botUsername?: string;
-	arguments: string;
-	raw: string;
-}
-
-export type TelegramMediaKind =
-	| 'animation'
-	| 'audio'
-	| 'document'
-	| 'live_photo'
-	| 'paid_media'
-	| 'photo'
-	| 'sticker'
-	| 'story'
-	| 'video'
-	| 'video_note'
-	| 'voice';
-
-export interface TelegramMessagePayload {
-	messageId: number;
-	date: number;
-	chat: TelegramChatRef;
-	from?: TelegramUserRef;
-	senderChat?: TelegramChatRef;
-	text?: string;
-	caption?: string;
-	command?: TelegramCommand;
-	messageThreadId?: number;
-	directMessagesTopicId?: number;
-	businessConnectionId?: string;
-	media: readonly TelegramMediaKind[];
-}
-
-export type TelegramMessageKind =
-	| 'message'
-	| 'edited_message'
-	| 'channel_post'
-	| 'edited_channel_post'
-	| 'business_message'
-	| 'edited_business_message'
-	| 'guest_message';
-
-/**
- * Short-lived capability for replying to a Telegram guest query.
- *
- * Never place this value in model context, logs, durable session data, or a
- * conversation key.
- */
-export interface TelegramGuestCapabilities {
-	guestQueryId: string;
-}
-
-export interface TelegramMessageUpdate {
-	type: 'message';
-	kind: TelegramMessageKind;
-	updateId: number;
-	message: TelegramMessagePayload;
-	/**
-	 * Omitted for guest messages because `guestQueryId` is a short-lived reply
-	 * capability rather than a durable chat destination.
-	 */
-	conversation?: TelegramConversationRef;
-	/** Present only for `guest_message` updates. */
-	capabilities?: TelegramGuestCapabilities;
-	/** Complete parsed Update after secret-token verification. */
-	raw: unknown;
-}
-
-export interface TelegramCallbackQueryPayload {
-	id: string;
-	from: TelegramUserRef;
-	chatInstance: string;
-	data?: string;
-	gameShortName?: string;
-	inlineMessageId?: string;
-	message?: TelegramMessagePayload;
-}
-
-export interface TelegramCallbackQueryUpdate {
-	type: 'callback_query';
-	updateId: number;
-	callback: TelegramCallbackQueryPayload;
-	conversation?: TelegramConversationRef;
-	raw: unknown;
-}
-
-export interface TelegramMessageReactionUpdate {
-	type: 'message_reaction';
-	updateId: number;
-	chat: TelegramChatRef;
-	messageId: number;
-	date: number;
-	user?: TelegramUserRef;
-	actorChat?: TelegramChatRef;
-	oldReaction: readonly unknown[];
-	newReaction: readonly unknown[];
-	conversation: TelegramConversationRef;
-	raw: unknown;
-}
-
-export interface TelegramMessageReactionCountUpdate {
-	type: 'message_reaction_count';
-	updateId: number;
-	chat: TelegramChatRef;
-	messageId: number;
-	date: number;
-	reactions: readonly unknown[];
-	conversation: TelegramConversationRef;
-	raw: unknown;
-}
-
-export interface TelegramUnknownUpdate {
-	type: 'unknown';
-	updateId: number;
-	updateType: string;
-	payload: unknown;
-	raw: unknown;
-}
-
-export type TelegramUpdate =
-	| TelegramMessageUpdate
-	| TelegramCallbackQueryUpdate
-	| TelegramMessageReactionUpdate
-	| TelegramMessageReactionCountUpdate
-	| TelegramUnknownUpdate;
-
 type TelegramHandlerValue = undefined | JsonValue | Response;
 
+/**
+ * Returning nothing produces an empty `200`. JSON-compatible values become
+ * JSON responses (and may carry a Bot API method call), and Hono or Fetch
+ * responses pass through unchanged.
+ */
 export type TelegramHandlerResult =
 	| TelegramHandlerValue
 	| Promise<TelegramHandlerValue>;
 
+/** Input for the verified webhook route. */
 export interface TelegramWebhookHandlerInput<E extends Env = Env> {
 	c: Context<E>;
-	update: TelegramUpdate;
+	/** Verified provider-native Telegram Update. */
+	update: Update;
 }
 
 /** Verified Telegram webhook ingress and canonical identity helpers. */
@@ -223,7 +100,9 @@ export interface TelegramChannel<E extends Env = Env> {
 /**
  * Creates one verified Telegram Bot API webhook route.
  *
- * The channel is stateless and does not deduplicate `update_id` values.
+ * The secret token sent in `X-Telegram-Bot-Api-Secret-Token` is verified
+ * before any parsing-dependent application behavior. The channel is stateless
+ * and does not deduplicate `update_id` values.
  */
 export function createTelegramChannel<E extends Env = Env>(
 	options: TelegramChannelOptions<E>,

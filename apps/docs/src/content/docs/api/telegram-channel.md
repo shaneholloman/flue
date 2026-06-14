@@ -30,23 +30,29 @@ interface TelegramChannelOptions<E extends Env = Env> {
 | ------------- | ----------------------------------------------------------------------------- |
 | `secretToken` | The 1-256 character `secret_token` configured through Telegram `setWebhook`. |
 | `bodyLimit`   | Maximum request body. Default: 1 MiB.                                         |
-| `webhook`     | Callback for one verified normalized Update.                                  |
+| `webhook`     | Callback for one verified provider-native Telegram `Update`.                  |
 
 `secretToken` accepts only Telegram's documented `A-Z`, `a-z`, `0-9`, `_`, and
 `-` characters. It is required by Flue even though Telegram makes the setting
 optional.
 
 ```ts
+interface TelegramWebhookHandlerInput<E extends Env = Env> {
+  c: Context<E>;
+  update: Update;
+}
+
 type TelegramHandlerResult =
-  | void
+  | undefined
   | JsonValue
   | Response
-  | Promise<void | JsonValue | Response>;
+  | Promise<undefined | JsonValue | Response>;
 ```
 
-Returning nothing produces an empty `200`. A JSON-compatible value becomes the
-webhook response body and may use Telegram's webhook-reply method format. An
-ordinary Hono or Fetch `Response` passes through.
+The callback receives the Hono `Context` as `c` and the verified update as
+`update`. Returning nothing produces an empty `200`. A JSON-compatible value
+becomes the webhook response body and may use Telegram's webhook-reply method
+format. An ordinary Hono or Fetch `Response` passes through.
 
 ## `TelegramChannel`
 
@@ -67,33 +73,35 @@ keys are canonical identifiers, not authorization capabilities.
 ## Updates
 
 ```ts
-type TelegramUpdate =
-  | TelegramMessageUpdate
-  | TelegramCallbackQueryUpdate
-  | TelegramMessageReactionUpdate
-  | TelegramMessageReactionCountUpdate
-  | TelegramUnknownUpdate;
+import type { Update } from '@flue/telegram';
 ```
 
-Known `type` values are `message`, `callback_query`, `message_reaction`, and
-`message_reaction_count`. Every update exposes `updateId` and `raw`.
-Unsupported verified variants use `type: 'unknown'` with `updateType` and
-`payload`. `raw` may contain provider capabilities; do not dispatch or persist
-it wholesale.
+The verified `update` is the provider-native Telegram Bot API `Update`,
+re-exported from the official, spec-generated
+[`@grammyjs/types`](https://github.com/grammyjs/types) package — the same shape
+grammY itself uses. `@flue/telegram` does not define a parallel normalized
+model: updates are forwarded with Telegram's own field names, nesting, and
+discriminants.
 
-`TelegramMessageUpdate.kind` distinguishes:
+At most one of an `Update`'s optional fields is present per delivery, so branch
+on those fields directly rather than on a `type` discriminant:
 
-- `message`
-- `edited_message`
-- `channel_post`
-- `edited_channel_post`
-- `business_message`
-- `edited_business_message`
-- `guest_message`
+```ts
+async webhook({ update }) {
+  const incoming =
+    update.message ?? update.channel_post ?? update.business_message;
+  if (incoming) {
+    // incoming is a native Message
+  } else if (update.callback_query) {
+    // update.callback_query is a native CallbackQuery
+  }
+}
+```
 
-Message payloads expose normalized chat and sender references, text or caption,
-the first leading bot command, topic identity, business or guest identifiers,
-and detected media kinds.
+`update.update_id` is Telegram's native ordering and duplicate-detection key.
+The channel validates only the envelope (a JSON object with a non-negative
+`update_id`); the full update is not exhaustively schema-checked. Derive
+conversation identity from the native `Message` (see below).
 
 ## Identity
 
@@ -114,19 +122,21 @@ type TelegramConversationRef =
     };
 ```
 
+`conversationKey()` serializes a `TelegramConversationRef` you derive from a
+native `Message`: read `message.chat.id`, `message.business_connection_id`,
+`message.message_thread_id`, and `message.direct_messages_topic?.topic_id`.
+`parseConversationKey()` is the inverse and accepts only canonical keys.
+
 Regular and business chats remain separate because Telegram permits their chat
-identifiers to overlap. Forum threads and direct-message topics are distinct
-destinations and cannot both be set.
+identifiers to overlap; supply `businessConnectionId` for the `business-chat`
+type. Forum threads and direct-message topics are distinct destinations and
+cannot both be set.
 
-Guest messages omit `conversation`. Their
-`capabilities.guestQueryId` is a short-lived reply capability, not durable
-destination identity. Do not place capabilities in model context, logs,
-durable session data, or conversation keys.
-
-Callback queries expose a conversation only when Telegram includes an
-accessible message. Inline callback queries do not define a durable chat
-destination. Reaction updates use chat-level identity because their payloads do
-not include thread identity.
+Some native updates carry no durable chat destination. A guest message's
+`guest_query_id` is a short-lived `answerGuestQuery` capability, not identity,
+and an inline `callback_query` without a `message` exposes no accessible chat.
+Do not derive a conversation key from either, and do not place such capability
+values in model context, logs, durable session data, or conversation keys.
 
 ## Errors
 

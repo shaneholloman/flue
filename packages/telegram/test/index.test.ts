@@ -9,7 +9,7 @@ import {
 } from '../src/index.ts';
 
 describe('createTelegramChannel()', () => {
-	it('normalizes a verified command message with thread identity', async () => {
+	it('forwards a verified message update with provider-native fields', async () => {
 		const webhook = vi.fn();
 		const telegram = createTelegramChannel({
 			secretToken: 'telegram_secret-42',
@@ -45,46 +45,13 @@ describe('createTelegramChannel()', () => {
 
 		expect(response.status).toBe(200);
 		expect(webhook).toHaveBeenCalledOnce();
-		expect(webhook.mock.calls[0]?.[0]).toMatchObject({
-			c: expect.any(Object),
-			update: {
-				type: 'message',
-				kind: 'message',
-				updateId: 910_201,
-				conversation: {
-					type: 'chat',
-					chatId: -1_001_778_812_345,
-					messageThreadId: 314,
-				},
-				message: {
-					messageId: 77,
-					date: 1_781_100_001,
-					from: {
-						id: 883_001,
-						firstName: 'Mina',
-						lastName: 'Vale',
-						username: 'mina_vale',
-					},
-					chat: {
-						id: -1_001_778_812_345,
-						type: 'supergroup',
-						title: 'Edge Operations',
-					},
-					text: '/triage@FieldBot inspect cache headers',
-					command: {
-						name: 'triage',
-						botUsername: 'FieldBot',
-						arguments: 'inspect cache headers',
-						raw: '/triage@FieldBot',
-					},
-					media: [],
-				},
-				raw,
-			},
-		});
+		// The native Update is passed through unmodified, with Telegram's own
+		// snake_case field names, nesting, and discriminants.
+		expect(webhook.mock.calls[0]?.[0]).toMatchObject({ c: expect.any(Object) });
+		expect(webhook.mock.calls[0]?.[0].update).toEqual(raw);
 	});
 
-	it('keeps business chats distinct from regular chats', async () => {
+	it('forwards business and channel-post updates with their native discriminants', async () => {
 		const updates: unknown[] = [];
 		const telegram = createTelegramChannel({
 			secretToken: 'secret',
@@ -94,76 +61,32 @@ describe('createTelegramChannel()', () => {
 		});
 		const app = channelApp(telegram);
 
-		const regularResponse = await app.request(
-			request(
-				messageUpdate('message', {
-					message_id: 81,
-					date: 1_781_100_010,
-					chat: { id: 445_101, type: 'private', first_name: 'Rhea' },
-					text: 'regular message',
-				}),
-				'secret',
-			),
-		);
-		const businessResponse = await app.request(
-			request(
-				messageUpdate('business_message', {
-					message_id: 82,
-					date: 1_781_100_011,
-					business_connection_id: 'business-cobalt',
-					chat: { id: 445_101, type: 'private', first_name: 'Rhea' },
-					text: 'business message',
-				}),
-				'secret',
-			),
-		);
+		const regular = {
+			update_id: 1,
+			message: {
+				message_id: 81,
+				date: 1_781_100_010,
+				chat: { id: 445_101, type: 'private', first_name: 'Rhea' },
+				text: 'regular message',
+			},
+		};
+		const business = {
+			update_id: 2,
+			business_message: {
+				message_id: 82,
+				date: 1_781_100_011,
+				business_connection_id: 'business-cobalt',
+				chat: { id: 445_101, type: 'private', first_name: 'Rhea' },
+				text: 'business message',
+			},
+		};
 
-		expect(regularResponse.status).toBe(200);
-		expect(businessResponse.status).toBe(200);
-		expect(updates).toMatchObject([
-			{
-				type: 'message',
-				kind: 'message',
-				conversation: { type: 'chat', chatId: 445_101 },
-			},
-			{
-				type: 'message',
-				kind: 'business_message',
-				conversation: {
-					type: 'business-chat',
-					businessConnectionId: 'business-cobalt',
-					chatId: 445_101,
-				},
-			},
-		]);
+		expect((await app.request(request(regular, 'secret'))).status).toBe(200);
+		expect((await app.request(request(business, 'secret'))).status).toBe(200);
+		expect(updates).toEqual([regular, business]);
 	});
 
-	it('normalizes guest messages without creating durable conversation identity', async () => {
-		const webhook = vi.fn();
-		const telegram = createTelegramChannel({ secretToken: 'secret', webhook });
-		const raw = messageUpdate('guest_message', {
-			message_id: 91,
-			date: 1_781_100_020,
-			guest_query_id: 'guest-query-amber',
-			chat: { id: -1_001_001_202_303, type: 'supergroup', title: 'Public Forum' },
-			text: 'Can the bot summarize this topic?',
-		});
-
-		const response = await channelApp(telegram).request(request(raw, 'secret'));
-
-		expect(response.status).toBe(200);
-		expect(webhook.mock.calls[0]?.[0].update).toMatchObject({
-			type: 'message',
-			kind: 'guest_message',
-			capabilities: { guestQueryId: 'guest-query-amber' },
-		});
-		expect(webhook.mock.calls[0]?.[0].update.message).not.toHaveProperty(
-			'guestQueryId',
-		);
-		expect(webhook.mock.calls[0]?.[0].update).not.toHaveProperty('conversation');
-	});
-
-	it('normalizes callback queries with and without chat identity', async () => {
+	it('forwards callback queries, reactions, and an unmodeled update variant unchanged', async () => {
 		const seen: unknown[] = [];
 		const telegram = createTelegramChannel({
 			secretToken: 'secret',
@@ -172,7 +95,8 @@ describe('createTelegramChannel()', () => {
 			},
 		});
 		const app = channelApp(telegram);
-		const messageCallback = {
+
+		const callbackQuery = {
 			update_id: 910_204,
 			callback_query: {
 				id: 'callback-maple',
@@ -187,51 +111,7 @@ describe('createTelegramChannel()', () => {
 				},
 			},
 		};
-		const inlineCallback = {
-			update_id: 910_205,
-			callback_query: {
-				id: 'callback-inline',
-				from: { id: 700_102, is_bot: false, first_name: 'Ivo' },
-				chat_instance: 'chat-instance-inline',
-				game_short_name: 'orbit_runner',
-				inline_message_id: 'inline-message-55',
-			},
-		};
-
-		const messageResponse = await app.request(request(messageCallback, 'secret'));
-		const inlineResponse = await app.request(request(inlineCallback, 'secret'));
-
-		expect(messageResponse.status).toBe(200);
-		expect(inlineResponse.status).toBe(200);
-		expect(seen).toMatchObject([
-			{
-				type: 'callback_query',
-				callback: { id: 'callback-maple', data: 'approve:17' },
-				conversation: { type: 'chat', chatId: 552_004 },
-			},
-			{
-				type: 'callback_query',
-				callback: {
-					id: 'callback-inline',
-					gameShortName: 'orbit_runner',
-					inlineMessageId: 'inline-message-55',
-				},
-			},
-		]);
-		expect(seen[1]).not.toHaveProperty('conversation');
-	});
-
-	it('normalizes individual and aggregate message reactions', async () => {
-		const seen: unknown[] = [];
-		const telegram = createTelegramChannel({
-			secretToken: 'secret',
-			webhook({ update }) {
-				seen.push(update);
-			},
-		});
-		const app = channelApp(telegram);
-
-		const individual = {
+		const reaction = {
 			update_id: 910_206,
 			message_reaction: {
 				chat: { id: -100_778_991, type: 'channel', title: 'Release Notes' },
@@ -242,54 +122,17 @@ describe('createTelegramChannel()', () => {
 				new_reaction: [{ type: 'emoji', emoji: '👍' }],
 			},
 		};
-		const aggregate = {
-			update_id: 910_207,
-			message_reaction_count: {
-				chat: { id: -100_778_991, type: 'channel', title: 'Release Notes' },
-				message_id: 17,
-				date: 1_781_100_045,
-				reactions: [{ type: { type: 'emoji', emoji: '👍' }, total_count: 8 }],
-			},
-		};
-
-		expect((await app.request(request(individual, 'secret'))).status).toBe(200);
-		expect((await app.request(request(aggregate, 'secret'))).status).toBe(200);
-		expect(seen).toMatchObject([
-			{
-				type: 'message_reaction',
-				messageId: 17,
-				user: { id: 900_002 },
-				conversation: { type: 'chat', chatId: -100_778_991 },
-			},
-			{
-				type: 'message_reaction_count',
-				messageId: 17,
-				conversation: { type: 'chat', chatId: -100_778_991 },
-			},
-		]);
-	});
-
-	it('forwards one unsupported verified update variant explicitly', async () => {
-		const webhook = vi.fn();
-		const telegram = createTelegramChannel({ secretToken: 'secret', webhook });
-		const raw = {
+		// A future or otherwise unmodeled discriminant is still forwarded so long
+		// as the envelope carries a valid update_id.
+		const unmodeled = {
 			update_id: 910_208,
-			shipping_query: {
-				id: 'shipping-saffron',
-				invoice_payload: 'order-204',
-			},
+			shipping_query: { id: 'shipping-saffron', invoice_payload: 'order-204' },
 		};
 
-		const response = await channelApp(telegram).request(request(raw, 'secret'));
-
-		expect(response.status).toBe(200);
-		expect(webhook.mock.calls[0]?.[0].update).toEqual({
-			type: 'unknown',
-			updateId: 910_208,
-			updateType: 'shipping_query',
-			payload: raw.shipping_query,
-			raw,
-		});
+		expect((await app.request(request(callbackQuery, 'secret'))).status).toBe(200);
+		expect((await app.request(request(reaction, 'secret'))).status).toBe(200);
+		expect((await app.request(request(unmodeled, 'secret'))).status).toBe(200);
+		expect(seen).toEqual([callbackQuery, reaction, unmodeled]);
 	});
 
 	it('rejects missing or changed secret tokens before application behavior', async () => {
@@ -298,12 +141,15 @@ describe('createTelegramChannel()', () => {
 			secretToken: 'expected_secret',
 			webhook,
 		});
-		const raw = messageUpdate('message', {
-			message_id: 1,
-			date: 1_781_100_050,
-			chat: { id: 42, type: 'private', first_name: 'Kai' },
-			text: 'hello',
-		});
+		const raw = {
+			update_id: 1,
+			message: {
+				message_id: 1,
+				date: 1_781_100_050,
+				chat: { id: 42, type: 'private', first_name: 'Kai' },
+				text: 'hello',
+			},
+		};
 		const app = channelApp(telegram);
 
 		const missing = await app.request(request(raw));
@@ -314,29 +160,12 @@ describe('createTelegramChannel()', () => {
 		expect(webhook).not.toHaveBeenCalled();
 	});
 
-	it('rejects malformed Update envelopes, payloads, media, and oversized bodies', async () => {
+	it('rejects wrong content type, malformed envelopes, and oversized bodies', async () => {
 		const webhook = vi.fn();
 		const telegram = createTelegramChannel({ secretToken: 'secret', webhook });
 		const app = channelApp(telegram);
-		const ambiguous = {
-			update_id: 1,
-			message: {
-				message_id: 1,
-				date: 1,
-				chat: { id: 1, type: 'private', first_name: 'A' },
-			},
-			edited_message: {
-				message_id: 1,
-				date: 1,
-				chat: { id: 1, type: 'private', first_name: 'A' },
-			},
-		};
-		const invalidBusiness = messageUpdate('business_message', {
-			message_id: 2,
-			date: 2,
-			chat: { id: 2, type: 'private', first_name: 'B' },
-		});
-		const invalidMedia = new Request('https://example.test/webhook', {
+
+		const wrongContentType = new Request('https://example.test/webhook', {
 			method: 'POST',
 			headers: {
 				'content-type': 'text/plain',
@@ -344,10 +173,15 @@ describe('createTelegramChannel()', () => {
 			},
 			body: '{}',
 		});
+		const missingUpdateId = { message: { text: 'no update id' } };
+		const negativeUpdateId = { update_id: -1, message: { text: 'bad id' } };
+		const notObject = [1, 2, 3];
 
-		expect((await app.request(request(ambiguous, 'secret'))).status).toBe(400);
-		expect((await app.request(request(invalidBusiness, 'secret'))).status).toBe(400);
-		expect((await app.request(invalidMedia)).status).toBe(415);
+		expect((await app.request(wrongContentType)).status).toBe(415);
+		expect((await app.request(request(missingUpdateId, 'secret'))).status).toBe(400);
+		expect((await app.request(request(negativeUpdateId, 'secret'))).status).toBe(400);
+		expect((await app.request(request(notObject, 'secret'))).status).toBe(400);
+
 		const limited = createTelegramChannel({
 			secretToken: 'secret',
 			bodyLimit: 180,
@@ -357,10 +191,7 @@ describe('createTelegramChannel()', () => {
 			(
 				await channelApp(limited).request(
 					request(
-						{
-							update_id: 3,
-							poll: { id: 'poll-large', explanation: 'x'.repeat(300) },
-						},
+						{ update_id: 3, poll: { id: 'poll-large', explanation: 'x'.repeat(300) } },
 						'secret',
 					),
 				)
@@ -370,12 +201,15 @@ describe('createTelegramChannel()', () => {
 	});
 
 	it('uses empty 200, JSON webhook replies, and Hono responses', async () => {
-		const raw = messageUpdate('message', {
-			message_id: 5,
-			date: 5,
-			chat: { id: 5, type: 'private', first_name: 'Moe' },
-			text: 'response',
-		});
+		const raw = {
+			update_id: 5,
+			message: {
+				message_id: 5,
+				date: 5,
+				chat: { id: 5, type: 'private', first_name: 'Moe' },
+				text: 'response',
+			},
+		};
 		const empty = createTelegramChannel({
 			secretToken: 'secret',
 			webhook: () => undefined,
@@ -407,27 +241,54 @@ describe('createTelegramChannel()', () => {
 		expect(honoResponse.status).toBe(503);
 	});
 
-	it('returns 500 when application behavior throws or returns non-JSON data', async () => {
-		const raw = messageUpdate('message', {
-			message_id: 6,
-			date: 6,
-			chat: { id: 6, type: 'private', first_name: 'Sol' },
-		});
+	it('returns 500 when application behavior throws, and serializes non-JSON returns', async () => {
+		const raw = {
+			update_id: 6,
+			message: {
+				message_id: 6,
+				date: 6,
+				chat: { id: 6, type: 'private', first_name: 'Sol' },
+			},
+		};
 		const throwing = createTelegramChannel({
 			secretToken: 'secret',
 			webhook() {
 				throw new Error('failed');
 			},
 		});
-		const invalid = createTelegramChannel({
+		// After serializer alignment with Slack, a non-Response, non-undefined
+		// return is handed to `Response.json` unconditionally. Values that
+		// `JSON.stringify` accepts serialize and return 200 (a Map becomes `{}`,
+		// NaN becomes null); only a value that makes `Response.json` itself throw
+		// (e.g. a BigInt) falls through to Hono's framework error handler.
+		const mapReturn = createTelegramChannel({
 			secretToken: 'secret',
-			webhook: () => new Map() as never,
+			webhook: () => new Map([['a', 1]]) as never,
+		});
+		const nanReturn = createTelegramChannel({
+			secretToken: 'secret',
+			webhook: () => NaN as never,
+		});
+		const bigintReturn = createTelegramChannel({
+			secretToken: 'secret',
+			webhook: () => 10n as never,
 		});
 
 		expect((await channelApp(throwing).request(request(raw, 'secret'))).status).toBe(
 			500,
 		);
-		expect((await channelApp(invalid).request(request(raw, 'secret'))).status).toBe(
+
+		const mapResponse = await channelApp(mapReturn).request(request(raw, 'secret'));
+		expect(mapResponse.status).toBe(200);
+		expect(await mapResponse.json()).toEqual({});
+
+		const nanResponse = await channelApp(nanReturn).request(request(raw, 'secret'));
+		expect(nanResponse.status).toBe(200);
+		expect(await nanResponse.json()).toBeNull();
+
+		// `Response.json(10n)` throws synchronously; Hono's default error
+		// handler turns the thrown error into a 500.
+		expect((await channelApp(bigintReturn).request(request(raw, 'secret'))).status).toBe(
 			500,
 		);
 	});
@@ -510,20 +371,3 @@ function request(value: unknown, secret?: string): Request {
 		body: JSON.stringify(value),
 	});
 }
-
-function messageUpdate(
-	field:
-		| 'message'
-		| 'edited_message'
-		| 'channel_post'
-		| 'edited_channel_post'
-		| 'business_message'
-		| 'edited_business_message'
-		| 'guest_message',
-	message: Record<string, unknown>,
-): Record<string, unknown> {
-	nextUpdateId += 1;
-	return { update_id: nextUpdateId, [field]: message };
-}
-
-let nextUpdateId = 920_000;

@@ -4,6 +4,7 @@ import {
 } from '@flue/telegram';
 import { defineTool, dispatch } from '@flue/runtime';
 import { Api } from 'grammy';
+import type { Message } from 'grammy/types';
 import assistant from '../agents/assistant.ts';
 
 export const client = new Api(requiredEnv('TELEGRAM_BOT_TOKEN'));
@@ -13,45 +14,58 @@ export const channel = createTelegramChannel({
 
 	// Path: /channels/telegram/webhook
 	async webhook({ update }) {
-		switch (update.type) {
-			case 'message': {
-				if (
-					!update.conversation ||
-					(update.kind !== 'message' &&
-						update.kind !== 'business_message' &&
-						update.kind !== 'channel_post')
-				) {
-					return;
-				}
-				await dispatch(assistant, {
-					id: channel.conversationKey(update.conversation),
-					input: {
-						type: `telegram.${update.kind}`,
-						updateId: update.updateId,
-						message: update.message,
-					},
-				});
-				return;
-			}
-			case 'callback_query': {
-				await client.answerCallbackQuery(update.callback.id);
-				if (!update.conversation) return;
-				await dispatch(assistant, {
-					id: channel.conversationKey(update.conversation),
-					input: {
-						type: 'telegram.callback_query',
-						updateId: update.updateId,
-						data: update.callback.data,
-						from: update.callback.from,
-					},
-				});
-				return;
-			}
-			default:
-				return;
+		const incoming =
+			update.message ?? update.channel_post ?? update.business_message;
+		if (incoming) {
+			const conversation = conversationFromMessage(incoming);
+			await dispatch(assistant, {
+				id: channel.conversationKey(conversation),
+				input: {
+					type: 'telegram.message',
+					updateId: update.update_id,
+					message: incoming,
+				},
+			});
+			return;
+		}
+
+		if (update.callback_query) {
+			const query = update.callback_query;
+			await client.answerCallbackQuery(query.id);
+			if (!query.message) return;
+			await dispatch(assistant, {
+				id: channel.conversationKey(conversationFromMessage(query.message)),
+				input: {
+					type: 'telegram.callback_query',
+					updateId: update.update_id,
+					data: query.data,
+					from: query.from,
+				},
+			});
+			return;
 		}
 	},
 });
+
+/** Derives the canonical destination identity from a native Telegram Message. */
+function conversationFromMessage(message: Message): TelegramConversationRef {
+	const topic = {
+		...(message.message_thread_id === undefined
+			? {}
+			: { messageThreadId: message.message_thread_id }),
+		...(message.direct_messages_topic?.topic_id === undefined
+			? {}
+			: { directMessagesTopicId: message.direct_messages_topic.topic_id }),
+	};
+	return message.business_connection_id
+		? {
+				type: 'business-chat',
+				businessConnectionId: message.business_connection_id,
+				chatId: message.chat.id,
+				...topic,
+			}
+		: { type: 'chat', chatId: message.chat.id, ...topic };
+}
 
 export function postMessage(ref: TelegramConversationRef) {
 	return defineTool({

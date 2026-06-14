@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import { createTelegramChannel } from '../src/index.ts';
 
 describe('@flue/telegram workerd ingress', () => {
-	it('verifies the secret header and normalizes direct-message topics in workerd', async () => {
+	it('verifies the secret header and forwards a native Update in workerd', async () => {
 		const webhook = vi.fn();
 		const telegram = createTelegramChannel({
 			secretToken: 'worker_secret-7',
@@ -13,7 +13,7 @@ describe('@flue/telegram workerd ingress', () => {
 		for (const route of telegram.routes) {
 			app.on(route.method, route.path, route.handler);
 		}
-		const body = JSON.stringify({
+		const update = {
 			update_id: 880_440,
 			message: {
 				message_id: 44,
@@ -26,7 +26,8 @@ describe('@flue/telegram workerd ingress', () => {
 				direct_messages_topic: { topic_id: 64, user: { id: 1 } },
 				text: 'Worker delivery',
 			},
-		});
+		};
+		const body = JSON.stringify(update);
 
 		const accepted = await app.request(
 			new Request('https://example.test/webhook', {
@@ -52,13 +53,6 @@ describe('@flue/telegram workerd ingress', () => {
 		expect(accepted.status).toBe(200);
 		expect(rejected.status).toBe(401);
 		expect(webhook).toHaveBeenCalledOnce();
-		expect(webhook.mock.calls[0]?.[0].update).toMatchObject({
-			type: 'message',
-			conversation: {
-				type: 'chat',
-				chatId: -1_003_040_506,
-				directMessagesTopicId: 64,
-			},
-		});
+		expect(webhook.mock.calls[0]?.[0].update).toEqual(update);
 	});
 });

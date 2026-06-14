@@ -30,6 +30,11 @@ API operation the project relies on.
 Create `<source-dir>/channels/telegram.ts`. Adapt the imported agent,
 dispatched input, handled update kinds, and tool:
 
+The callback receives one verified provider-native Telegram `Update` (the
+official `@grammyjs/types` shape, re-exported by `@flue/telegram` and by
+grammY). At most one of its optional fields is present per update, so branch on
+those fields directly. Derive the conversation key from the native `Message`.
+
 ```ts
 import {
   createTelegramChannel,
@@ -37,6 +42,7 @@ import {
 } from '@flue/telegram';
 import { defineTool, dispatch } from '@flue/runtime';
 import { Api } from 'grammy';
+import type { Message } from 'grammy/types';
 import assistant from '../agents/assistant.ts';
 
 export const client = new Api(process.env.TELEGRAM_BOT_TOKEN!);
@@ -46,45 +52,57 @@ export const channel = createTelegramChannel({
 
   // Path: /channels/telegram/webhook
   async webhook({ update }) {
-    switch (update.type) {
-      case 'message': {
-        if (
-          !update.conversation ||
-          (update.kind !== 'message' &&
-            update.kind !== 'business_message' &&
-            update.kind !== 'channel_post')
-        ) {
-          return;
-        }
-        await dispatch(assistant, {
-          id: channel.conversationKey(update.conversation),
-          input: {
-            type: `telegram.${update.kind}`,
-            updateId: update.updateId,
-            message: update.message,
-          },
-        });
-        return;
-      }
-      case 'callback_query': {
-        await client.answerCallbackQuery(update.callback.id);
-        if (!update.conversation) return;
-        await dispatch(assistant, {
-          id: channel.conversationKey(update.conversation),
-          input: {
-            type: 'telegram.callback_query',
-            updateId: update.updateId,
-            data: update.callback.data,
-            from: update.callback.from,
-          },
-        });
-        return;
-      }
-      default:
-        return;
+    const incoming =
+      update.message ?? update.channel_post ?? update.business_message;
+    if (incoming) {
+      await dispatch(assistant, {
+        id: channel.conversationKey(conversationFromMessage(incoming)),
+        input: {
+          type: 'telegram.message',
+          updateId: update.update_id,
+          message: incoming,
+        },
+      });
+      return;
+    }
+
+    if (update.callback_query) {
+      const query = update.callback_query;
+      await client.answerCallbackQuery(query.id);
+      if (!query.message) return;
+      await dispatch(assistant, {
+        id: channel.conversationKey(conversationFromMessage(query.message)),
+        input: {
+          type: 'telegram.callback_query',
+          updateId: update.update_id,
+          data: query.data,
+          from: query.from,
+        },
+      });
+      return;
     }
   },
 });
+
+// Build the canonical destination identity from a native Telegram Message.
+function conversationFromMessage(message: Message): TelegramConversationRef {
+  const topic = {
+    ...(message.message_thread_id === undefined
+      ? {}
+      : { messageThreadId: message.message_thread_id }),
+    ...(message.direct_messages_topic?.topic_id === undefined
+      ? {}
+      : { directMessagesTopicId: message.direct_messages_topic.topic_id }),
+  };
+  return message.business_connection_id
+    ? {
+        type: 'business-chat',
+        businessConnectionId: message.business_connection_id,
+        chatId: message.chat.id,
+        ...topic,
+      }
+    : { type: 'chat', chatId: message.chat.id, ...topic };
+}
 
 export function postMessage(ref: TelegramConversationRef) {
   return defineTool({
@@ -171,16 +189,16 @@ polling lifecycle behavior to the Flue channel.
 
 ## Respect identity boundaries
 
-Regular and business chats use different conversation types. Preserve
-`businessConnectionId`, `messageThreadId`, and `directMessagesTopicId` when
-posting so replies reach the same destination.
+Regular and business chats need different conversation types. When you derive a
+conversation key from a native `Message`, preserve `business_connection_id`,
+`message_thread_id`, and `direct_messages_topic.topic_id` so replies reach the
+same destination.
 
-Guest messages intentionally omit a conversation key.
-`update.capabilities.guestQueryId` is a short-lived capability for
-`answerGuestQuery`, not durable identity. Inline callback queries also omit
-conversation identity when Telegram supplies no accessible message. Do not
-place either capability in model context, logs, durable session data, or
-persistent agent ids.
+Do not build a durable conversation key for `update.guest_message`. Its
+`message.guest_query_id` is a short-lived capability for `answerGuestQuery`, not
+identity. Inline callback queries (`update.callback_query` without a
+`message`) likewise supply no accessible chat. Do not place either value in
+model context, logs, durable session data, or persistent agent ids.
 
 ## Test without Telegram
 
@@ -189,10 +207,9 @@ cover:
 
 - correct, missing, and changed webhook secret headers;
 - messages, edits, channel posts, business messages, guest messages, callback
-  queries, and reactions;
-- commands with Telegram's UTF-16 entity offsets;
-- unsupported verified update variants;
-- malformed multi-field Update envelopes and body limits;
+  queries, and reactions, asserting the native `Update` is forwarded unchanged;
+- a future or otherwise unmodeled verified update variant;
+- malformed Update envelopes (no `update_id`, non-object body) and body limits;
 - regular, business, thread, and direct-topic conversation keys;
 - empty, JSON, Hono, thrown, and invalid handler responses;
 - real grammY `Api` calls against an injected fake Fetch transport in workerd;

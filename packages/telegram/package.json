@@ -31,6 +31,7 @@
 		"test:workerd": "vitest run --config vitest.workerd.config.ts"
 	},
 	"dependencies": {
+		"@grammyjs/types": "3.27.3",
 		"hono": "4.12.22"
 	},
 	"devDependencies": {
