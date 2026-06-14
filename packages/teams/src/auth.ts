@@ -81,7 +81,7 @@ export function createBotFrameworkTokenVerifier(options: BotFrameworkTokenVerifi
 				audience: options.appId,
 				issuer: tokenIssuer,
 				requiredClaims: ['exp', 'serviceurl'],
-				clockTolerance: 5,
+				clockTolerance: 5 * 60,
 			});
 			if (typeof payload.serviceurl !== 'string' || payload.serviceurl.length === 0) {
 				throw new TypeError('Invalid authorization.');

@@ -191,7 +191,7 @@ describe('createTeamsChannel()', () => {
 		const invalidResponse = await app.request(invalid);
 		const expiredResponse = await app.request(
 			await signedRequest(raw, {
-				expirationTime: Math.floor(Date.now() / 1000) - 60,
+				expirationTime: Math.floor(Date.now() / 1000) - 6 * 60,
 			}),
 		);
 		const wrongAudienceResponse = await app.request(
@@ -205,6 +205,23 @@ describe('createTeamsChannel()', () => {
 			wrongAudienceResponse.status,
 		]).toEqual([401, 401, 401, 401]);
 		expect(activities).not.toHaveBeenCalled();
+	});
+
+	it('accepts expiration skew within five minutes and rejects skew beyond it', async () => {
+		const activities = vi.fn();
+		const app = channelApp(testChannel({ activities }));
+		const now = Math.floor(Date.now() / 1000);
+
+		const accepted = await app.request(
+			await signedRequest(messageActivity(), { expirationTime: now - 4 * 60 }),
+		);
+		const rejected = await app.request(
+			await signedRequest(messageActivity(), { expirationTime: now - 6 * 60 }),
+		);
+
+		expect(accepted.status).toBe(200);
+		expect(rejected.status).toBe(401);
+		expect(activities).toHaveBeenCalledOnce();
 	});
 
 	it('rejects unendorsed channels service URL changes and tenant contradictions', async () => {
