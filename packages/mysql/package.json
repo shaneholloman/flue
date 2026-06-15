@@ -1,0 +1,38 @@
+{
+	"name": "@flue/mysql",
+	"version": "0.11.1",
+	"type": "module",
+	"license": "Apache-2.0",
+	"homepage": "https://flueframework.com/",
+	"repository": {
+		"type": "git",
+		"url": "https://github.com/withastro/flue",
+		"directory": "packages/mysql"
+	},
+	"exports": {
+		".": {
+			"types": "./dist/index.d.mts",
+			"import": "./dist/index.mjs"
+		}
+	},
+	"main": "./dist/index.mjs",
+	"types": "./dist/index.d.mts",
+	"files": ["dist"],
+	"engines": {
+		"node": ">=22.18.0"
+	},
+	"scripts": {
+		"build": "tsdown",
+		"check:types": "tsc --noEmit",
+		"test": "vitest run"
+	},
+	"dependencies": {
+		"@flue/runtime": "workspace:*"
+	},
+	"devDependencies": {
+		"mysql2": "^3.14.1",
+		"tsdown": "^0.22.0",
+		"typescript": "^6.0.3",
+		"vitest": "^4.1.6"
+	}
+}

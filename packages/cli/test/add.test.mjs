@@ -64,6 +64,7 @@ before(async () => {
 			daytona: 'sandbox--daytona.md',
 			postgres: 'database--postgres.md',
 			libsql: 'database--libsql.md',
+			mysql: 'database--mysql.md',
 			turso: 'database--turso.md',
 		};
 		const file = slug ? files[slug] : undefined;
@@ -148,6 +149,7 @@ describe('flue add', () => {
 			result.stderr,
 			/flue add database libsql\s+database\s+https:\/\/github\.com\/tursodatabase\/libsql/,
 		);
+		assert.match(result.stderr, /flue add database mysql\s+database\s+https:\/\/www\.mysql\.com/);
 		assert.match(result.stderr, /flue add database turso\s+database\s+https:\/\/turso\.tech/);
 		assert.ok(result.stderr.includes('flue add sandbox <url>'));
 		assert.ok(result.stderr.includes('flue add channel <url>'));
@@ -384,6 +386,21 @@ describe('flue add', () => {
 		assert.ok(libsql.stdout.includes('const serialize'));
 		assert.ok(libsql.stdout.includes('tx.close()'));
 
+		const mysql = await runCli(['add', 'database', 'mysql', '--print']);
+		assert.equal(mysql.code, 0);
+		assert.ok(mysql.stdout.includes('@flue/mysql'));
+		assert.ok(mysql.stdout.includes('// flue-blueprint: database/mysql@1'));
+		assert.ok(mysql.stdout.includes('pool.execute(text, params)'));
+		assert.ok(mysql.stdout.includes('pool.getConnection()'));
+		assert.ok(mysql.stdout.includes('connection.beginTransaction()'));
+		assert.ok(mysql.stdout.includes('connection.commit()'));
+		assert.ok(mysql.stdout.includes('connection.rollback()'));
+		assert.ok(mysql.stdout.includes('connection.release()'));
+		assert.ok(mysql.stdout.includes('result.map((row) => ({ ...row }))'));
+		assert.ok(mysql.stdout.includes('Cloudflare target'));
+		assert.ok(mysql.stdout.includes('This comparison is required when the marker is missing.'));
+		assert.ok(mysql.stdout.includes('### Version 1 — 2026-06-14\n\nInitial version.'));
+
 		const turso = await runCli(['add', 'database', 'turso', '--print']);
 		assert.equal(turso.code, 0);
 		assert.ok(turso.stdout.includes('@flue/libsql'));
@@ -459,6 +476,15 @@ describe('flue update', () => {
 
 		assert.equal(updated.code, 0);
 		assert.equal(updated.stdout, added.stdout);
+	});
+
+	it('prints the exact same MySQL blueprint as flue add', async () => {
+		const added = await runCli(['add', 'database', 'mysql', '--print']);
+		const updated = await runCli(['update', 'database', 'mysql', '--print']);
+
+		assert.equal(updated.code, 0);
+		assert.equal(updated.stdout, added.stdout);
+		assert.ok(updated.stdout.includes('// flue-blueprint: database/mysql@1'));
 	});
 
 	it('prints the exact same URL-substituted blueprint as flue add', async () => {

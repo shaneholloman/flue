@@ -238,6 +238,7 @@ export const docsSections: DocsSection[] = [
 				title: 'Databases',
 				items: [
 					{ title: 'libSQL', slug: 'ecosystem/databases/libsql' },
+					{ title: 'MySQL', slug: 'ecosystem/databases/mysql' },
 					{ title: 'Postgres', slug: 'ecosystem/databases/postgres' },
 					{ title: 'Turso', slug: 'ecosystem/databases/turso' },
 				],
