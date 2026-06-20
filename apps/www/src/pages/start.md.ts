@@ -79,7 +79,7 @@ Before implementing, restate the chosen requirements to yourself as an implement
    - Do not export \`route\` unless the user needs direct HTTP access. For a basic local starter, use \`flue connect <agent-name> local\` instead.
 4. If the selected shape is **agent + workflow**, create one minimal **workflow module** for the finite job.
    - Put it in the selected layout's immediate \`workflows/\` directory, using a lower-kebab-case filename.
-    - Import \`createWorkflow\` and the created agent, then default-export \`createWorkflow({ agent, async run({ harness }) { ... } })\`. Open a session from the supplied harness, perform one purpose-specific operation, and return its result.
+    - Import \`defineWorkflow\` and the created agent, then default-export \`defineWorkflow({ agent, async run({ harness }) { ... } })\`. Open a session from the supplied harness, perform one purpose-specific operation, and return its result.
    - Export workflow \`route\` only if the user needs that invocation surface.
 5. Add \`tsconfig.json\` for TypeScript editor/typechecking support.
    - If no \`tsconfig.json\` exists, create this minimal one:
@@ -109,7 +109,7 @@ Before finishing, verify that the implementation matches the user's explicit cho
 - **Project location**: Files were created in the requested directory.
 - **Source layout**: Files use only the selected \`.flue\`, \`src\`, or root layout; entrypoints were placed only in the selected source directory.
 - **Agent module**: One agent module exists in the selected layout's \`agents/<name>.ts\` and default-exports \`createAgent(...)\`.
-- **Workflow choice**: No workflow was added for an agent-only starter; for an agent + workflow starter, one workflow module default-exports \`createWorkflow(...)\` with the created agent bound through its \`agent\` field.
+- **Workflow choice**: No workflow was added for an agent-only starter; for an agent + workflow starter, one workflow module default-exports \`defineWorkflow(...)\` with the created agent bound through its \`agent\` field.
 - **Deploy target**: Config and commands match the user's selected deploy target.
 - **LLM provider/model**: Model specifier is one of the suggested values, or an exact value from \`https://flueframework.com/models.json\` if the user requested another model.
 - **Secrets**: No fake API keys, tokens, or secrets were invented.

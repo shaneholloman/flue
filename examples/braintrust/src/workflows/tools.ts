@@ -1,6 +1,6 @@
 import {
 	createAgent,
-	createWorkflow,
+	defineWorkflow,
 	defineTool,
 	type WorkflowRouteHandler,
 } from '@flue/runtime';
@@ -14,7 +14,7 @@ const lookup = defineTool({
 	parameters: v.object({ city: v.string() }),
 	execute: async ({ city }) => `${city}: sunny, 72 F`,
 });
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	input: v.object({ city: v.optional(v.string()) }),
 	async run({ harness, input }) {

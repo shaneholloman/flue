@@ -14,7 +14,7 @@ function defineAction<TInput, TOutput>(
 ): ActionDefinition<TInput, TOutput>;
 ```
 
-Defines reusable finite behavior. The returned frozen value can be bound to a workflow with `createWorkflow({ agent, action })` or exposed to a model through an agent's `actions` field.
+Defines reusable finite behavior. The returned frozen value can be bound to a workflow with `defineWorkflow({ agent, action })` or exposed to a model through an agent's `actions` field.
 
 ### Options
 

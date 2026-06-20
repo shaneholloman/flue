@@ -191,7 +191,7 @@ function createAgent<TEnv = Record<string, any>>(
 ): CreatedAgent<TEnv>;
 ```
 
-Creates an agent initializer. Default-export the returned value from an `agents/<name>.ts` module to define an addressable agent, or bind it to a Created Workflow.
+Creates an agent initializer. Default-export the returned value from an `agents/<name>.ts` module to define an addressable agent, or bind it to a Workflow Definition.
 
 The initializer runs whenever a runner initializes a root harness from the created agent. Do not treat it as a one-time constructor for a persistent agent instance id. Return a runtime config object with `model: '<provider>/<model>'`, `model: false`, or a profile with its own model field.
 

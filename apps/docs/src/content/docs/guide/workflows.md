@@ -8,10 +8,10 @@ Workflows are finite, inspectable operations for background jobs, document trans
 
 ## Create a workflow
 
-A file in `src/workflows/` defines a discovered workflow. Its filename becomes the workflow name, and its default export must be the value returned by `createWorkflow()`:
+A file in `src/workflows/` defines a discovered workflow. Its filename becomes the workflow name, and its default export must be the value returned by `defineWorkflow()`:
 
 ```ts title="src/workflows/summarize.ts"
-import { createAgent, createWorkflow } from '@flue/runtime';
+import { createAgent, defineWorkflow } from '@flue/runtime';
 import * as v from 'valibot';
 
 const summarizer = createAgent(() => ({
@@ -19,7 +19,7 @@ const summarizer = createAgent(() => ({
   instructions: 'Summarize the supplied document clearly and concisely.',
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: summarizer,
   input: v.object({ text: v.string() }),
   output: v.object({ summary: v.string() }),
@@ -75,17 +75,17 @@ export const summarize = defineAction({
 Bind the extracted Action without repeating its schemas or handler:
 
 ```ts title="src/workflows/summarize.ts"
-import { createAgent, createWorkflow } from '@flue/runtime';
+import { createAgent, defineWorkflow } from '@flue/runtime';
 import { summarize } from '../actions/summarize.ts';
 
 const summarizer = createAgent(() => ({
   model: 'anthropic/claude-haiku-4-5',
 }));
 
-export default createWorkflow({ agent: summarizer, action: summarize });
+export default defineWorkflow({ agent: summarizer, action: summarize });
 ```
 
-`createWorkflow()` accepts exactly one of `action` or `run`. Inline Actions are workflow-private and therefore do not need a name or description.
+`defineWorkflow()` accepts exactly one of `action` or `run`. Inline Actions are workflow-private and therefore do not need a name or description.
 
 ## Expose routes separately
 
@@ -97,7 +97,7 @@ import type { WorkflowRouteHandler } from '@flue/runtime';
 export const route: WorkflowRouteHandler = async (_c, next) => next();
 ```
 
-This exposes `POST /workflows/summarize` and applies the middleware to invocation and run reads. Do not put `route` inside `createWorkflow()`. A route-free workflow remains available to `flue run` and ambient `invoke()`.
+This exposes `POST /workflows/summarize` and applies the middleware to invocation and run reads. Do not put `route` inside `defineWorkflow()`. A route-free workflow remains available to `flue run` and ambient `invoke()`.
 
 ## Invoke workflows
 

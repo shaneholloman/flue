@@ -25,13 +25,13 @@ npm install -D @flue/cli
 `.flue/workflows/hello.ts`:
 
 ```typescript
-import { createAgent, createWorkflow } from '@flue/runtime';
+import { createAgent, defineWorkflow } from '@flue/runtime';
 import { local } from '@flue/runtime/node';
 import * as v from 'valibot';
 
 const agent = createAgent(() => ({ sandbox: local(), model: 'anthropic/claude-sonnet-4-6' }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   input: v.object({ name: v.optional(v.string()) }),
 
@@ -163,7 +163,7 @@ In GitLab CI, this means you set the secrets you want the agent's CLIs to see in
 `.flue/workflows/triage.ts`:
 
 ```typescript
-import { createAgent, createWorkflow } from '@flue/runtime';
+import { createAgent, defineWorkflow } from '@flue/runtime';
 import { local } from '@flue/runtime/node';
 import * as v from 'valibot';
 
@@ -174,7 +174,7 @@ const agent = createAgent(() => ({
   model: 'anthropic/claude-opus-4-7',
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   input: v.object({ issueIid: v.number(), projectId: v.string() }),
 
@@ -288,13 +288,13 @@ Add these as CI/CD variables (**Settings > CI/CD > Variables**, masked):
 Result schemas aren't just for type safety — they're how you orchestrate multi-step workflows. Because you get typed data back from `prompt()` and `skill()`, you can branch on results within a single agent:
 
 ```typescript
-import { createAgent, createWorkflow } from '@flue/runtime';
+import { createAgent, defineWorkflow } from '@flue/runtime';
 import { local } from '@flue/runtime/node';
 import * as v from 'valibot';
 
 const agent = createAgent(() => ({ sandbox: local(), model: 'anthropic/claude-sonnet-4-6' }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   input: v.object({ issueIid: v.number() }),
 

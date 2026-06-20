@@ -1,4 +1,4 @@
-import { bash, createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { bash, createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import { Bash, InMemoryFs } from 'just-bash';
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
@@ -13,7 +13,7 @@ const agent = createAgent(() => {
 	};
 });
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	async run({ harness }) {
 		const session = await harness.session();

@@ -168,7 +168,7 @@ import {
   Bash,
   InMemoryFs,
   admitDetachedWorkflow,
-  assertCreatedWorkflow,
+  assertWorkflowDefinition,
   createFlueContext,
   createSqlRunStore,
   CLOUDFLARE_AGENT_INTERNAL_DISPATCH_PATH,

@@ -1,5 +1,5 @@
 import { Daytona } from '@daytona/sdk';
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import { daytona } from '../sandboxes/daytona';
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
@@ -8,7 +8,7 @@ const agent = createAgent(async ({ env }) => {
 	return { sandbox: daytona(await client.create()), model: 'anthropic/claude-sonnet-4-6' };
 });
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	async run({ harness }) {
 		const session = await harness.session();

@@ -55,7 +55,7 @@ A `task()` call without an `agent` name is not a subagent delegation: the child 
 A workflow can choose delegation directly when application logic requires work from a particular subagent. Call `session.task(...)` with the name of a declared subagent, and provide `result` when the workflow needs validated data:
 
 ```ts title="src/workflows/review-change.ts"
-import { createAgent, createWorkflow, defineAgentProfile } from '@flue/runtime';
+import { createAgent, defineWorkflow, defineAgentProfile } from '@flue/runtime';
 import * as v from 'valibot';
 
 const reviewer = defineAgentProfile({
@@ -73,7 +73,7 @@ const Review = v.object({
   risks: v.array(v.string()),
 });
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: coordinator,
   input: v.object({ change: v.string() }),
   output: Review,

@@ -111,7 +111,7 @@ const agent = createAgent(() => ({
   tools: [lookupCustomerOrder],
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   input: v.object({ orderId: v.string() }),
   async run({ harness, input }) {
@@ -166,7 +166,7 @@ authorization design for them.
 An MCP server supplies remotely implemented tools. `connectMcpServer(...)` lists those tools and returns ordinary tool definitions, which you provide to agent work in the same way as your own custom tools.
 
 ```ts title="src/workflows/inventory-assistant.ts"
-import { connectMcpServer, createAgent, createWorkflow } from '@flue/runtime';
+import { connectMcpServer, createAgent, defineWorkflow } from '@flue/runtime';
 import * as v from 'valibot';
 
 type Env = {
@@ -184,7 +184,7 @@ const agent = createAgent<Env>(() => ({
   tools: inventory.tools,
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   input: v.object({ question: v.string() }),
   async run({ harness, input }) {

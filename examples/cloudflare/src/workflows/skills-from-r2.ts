@@ -1,4 +1,4 @@
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import * as v from 'valibot';
 import {
 	getDefaultWorkspace,
@@ -24,7 +24,7 @@ const agent = createAgent<Env>(async ({ env }) => {
 	};
 });
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	async run({ harness }) {
 		const session = await harness.session();

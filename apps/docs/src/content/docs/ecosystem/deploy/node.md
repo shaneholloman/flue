@@ -33,14 +33,14 @@ npm install -D @flue/cli
 `.flue/workflows/translate.ts`:
 
 ```typescript
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import * as v from 'valibot';
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
 
 const translator = createAgent(() => ({ model: 'openai/gpt-5.5' }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: translator,
   input: v.object({ text: v.string(), language: v.string() }),
 
@@ -61,7 +61,7 @@ export default createWorkflow({
 A few things to note:
 
 - **`route`** — Export Hono middleware to expose this workflow via HTTP. It may perform authentication before calling `next()`.
-- **`createAgent(...)` + `createWorkflow(...)`** — The required workflow agent declares model and sandbox policy. Flue initializes its harness for each run. By default, it receives a virtual sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No container needed.
+- **`createAgent(...)` + `defineWorkflow(...)`** — The required workflow agent declares model and sandbox policy. Flue initializes its harness for each run. By default, it receives a virtual sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No container needed.
 - **Schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed.
 
 ### 3. Add your API key
@@ -128,7 +128,7 @@ const analyst = defineAgentProfile({
 });
 const reportAgent = createAgent(() => ({ model: 'openai/gpt-5.5', subagents: [analyst] }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: reportAgent,
   async run({ harness }) {
     return await (
@@ -182,7 +182,7 @@ Env exposure is opt-in. By default only shell essentials (`PATH`, `HOME`, locale
 `.flue/workflows/reviewer.ts`:
 
 ```typescript
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import { local } from '@flue/runtime/node';
 import * as v from 'valibot';
 
@@ -190,7 +190,7 @@ export const route: WorkflowRouteHandler = async (_c, next) => next();
 
 const reviewer = createAgent(() => ({ sandbox: local(), model: 'anthropic/claude-sonnet-4-6' }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: reviewer,
   input: v.object({ topic: v.string() }),
 

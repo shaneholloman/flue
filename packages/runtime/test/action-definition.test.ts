@@ -6,7 +6,7 @@ import {
 	ActionOutputValidationError,
 	type ActionOutputSchema,
 	createAgent,
-	createWorkflow,
+	defineWorkflow,
 	defineAction,
 	defineTool,
 	type FlueHarness,
@@ -176,7 +176,7 @@ describe('defineAction()', () => {
 	});
 });
 
-describe('createWorkflow()', () => {
+describe('defineWorkflow()', () => {
 	it('creates extracted and inline branded workflows with required agents', () => {
 		const agent = createAgent(() => ({ model: false }));
 		const action = defineAction({
@@ -185,15 +185,15 @@ describe('createWorkflow()', () => {
 			run: async () => undefined,
 		});
 
-		const extracted = createWorkflow({ agent, action });
-		const inline = createWorkflow({
+		const extracted = defineWorkflow({ agent, action });
+		const inline = defineWorkflow({
 			agent,
 			input: v.object({ repository: v.string() }),
 			run: async ({ input }) => input.repository,
 		});
 
-		expect(extracted).toMatchObject({ __flueCreatedWorkflow: true, agent, action });
-		expect(inline).toMatchObject({ __flueCreatedWorkflow: true, agent });
+		expect(extracted).toMatchObject({ __flueWorkflowDefinition: true, agent, action });
+		expect(inline).toMatchObject({ __flueWorkflowDefinition: true, agent });
 		expect(inline).not.toHaveProperty('name');
 		expect(inline).not.toHaveProperty('description');
 	});
@@ -202,7 +202,7 @@ describe('createWorkflow()', () => {
 		const agent = createAgent(() => ({ model: false }));
 		const invalidOutput = v.undefined();
 		expectTypeOf(invalidOutput).not.toMatchTypeOf<ActionOutputSchema>();
-		createWorkflow({
+		defineWorkflow({
 			agent,
 			output: v.string(),
 			run: async () => 'ok',
@@ -227,8 +227,8 @@ describe('createWorkflow()', () => {
 			run: async () => undefined,
 		};
 
-		expect(() => createWorkflow({ agent: forgedAgent, action } as never)).toThrow('CreatedAgent');
-		expect(() => createWorkflow({ agent, action: forgedAction } as never)).toThrow('Action');
+		expect(() => defineWorkflow({ agent: forgedAgent, action } as never)).toThrow('CreatedAgent');
+		expect(() => defineWorkflow({ agent, action: forgedAction } as never)).toThrow('Action');
 	});
 
 	it('rejects definitions that provide both an action and inline run', () => {
@@ -239,7 +239,7 @@ describe('createWorkflow()', () => {
 			run: async () => undefined,
 		});
 
-		expect(() => createWorkflow({ agent, action, run: async () => undefined } as never)).toThrow(
+		expect(() => defineWorkflow({ agent, action, run: async () => undefined } as never)).toThrow(
 			'exactly one',
 		);
 	});

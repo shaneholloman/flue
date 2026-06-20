@@ -15,7 +15,7 @@ By default, an initialized agent works in a virtual sandbox unless you configure
 For example, a workflow can stage an input document, let an agent work on it, and retrieve an output file:
 
 ```ts title="src/workflows/review-document.ts"
-import { createAgent, createWorkflow } from '@flue/runtime';
+import { createAgent, defineWorkflow } from '@flue/runtime';
 import * as v from 'valibot';
 
 const reviewer = createAgent(() => ({
@@ -23,7 +23,7 @@ const reviewer = createAgent(() => ({
   cwd: '/workspace',
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: reviewer,
   input: v.object({ document: v.string() }),
 

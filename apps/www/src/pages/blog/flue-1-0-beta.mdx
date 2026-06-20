@@ -41,7 +41,7 @@ Flue originally launched with a simple programmable TypeScript harness, built on
 
 const writer = createAgent(() => ({ model: 'anthropic/claude-sonnet-4-6' }));
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent: writer,
 	input: v.object({ text: v.string() }),
 	async run({ harness, input }) {

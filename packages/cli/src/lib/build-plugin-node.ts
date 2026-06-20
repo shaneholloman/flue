@@ -78,7 +78,7 @@ import {
   Bash,
   InMemoryFs,
   admitDetachedWorkflow,
-  assertCreatedWorkflow,
+  assertWorkflowDefinition,
   createFlueContext,
   createNodeAgentCoordinator,
   createNodeDispatchQueue,

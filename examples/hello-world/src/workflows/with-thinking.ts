@@ -1,6 +1,6 @@
 import {
 	createAgent,
-	createWorkflow,
+	defineWorkflow,
 	defineAgentProfile,
 	type WorkflowRouteHandler,
 } from '@flue/runtime';
@@ -14,7 +14,7 @@ const agent = createAgent(() => ({
 	subagents: [auditor],
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	async run({ harness }) {
 		const session = await harness.session();

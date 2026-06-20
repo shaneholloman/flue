@@ -6,15 +6,15 @@ lastReviewedAt: 2026-06-19
 
 The Workflow API is exported from `@flue/runtime`.
 
-## `createWorkflow()`
+## `defineWorkflow()`
 
 ```ts
-function createWorkflow<TAction extends ActionDefinition>(options: {
+function defineWorkflow<TAction extends ActionDefinition>(options: {
   agent: CreatedAgent;
   action: TAction;
 }): ExtractedWorkflow<TAction>;
 
-function createWorkflow<TInput, TOutput>(options: {
+function defineWorkflow<TInput, TOutput>(options: {
   agent: CreatedAgent;
   input?: TInput;
   output?: TOutput;
@@ -28,23 +28,23 @@ Creates a branded workflow value. Default-export it from a discovered `workflows
 
 The agent may be private to the workflow. Discovery under `agents/` is required only for persistent agent routes and `dispatch()`.
 
-### `CreatedWorkflow`
+### `WorkflowDefinition`
 
 ```ts
-interface CreatedWorkflow<TAction extends ActionDefinition> {
+interface WorkflowDefinition<TAction extends ActionDefinition> {
   readonly agent: CreatedAgent;
   readonly action: TAction;
 }
 ```
 
-Treat a Created Workflow as an opaque identity. The generated runtime associates the exact discovered default-exported value with its module name.
+Treat a Workflow Definition as an opaque identity. The generated runtime associates the exact discovered default-exported value with its module name.
 
 ### Route export
 
-HTTP routing is not a `createWorkflow()` option. Export `route` separately from the workflow module:
+HTTP routing is not a `defineWorkflow()` option. Export `route` separately from the workflow module:
 
 ```ts
-export default createWorkflow({ agent, action });
+export default defineWorkflow({ agent, action });
 export const route: WorkflowRouteHandler = middleware;
 ```
 
@@ -53,7 +53,7 @@ The export enables HTTP invocation and applies middleware to the workflow's invo
 ## `invoke()`
 
 ```ts
-function invoke<TWorkflow extends CreatedWorkflow>(
+function invoke<TWorkflow extends WorkflowDefinition>(
   workflow: TWorkflow,
   request: WorkflowInvokeRequest<TWorkflow>,
 ): Promise<WorkflowInvocationReceipt>;

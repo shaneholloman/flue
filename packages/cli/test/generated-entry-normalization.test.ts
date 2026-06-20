@@ -18,18 +18,18 @@ type NormalizeBuiltModules = (
 // The normalization function ships as generated source inside built server
 // entries; evaluate it the same way a generated entry does.
 const normalizeBuiltModules = new Function(
-	'assertCreatedWorkflow',
+	'assertWorkflowDefinition',
 	`${generateBuiltModuleNormalizationSource()}; return normalizeBuiltModules;`,
 )(
 	(value: unknown, name: string) => {
-		const workflow = value as { __flueCreatedWorkflow?: unknown; agent?: unknown; action?: unknown };
+		const workflow = value as { __flueWorkflowDefinition?: unknown; agent?: unknown; action?: unknown };
 		if (
 			!workflow ||
-			workflow.__flueCreatedWorkflow !== true ||
+			workflow.__flueWorkflowDefinition !== true ||
 			!workflow.agent ||
 			!workflow.action
 		) {
-			throw new Error(`[flue] Workflow "${name}" must default-export createWorkflow(...).`);
+			throw new Error(`[flue] Workflow "${name}" must default-export defineWorkflow(...).`);
 		}
 	},
 ) as NormalizeBuiltModules;
@@ -41,7 +41,7 @@ function agentModule(overrides: Record<string, unknown> = {}): Record<string, un
 function workflowModule(overrides: Record<string, unknown> = {}): Record<string, unknown> {
 	return {
 		default: {
-			__flueCreatedWorkflow: true,
+			__flueWorkflowDefinition: true,
 			agent: { __flueCreatedAgent: true, initialize: () => ({}) },
 			action: { __flueAction: true },
 		},
@@ -84,7 +84,7 @@ describe('normalizeBuiltModules()', () => {
 		).toThrow('[flue] Agent "support" description export must be a non-empty string.');
 	});
 
-	it('normalizes genuine default-exported Created Workflows separately from route middleware', () => {
+	it('normalizes genuine default-exported Workflow Definitions separately from route middleware', () => {
 		const route = () => undefined;
 		const module = workflowModule({ route });
 
@@ -96,17 +96,17 @@ describe('normalizeBuiltModules()', () => {
 		]);
 	});
 
-	it('rejects duplicate Created Workflow identities across discovered modules', () => {
+	it('rejects duplicate Workflow Definition identities across discovered modules', () => {
 		const shared = workflowModule();
 
 		expect(() =>
 			normalizeBuiltModules({}, { first: shared, second: { default: shared.default } }),
 		).toThrow(
-			'[flue] Workflows "first" and "second" default-export the same created workflow value.',
+			'[flue] Workflows "first" and "second" default-export the same workflow definition value.',
 		);
 	});
 
-	it('resolves exact Created Workflow identities to discovered names', () => {
+	it('resolves exact Workflow Definition identities to discovered names', () => {
 		const module = workflowModule();
 		const normalized = normalizeBuiltModules({}, { report: module });
 
@@ -116,7 +116,7 @@ describe('normalizeBuiltModules()', () => {
 
 	it('rejects legacy workflow run exports', () => {
 		expect(() => normalizeBuiltModules({}, { report: { run: () => undefined } })).toThrow(
-			'[flue] Workflow "report" must default-export createWorkflow(...).',
+			'[flue] Workflow "report" must default-export defineWorkflow(...).',
 		);
 	});
 

@@ -120,7 +120,7 @@ The short version, for your reference:
    above) is the key on `env`:
 
    ```ts
-   import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+   import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
    import { cloudflareSandbox } from '@flue/runtime/cloudflare';
    import { getSandbox } from '@cloudflare/sandbox';
    import * as v from 'valibot';
@@ -132,7 +132,7 @@ The short version, for your reference:
      model: 'anthropic/claude-opus-4-7',
    }));
 
-   export default createWorkflow({
+   export default defineWorkflow({
      agent,
      input: v.object({ message: v.string() }),
      run: async ({ harness, input }) => {

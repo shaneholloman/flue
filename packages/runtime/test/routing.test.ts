@@ -2,7 +2,7 @@ import { Hono } from 'hono';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
 import { createFlueContext } from '../src/client.ts';
-import { createAgent, createWorkflow } from '../src/index.ts';
+import { createAgent, defineWorkflow } from '../src/index.ts';
 import { ModelNotConfiguredError } from '../src/errors.ts';
 import { InMemoryRunStore } from '../src/node/run-store.ts';
 import { MAX_IMAGE_DATA_LENGTH } from '../src/persisted-images.ts';
@@ -458,7 +458,7 @@ describe('flue()', () => {
 				workflows: [{ name: 'daily-report', transports: { http: true } }],
 			},
 			workflows: {
-				'daily-report': createWorkflow({
+				'daily-report': defineWorkflow({
 					agent: createAgent(() => ({ model: false })),
 					run: async () => ({ delivered: true }),
 				}),
@@ -1021,7 +1021,7 @@ describe('flue()', () => {
 				workflows: [{ name: 'daily-report', transports: { http: true } }],
 			},
 			workflows: {
-				'daily-report': createWorkflow({
+				'daily-report': defineWorkflow({
 					agent: createAgent(() => ({ model: false })),
 					run: async () => undefined,
 				}),

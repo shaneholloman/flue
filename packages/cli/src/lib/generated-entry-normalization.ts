@@ -46,14 +46,14 @@ function normalizeBuiltModules(agentModules, workflowModules, channelModules = {
   }
 
   for (const [name, mod] of Object.entries(workflowModules)) {
-    assertCreatedWorkflow(mod.default, name);
+    assertWorkflowDefinition(mod.default, name);
     if (mod.route !== undefined && typeof mod.route !== 'function') throw new Error('[flue] Workflow "' + name + '" route export must be a callable Hono middleware value.');
     const transports = {};
     if (typeof mod.route === 'function') transports.http = true;
     manifest.workflows.push({ name, transports });
     workflows[name] = mod.default;
     const previousWorkflowName = workflowNames.get(mod.default);
-    if (previousWorkflowName !== undefined) throw new Error('[flue] Workflows "' + previousWorkflowName + '" and "' + name + '" default-export the same created workflow value. Use distinct createWorkflow(...) values for workflow modules.');
+    if (previousWorkflowName !== undefined) throw new Error('[flue] Workflows "' + previousWorkflowName + '" and "' + name + '" default-export the same workflow definition value. Use distinct defineWorkflow(...) values for workflow modules.');
     workflowNames.set(mod.default, name);
     if (typeof mod.route === 'function') workflowRouteMiddleware[name] = mod.route;
   }

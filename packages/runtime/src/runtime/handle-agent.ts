@@ -3,7 +3,7 @@
 import * as v from 'valibot';
 import { parseActionInput, runActionWithParsedInput } from '../action.ts';
 import type { FlueContextInternal } from '../client.ts';
-import { isCreatedWorkflow, type CreatedWorkflow } from '../workflow-definition.ts';
+import { isWorkflowDefinition, type WorkflowDefinition } from '../workflow-definition.ts';
 import {
 	InvalidRequestError,
 	parseJsonBody,
@@ -29,11 +29,11 @@ import { generateWorkflowRunId } from './ids.ts';
 import { isBufferedRunEvent, isStreamExcludedEvent, type RunStore } from './run-store.ts';
 import { DirectAgentPayloadSchema } from './schemas.ts';
 
-export type WorkflowRegistry = Record<string, CreatedWorkflow>;
+export type WorkflowRegistry = Record<string, WorkflowDefinition>;
 
-export function assertCreatedWorkflow(value: unknown, name: string): asserts value is CreatedWorkflow {
-	if (!isCreatedWorkflow(value)) {
-		throw new Error(`[flue] Workflow "${name}" must default-export createWorkflow(...).`);
+export function assertWorkflowDefinition(value: unknown, name: string): asserts value is WorkflowDefinition {
+	if (!isWorkflowDefinition(value)) {
+		throw new Error(`[flue] Workflow "${name}" must default-export defineWorkflow(...).`);
 	}
 }
 
@@ -108,7 +108,7 @@ export interface HandleAgentOptions {
 export interface HandleWorkflowOptions {
 	request: Request;
 	workflowName: string;
-	workflow: CreatedWorkflow;
+	workflow: WorkflowDefinition;
 	createContext: CreateContextFn;
 	startWorkflowAdmission?: StartWorkflowAdmissionFn;
 	runStore?: RunStore;
@@ -229,7 +229,7 @@ export interface InvokeWorkflowAttachedOptions {
 	workflowName: string;
 	id: string;
 	runId: string;
-	workflow: CreatedWorkflow;
+	workflow: WorkflowDefinition;
 	input: unknown;
 	request: Request;
 	createContext: CreateContextFn;
@@ -262,7 +262,7 @@ export interface FailRecoveredRunOptions {
 
 export interface AdmitDetachedWorkflowOptions {
 	workflowName: string;
-	workflow: CreatedWorkflow;
+	workflow: WorkflowDefinition;
 	input: unknown;
 	request: Request;
 	createContext: CreateContextFn;
@@ -276,7 +276,7 @@ interface WorkflowAdmissionOptions {
 	workflowName: string;
 	id: string;
 	runId: string;
-	workflow: CreatedWorkflow;
+	workflow: WorkflowDefinition;
 	input: unknown;
 	request: Request;
 	createContext: CreateContextFn;
@@ -294,7 +294,7 @@ interface AdmittedWorkflowExecution {
 	runStore: RunStore;
 	lifecycle: WorkflowRunLifecycle;
 	startWorkflowAdmission: StartWorkflowAdmissionFn;
-	workflow: CreatedWorkflow;
+	workflow: WorkflowDefinition;
 	completion?: Promise<unknown>;
 	admission?: Promise<void>;
 }
@@ -352,7 +352,7 @@ function startWorkflowExecution(execution: AdmittedWorkflowExecution): Promise<v
 		didRun = true;
 		markStarted();
 		return await withWorkflowRunLifecycle(lifecycle, () =>
-			executeCreatedWorkflow(workflow, lifecycle.ctx, lifecycle.input),
+			executeWorkflowDefinition(workflow, lifecycle.ctx, lifecycle.input),
 		);
 	};
 	try {
@@ -598,7 +598,7 @@ export async function invokeWorkflowAttached(
 	}
 	try {
 		const result = await withWorkflowRunLifecycle(lifecycle, () =>
-			executeCreatedWorkflow(opts.workflow, ctx, opts.input),
+			executeWorkflowDefinition(opts.workflow, ctx, opts.input),
 		);
 		return { runId: opts.runId, result };
 	} finally {
@@ -606,8 +606,8 @@ export async function invokeWorkflowAttached(
 	}
 }
 
-async function executeCreatedWorkflow(
-	workflow: CreatedWorkflow,
+async function executeWorkflowDefinition(
+	workflow: WorkflowDefinition,
 	ctx: FlueContextInternal,
 	input: unknown,
 ): Promise<unknown> {

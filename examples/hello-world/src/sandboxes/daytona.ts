@@ -13,7 +13,7 @@
  * const client = new Daytona({ apiKey: process.env.DAYTONA_API_KEY });
  * const sandbox = await client.create({ image: 'ubuntu:latest' });
  * const agent = createAgent(() => ({ sandbox: daytona(sandbox), model: 'anthropic/claude-sonnet-4-6' }));
- * export default createWorkflow({ agent, async run({ harness }) {
+ * export default defineWorkflow({ agent, async run({ harness }) {
  *   return await (await harness.session()).prompt('Inspect the workspace.');
  * }});
  * ```

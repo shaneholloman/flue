@@ -1,6 +1,6 @@
 import {
 	createAgent,
-	createWorkflow,
+	defineWorkflow,
 	defineAgentProfile,
 	type WorkflowRouteHandler,
 } from '@flue/runtime';
@@ -13,7 +13,7 @@ const greeter = defineAgentProfile({
 });
 const agent = createAgent(() => ({ model: 'anthropic/claude-sonnet-4-6', subagents: [greeter] }));
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	input: v.object({ name: v.optional(v.string()) }),
 	async run({ harness, input }) {

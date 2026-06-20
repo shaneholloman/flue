@@ -18,7 +18,7 @@ flue add sandbox cloudflare
 Cloudflare Sandbox is a Cloudflare target integration rather than a generated adapter. In a Cloudflare-targeted project, the blueprint installs `@cloudflare/sandbox`; a workflow obtains the bound Durable Object with `getSandbox(...)`, wraps it with Flue's `cloudflareSandbox(...)`, and passes that sandbox factory to a created agent.
 
 ```ts title="<source-root>/workflows/coding-agent.ts (excerpt)"
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import { cloudflareSandbox } from '@flue/runtime/cloudflare';
 import { getSandbox } from '@cloudflare/sandbox';
 import * as v from 'valibot';
@@ -32,7 +32,7 @@ const agent = createAgent<Env>(({ id, env }) => ({
   model: 'anthropic/claude-opus-4-7',
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   input: v.object({ message: v.string() }),
   async run({ harness, input }) {

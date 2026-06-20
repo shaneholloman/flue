@@ -33,14 +33,14 @@ npm install -D @flue/cli wrangler
 `.flue/workflows/translate.ts`:
 
 ```typescript
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import * as v from 'valibot';
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
 
 const translator = createAgent(() => ({ model: 'anthropic/claude-sonnet-4-6' }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: translator,
   input: v.object({ text: v.string(), language: v.string() }),
 
@@ -61,7 +61,7 @@ export default createWorkflow({
 A few things to note:
 
 - **`route`** — Export Hono middleware to expose this workflow via HTTP. It may perform authentication before calling `next()`.
-- **`createAgent(...)` + `createWorkflow(...)`** — The required workflow agent declares model and sandbox policy. Flue initializes its harness for each run. By default, it receives a virtual sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No container needed.
+- **`createAgent(...)` + `defineWorkflow(...)`** — The required workflow agent declares model and sandbox policy. Flue initializes its harness for each run. By default, it receives a virtual sandbox powered by [just-bash](https://github.com/vercel-labs/just-bash). No container needed.
 - **Schemas** — The [Valibot](https://valibot.dev) schema defines the expected output shape. Flue parses the agent's response and returns it on `response.data`, fully typed.
 
 ### 3. Configure Durable Object migrations
@@ -251,7 +251,7 @@ const triager = defineAgentProfile({
 });
 const support = createAgent(() => ({ model: 'anthropic/claude-sonnet-4-6', subagents: [triager] }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: support,
   async run({ harness }) {
     return await (
@@ -270,14 +270,14 @@ By default, the virtual sandbox starts empty — no files, no skills, no context
 Because the agent has shell access, it can set up its own workspace on the fly:
 
 ```typescript
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import * as v from 'valibot';
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
 
 const reporter = createAgent(() => ({ model: 'openai/gpt-5.5' }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: reporter,
   input: v.object({ topic: v.string() }),
 
@@ -308,14 +308,14 @@ For support agents, you can seed Flue's default virtual sandbox with the knowled
 `.flue/workflows/support.ts`:
 
 ```typescript
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import * as v from 'valibot';
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
 
 const support = createAgent(() => ({ model: 'openrouter/moonshotai/kimi-k2.6' }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent: support,
   input: v.object({ message: v.string() }),
 

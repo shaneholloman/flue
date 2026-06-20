@@ -26,7 +26,7 @@
  * before adding any secret to the sandbox.
  */
 
-import { createAgent, createWorkflow, type FlueSession } from '@flue/runtime';
+import { createAgent, defineWorkflow, type FlueSession } from '@flue/runtime';
 import { local } from '@flue/runtime/node';
 import * as v from 'valibot';
 import {
@@ -580,7 +580,7 @@ const agent = createAgent(() => {
 	};
 });
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	input: v.object({ prNumber: v.pipe(v.number(), v.integer()) }),
 	async run({ harness, input, log }) {

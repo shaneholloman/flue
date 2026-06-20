@@ -68,7 +68,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *
  * const ws = new Workspace({ '/data': new RAMResource() }, { mode: MountMode.WRITE });
  * const agent = createAgent(() => ({ sandbox: mirage(ws), model: 'anthropic/claude-sonnet-4-6' }));
- * export default createWorkflow({ agent, async run({ harness }) {
+ * export default defineWorkflow({ agent, async run({ harness }) {
  *   return await (await harness.session()).prompt('Inspect the workspace.');
  * }});
  * ```
@@ -349,7 +349,7 @@ into, you can finish that work by wiring the adapter into it. Otherwise,
 share this snippet so they can wire it up themselves.
 
 ```ts
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import { Workspace, RAMResource, MountMode } from '@struktoai/mirage-node';
 import { mirage } from '../sandboxes/mirage'; // adjust path to match the user's layout
 
@@ -363,7 +363,7 @@ const agent = createAgent(() => {
   };
 });
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   run: async ({ harness }) => {
     const session = await harness.session();

@@ -1,6 +1,6 @@
 import {
 	createAgent,
-	createWorkflow,
+	defineWorkflow,
 	defineAgentProfile,
 	type WorkflowRouteHandler,
 } from '@flue/runtime';
@@ -12,7 +12,7 @@ const editor = defineAgentProfile({
 	instructions: 'Rewrite the supplied sentence in a clearer, shorter form.',
 });
 const agent = createAgent(() => ({ model: 'anthropic/claude-haiku-4-5', subagents: [editor] }));
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	input: v.object({ draft: v.optional(v.string()) }),
 	async run({ harness, input }) {

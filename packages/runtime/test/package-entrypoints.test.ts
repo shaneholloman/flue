@@ -25,7 +25,7 @@ describe('package entrypoints', () => {
 			ActionOutputValidationError: expect.any(Function),
 			connectMcpServer: expect.any(Function),
 			createAgent: expect.any(Function),
-			createWorkflow: expect.any(Function),
+			defineWorkflow: expect.any(Function),
 			createSandboxSessionEnv: expect.any(Function),
 			defineAction: expect.any(Function),
 			defineAgentProfile: expect.any(Function),

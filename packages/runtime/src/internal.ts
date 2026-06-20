@@ -82,7 +82,7 @@ export type {
 // The user-facing `flue()` itself is re-exported from `@flue/runtime/routing`, not here.
 export {
 	admitDetachedWorkflow,
-	assertCreatedWorkflow,
+	assertWorkflowDefinition,
 	failRecoveredRun,
 	handleWorkflowRequest,
 	invokeDirectAttached,

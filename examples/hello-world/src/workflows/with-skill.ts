@@ -1,11 +1,11 @@
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from '@flue/runtime';
 import { local } from '@flue/runtime/node';
 import * as v from 'valibot';
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
 const agent = createAgent(() => ({ sandbox: local(), model: 'anthropic/claude-sonnet-4-6' }));
 
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	input: v.object({ name: v.optional(v.string()) }),
 	async run({ harness, input }) {

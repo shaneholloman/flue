@@ -1,8 +1,8 @@
-import { createAgent, createWorkflow } from '@flue/runtime';
+import { createAgent, defineWorkflow } from '@flue/runtime';
 import * as v from 'valibot';
 
 const agent = createAgent(() => ({ model: false }));
-export default createWorkflow({
+export default defineWorkflow({
 	agent,
 	input: v.object({ requestedAt: v.string() }),
 	async run({ log, input }) {

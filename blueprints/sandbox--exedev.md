@@ -67,7 +67,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   sandbox: exedev({ host: 'maple-dune.exe.xyz' }),
  *   model: 'anthropic/claude-sonnet-4-6',
  * }));
- * export default createWorkflow({ agent, async run({ harness }) {
+ * export default defineWorkflow({ agent, async run({ harness }) {
  *   return await (await harness.session()).prompt('Inspect the workspace.');
  * }});
  * ```
@@ -81,7 +81,7 @@ Write this file verbatim. Do not "improve" it — it conforms to the published
  *   sandbox: exedev(vm),
  *   model: 'anthropic/claude-sonnet-4-6',
  * }));
- * export default createWorkflow({ agent, async run({ harness }) {
+ * export default defineWorkflow({ agent, async run({ harness }) {
  *   return await (await harness.session()).prompt('Inspect the workspace.');
  * }});
  * ```
@@ -728,7 +728,7 @@ no obvious project convention like `EXE_VM_HOST`, ask for the exe.dev VM
 hostname before wiring the adapter.
 
 ```ts
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from "@flue/runtime";
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from "@flue/runtime";
 import { exedev } from "../sandboxes/exedev";
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
@@ -738,7 +738,7 @@ const agent = createAgent(({ env }) => ({
   model: "anthropic/claude-sonnet-4-6",
 }));
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   run: async ({ harness }) => {
     const session = await harness.session();
@@ -754,7 +754,7 @@ API token with `new` permission. The bound agent initializer creates the VM and
 passes it to `exedev(...)`.
 
 ```ts
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from "@flue/runtime";
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from "@flue/runtime";
 import { createExeVm, exedev } from "../sandboxes/exedev";
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
@@ -767,7 +767,7 @@ const agent = createAgent(async ({ env }) => {
   };
 });
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   run: async ({ harness }) => {
     const session = await harness.session();
@@ -783,7 +783,7 @@ an API token with `cp` permission. If the project also deletes the clone, the
 token needs `rm` permission.
 
 ```ts
-import { createAgent, createWorkflow, type WorkflowRouteHandler } from "@flue/runtime";
+import { createAgent, defineWorkflow, type WorkflowRouteHandler } from "@flue/runtime";
 import { cloneExeVm, exedev } from "../sandboxes/exedev";
 
 export const route: WorkflowRouteHandler = async (_c, next) => next();
@@ -799,7 +799,7 @@ const agent = createAgent(async ({ env }) => {
   };
 });
 
-export default createWorkflow({
+export default defineWorkflow({
   agent,
   run: async ({ harness }) => {
     const session = await harness.session();

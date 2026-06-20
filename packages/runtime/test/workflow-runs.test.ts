@@ -4,7 +4,7 @@ import * as v from 'valibot';
 import { afterEach, describe, expect, expectTypeOf, it, vi } from 'vitest';
 import {
 	createAgent,
-	createWorkflow,
+	defineWorkflow,
 	invoke,
 	WorkflowAdmissionError,
 	WorkflowInputSerializationError,
@@ -55,7 +55,7 @@ function createContext(
 }
 
 function workflow(run: (input: unknown) => any) {
-	return createWorkflow({
+	return defineWorkflow({
 		agent: createAgent(() => ({ model: false })),
 		input: v.looseObject({}),
 		async run({ input }) {
@@ -73,12 +73,12 @@ function createApp(runtime: FlueRuntime): Hono {
 
 describe('invoke()', () => {
 	it('infers caller input from Workflow Action input semantics', () => {
-		const required = createWorkflow({
+		const required = defineWorkflow({
 			agent: createAgent(() => ({ model: false })),
 			input: v.object({ count: v.number() }),
 			run: async ({ input }) => input,
 		});
-		const omitted = createWorkflow({
+		const omitted = defineWorkflow({
 			agent: createAgent(() => ({ model: false })),
 			run: async () => undefined,
 		});
@@ -89,7 +89,7 @@ describe('invoke()', () => {
 	});
 
 	it('rejects supplied input when a Workflow Action declares no input', async () => {
-		const target = createWorkflow({
+		const target = defineWorkflow({
 			agent: createAgent(() => ({ model: false })),
 			run: async () => undefined,
 		});
@@ -114,7 +114,7 @@ describe('invoke()', () => {
 		);
 	});
 
-	it('rejects Created Workflows that are not exact discovered identities', async () => {
+	it('rejects Workflow Definitions that are not exact discovered identities', async () => {
 		const discovered = workflow(async () => undefined);
 		const undiscovered = workflow(async () => undefined);
 		configureFlueRuntime({
@@ -466,7 +466,7 @@ describe('workflow invocation', () => {
 	it('rejects invalid Action input before initializing the workflow Agent or sandbox', async () => {
 		const initialize = vi.fn(() => ({ model: false as const }));
 		const createSessionEnv = vi.fn(async () => createNoopSessionEnv());
-		const invalidWorkflow = createWorkflow({
+		const invalidWorkflow = defineWorkflow({
 			agent: createAgent(initialize),
 			input: v.object({ count: v.number() }),
 			run: async ({ input }) => input,
@@ -505,7 +505,7 @@ describe('workflow invocation', () => {
 	it('rejects explicit input for a no-input workflow before initializing its Agent or sandbox', async () => {
 		const initialize = vi.fn(() => ({ model: false as const }));
 		const createSessionEnv = vi.fn(async () => createNoopSessionEnv());
-		const noInputWorkflow = createWorkflow({
+		const noInputWorkflow = defineWorkflow({
 			agent: createAgent(initialize),
 			run: async () => undefined,
 		});
@@ -598,7 +598,7 @@ describe('workflow run lifecycle', () => {
 		let operationSettled = false;
 		const runStore = new InMemoryRunStore();
 		const eventStreamStore = createTestEventStreamStore();
-		const createdWorkflow = createWorkflow({
+		const createdWorkflow = defineWorkflow({
 			agent: createAgent(() => ({ model: false })),
 			async run({ harness }) {
 				const session = await harness.session();

@@ -67,8 +67,8 @@ export type {
 } from './runtime/run-store.ts';
 export { bash, createSandboxSessionEnv, type SandboxApi } from './sandbox.ts';
 export { defineTool } from './tool.ts';
-export { createWorkflow } from './workflow-definition.ts';
-export type { CreatedWorkflow, ExtractedWorkflow, InlineWorkflow } from './workflow-definition.ts';
+export { defineWorkflow } from './workflow-definition.ts';
+export type { ExtractedWorkflow, InlineWorkflow, WorkflowDefinition } from './workflow-definition.ts';
 export type {
 	AgentCreateContext,
 	AgentDispatchRequest,

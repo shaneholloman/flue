@@ -8,13 +8,13 @@ import {
 	WorkflowNotDiscoveredError,
 } from '../errors.ts';
 import { cloneJsonSerializable } from '../json-snapshot.ts';
-import type { CreatedWorkflow } from '../workflow-definition.ts';
+import type { WorkflowDefinition } from '../workflow-definition.ts';
 
 export interface WorkflowInvocationReceipt {
 	readonly runId: string;
 }
 
-export type WorkflowInvokeRequest<TWorkflow extends CreatedWorkflow> =
+export type WorkflowInvokeRequest<TWorkflow extends WorkflowDefinition> =
 	TWorkflow['action'] extends ActionDefinition<infer TInput, any>
 		? TInput extends ActionInputSchema
 			? { readonly input: ActionInput<TWorkflow['action']> }
@@ -27,11 +27,11 @@ export interface WorkflowAdmissionInput {
 }
 
 export interface WorkflowInvocationRuntime {
-	resolveWorkflowName?: (workflow: CreatedWorkflow) => string | undefined;
+	resolveWorkflowName?: (workflow: WorkflowDefinition) => string | undefined;
 	admitWorkflow?: (input: WorkflowAdmissionInput) => Promise<WorkflowInvocationReceipt>;
 }
 
-export async function invokeWorkflow<TWorkflow extends CreatedWorkflow>(
+export async function invokeWorkflow<TWorkflow extends WorkflowDefinition>(
 	workflow: TWorkflow,
 	request: WorkflowInvokeRequest<TWorkflow>,
 	runtime: WorkflowInvocationRuntime | undefined,

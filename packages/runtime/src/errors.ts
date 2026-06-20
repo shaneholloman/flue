@@ -701,7 +701,7 @@ export class WorkflowNotDiscoveredError extends FlueError {
 			type: 'workflow_not_discovered',
 			message: 'The workflow is not registered in this application.',
 			details: '',
-			dev: 'invoke() accepts the exact Created Workflow value default-exported by one discovered workflow module.',
+			dev: 'invoke() accepts the exact Workflow Definition value default-exported by one discovered workflow module.',
 		});
 		this.name = 'WorkflowNotDiscoveredError';
 	}

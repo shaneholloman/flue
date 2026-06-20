@@ -16,21 +16,21 @@ type InlineRunResult<S extends ActionOutputSchema | undefined> = S extends Actio
 	? v.InferInput<S>
 	: JsonValue | undefined;
 
-export interface CreatedWorkflow<TAction extends ActionDefinition = ActionDefinition> {
-	readonly __flueCreatedWorkflow: true;
+export interface WorkflowDefinition<TAction extends ActionDefinition = ActionDefinition> {
+	readonly __flueWorkflowDefinition: true;
 	readonly agent: CreatedAgent;
 	readonly action: TAction;
 }
 
 export type ExtractedWorkflow<TAction extends ActionDefinition = ActionDefinition> =
-	CreatedWorkflow<TAction>;
+	WorkflowDefinition<TAction>;
 
 export type InlineWorkflow<
 	TInput extends ActionInputSchema | undefined = ActionInputSchema | undefined,
 	TOutput extends ActionOutputSchema | undefined = ActionOutputSchema | undefined,
-> = CreatedWorkflow<ActionDefinition<TInput, TOutput>>;
+> = WorkflowDefinition<ActionDefinition<TInput, TOutput>>;
 
-const createdWorkflows = new WeakSet<object>();
+const workflowDefinitions = new WeakSet<object>();
 
 type ExtractedWorkflowOptions<TAction extends ActionDefinition> = {
 	agent: CreatedAgent;
@@ -51,46 +51,46 @@ type InlineWorkflowOptions<
 	run(context: ActionContext<TInput>): InlineRunResult<TOutput> | Promise<InlineRunResult<TOutput>>;
 };
 
-export function createWorkflow<TAction extends ActionDefinition>(
+export function defineWorkflow<TAction extends ActionDefinition>(
 	options: ExtractedWorkflowOptions<TAction>,
 ): ExtractedWorkflow<TAction>;
-export function createWorkflow<
+export function defineWorkflow<
 	const TInput extends ActionInputSchema | undefined = undefined,
 	const TOutput extends ActionOutputSchema | undefined = undefined,
 >(options: InlineWorkflowOptions<TInput, TOutput>): InlineWorkflow<TInput, TOutput>;
-export function createWorkflow(
+export function defineWorkflow(
 	options: ExtractedWorkflowOptions<ActionDefinition> | InlineWorkflowOptions<any, any>,
-): CreatedWorkflow {
+): WorkflowDefinition {
 	if (!options || typeof options !== 'object') {
-		throw new Error('[flue] createWorkflow() requires a workflow definition object.');
+		throw new Error('[flue] defineWorkflow() requires a workflow definition object.');
 	}
 	if (!isCreatedAgent(options.agent)) {
-		throw new Error('[flue] createWorkflow({ agent }) requires a CreatedAgent.');
+		throw new Error('[flue] defineWorkflow({ agent }) requires a CreatedAgent.');
 	}
 	const hasAction = Object.hasOwn(options, 'action') && options.action !== undefined;
 	const hasRun = Object.hasOwn(options, 'run') && options.run !== undefined;
 	if (hasAction === hasRun) {
-		throw new Error('[flue] createWorkflow() requires exactly one of action or run.');
+		throw new Error('[flue] defineWorkflow() requires exactly one of action or run.');
 	}
 	if (hasAction) {
 		if (!isActionDefinition(options.action)) {
-			throw new Error('[flue] createWorkflow({ action }) requires an Action.');
+			throw new Error('[flue] defineWorkflow({ action }) requires an Action.');
 		}
 		if (Object.hasOwn(options, 'input') || Object.hasOwn(options, 'output')) {
-			throw new Error('[flue] createWorkflow({ action }) does not accept input or output.');
+			throw new Error('[flue] defineWorkflow({ action }) does not accept input or output.');
 		}
-		return createCreatedWorkflow(options.agent, options.action);
+		return makeWorkflowDefinition(options.agent, options.action);
 	}
 	if (typeof options.run !== 'function') {
-		throw new Error('[flue] createWorkflow({ run }) must be a function.');
+		throw new Error('[flue] defineWorkflow({ run }) must be a function.');
 	}
 	if (options.input !== undefined) {
 		if (!isValibotSchema(options.input) || !isTopLevelObjectSchema(options.input)) {
-			throw new Error('[flue] createWorkflow({ input }) must be a top-level object Valibot schema.');
+			throw new Error('[flue] defineWorkflow({ input }) must be a top-level object Valibot schema.');
 		}
 	}
 	if (options.output !== undefined && !isValibotSchema(options.output)) {
-		throw new Error('[flue] createWorkflow({ output }) must be a Valibot schema.');
+		throw new Error('[flue] defineWorkflow({ output }) must be a Valibot schema.');
 	}
 	const action = defineAction({
 		name: 'workflow',
@@ -99,23 +99,23 @@ export function createWorkflow(
 		output: options.output,
 		run: options.run,
 	} as never);
-	return createCreatedWorkflow(options.agent, action);
+	return makeWorkflowDefinition(options.agent, action);
 }
 
-function createCreatedWorkflow<TAction extends ActionDefinition>(
+function makeWorkflowDefinition<TAction extends ActionDefinition>(
 	agent: CreatedAgent,
 	action: TAction,
-): CreatedWorkflow<TAction> {
+): WorkflowDefinition<TAction> {
 	const workflow = Object.freeze({
-		__flueCreatedWorkflow: true as const,
+		__flueWorkflowDefinition: true as const,
 		agent,
 		action,
 	});
-	createdWorkflows.add(workflow);
+	workflowDefinitions.add(workflow);
 	return workflow;
 }
 
-export function isCreatedWorkflow(value: unknown): value is CreatedWorkflow {
-	return Boolean(value && typeof value === 'object' && createdWorkflows.has(value));
+export function isWorkflowDefinition(value: unknown): value is WorkflowDefinition {
+	return Boolean(value && typeof value === 'object' && workflowDefinitions.has(value));
 }
 

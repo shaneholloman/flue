@@ -67,7 +67,7 @@ const agent = createAgent(() => ({
 }));
 
 // Bind finite orchestration to that policy.
-const workflow = createWorkflow({
+const workflow = defineWorkflow({
 	agent,
 	async run({ harness }) {
 		return await (await harness.session()).prompt('Triage this incoming issue.');
