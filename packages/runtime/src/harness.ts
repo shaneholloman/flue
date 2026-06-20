@@ -274,6 +274,7 @@ export class Harness implements FlueHarness {
 			createTaskSession: (childOptions) => this.createTaskSession(childOptions),
 			actions: taskConfig.actions ?? [],
 			createActionHarness: (actionOptions) => this.createActionHarness(actionOptions),
+			scopeSignal: this.scopeAbortController.signal,
 		});
 	}
 
