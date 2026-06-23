@@ -1,10 +1,10 @@
 ---
 title: Workflows
-description: Create finite agent-backed operations from inline or reusable Actions.
-lastReviewedAt: 2026-06-20
+description: Create, invoke, and expose finite agent-backed operations.
+lastReviewedAt: 2026-06-22
 ---
 
-Workflows are finite, inspectable operations for background jobs, document transformations, reviews, and CI tasks. Every workflow binds one [Action](/docs/api/action-api/) to one agent definition. Use an [agent](/docs/guide/building-agents/) instead when work should continue across messages.
+Workflows are finite, inspectable operations for background jobs, document transformations, reviews, and CI tasks. Use an [agent](/docs/guide/building-agents/) instead when work should continue across messages.
 
 ## Create a workflow
 
@@ -29,29 +29,9 @@ export default defineWorkflow({
 
 This defines the `summarize` workflow. Each invocation validates the supplied text, asks the model to summarize it, and returns a validated `{ summary }` result. Use this pattern for finite work that should have its own run, result, and event history. See the [Workflow API](/docs/api/workflow-api/) for the complete definition contract.
 
-## Reuse an Action
+## Use a reusable Action
 
-Use `defineAction()` when the same finite behavior should back multiple workflows or be callable by a model through an agent's `actions` list:
-
-```ts title="src/actions/summarize.ts"
-import { defineAction } from '@flue/runtime';
-import * as v from 'valibot';
-
-export const summarize = defineAction({
-  name: 'summarize_document',
-  description: 'Summarize a document clearly and concisely.',
-  input: v.object({ text: v.string() }),
-  output: v.object({ summary: v.string() }),
-
-  async run({ harness, input }) {
-    const session = await harness.session();
-    const response = await session.prompt(`Summarize this text: ${input.text}`);
-    return { summary: response.text };
-  },
-});
-```
-
-Bind the extracted Action without repeating its schemas or handler:
+Define the workflow inline as shown above for the ordinary case. If the workflow should run an existing [Action](/docs/guide/actions/), bind that Action to its agent:
 
 ```ts title="src/workflows/summarize.ts"
 import { defineAgent, defineWorkflow } from '@flue/runtime';
@@ -63,7 +43,7 @@ export default defineWorkflow({
 });
 ```
 
-Start inline when behavior belongs to one workflow. Extract an Action when another workflow or a model should call the same operation. See [`defineAction()`](/docs/api/action-api/#defineaction) and [`defineWorkflow()`](/docs/api/workflow-api/#defineworkflow) for their complete options.
+The Action owns the input, output, and handler, so the workflow does not repeat them. See [Actions](/docs/guide/actions/) for when and how to define one.
 
 ## Invoke a workflow
 
@@ -96,18 +76,15 @@ const { runId } = await invoke(summarize, {
 
 Workflow HTTP access is private by default. Two independent module exports control it:
 
-| Export  | Exposes                                                     |
-| ------- | ----------------------------------------------------------- |
-| `route` | Invocation at `POST /workflows/<name>`.                     |
-| `runs`  | Run records and event streams beneath `/runs/<runId>`.      |
+| Export  | Exposes                                                |
+| ------- | ------------------------------------------------------ |
+| `route` | Invocation at `POST /workflows/<name>`.                |
+| `runs`  | Run records and event streams beneath `/runs/<runId>`. |
 
 Use the same authentication policy for both when callers should be able to invoke and inspect a workflow:
 
 ```ts title="src/workflows/summarize.ts"
-import type {
-  WorkflowRouteHandler,
-  WorkflowRunsHandler,
-} from '@flue/runtime';
+import type { WorkflowRouteHandler, WorkflowRunsHandler } from '@flue/runtime';
 import { requireUser } from '../auth.ts';
 
 export const route: WorkflowRouteHandler = requireUser;
@@ -133,7 +110,7 @@ These exports do not affect schedules, ambient `invoke()`, or server-side `listR
 
 ## Use the workflow harness
 
-The harness is ready when the Action starts. Use its default session for related operations and its filesystem or shell for workflow-controlled setup:
+The harness is ready when the workflow handler starts. Use its default session for related operations and its filesystem or shell for workflow-controlled setup:
 
 ```ts
 async run({ harness, input }) {

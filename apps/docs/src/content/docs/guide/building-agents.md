@@ -1,7 +1,7 @@
 ---
 title: Agents
 description: Create an agent, configure its capabilities, and send it messages over time.
-lastReviewedAt: 2026-05-29
+lastReviewedAt: 2026-06-22
 ---
 
 Agents are useful when your application needs a model to keep working within a continuing context. This guide covers creating an agent, configuring its capabilities and environment, and exposing it safely to users.
@@ -36,25 +36,27 @@ See [Project Layout](/docs/guide/project-layout/) and [Models & Providers](/docs
 
 ## Agent configuration
 
-The object returned by `defineAgent(...)` defines the agent's behavior, capabilities, and environment. For example, a repository reviewer can be given review instructions, reusable tools and skills, and a local workspace to work within:
+The object returned by `defineAgent(...)` defines the agent's behavior, capabilities, and environment. For example, a repository reviewer can be given review instructions, reusable Actions, tools and skills, and a local workspace to work within:
 
 ```ts title="src/agents/repository-reviewer.ts"
 import { defineAgent } from '@flue/runtime';
 import { local } from '@flue/runtime/node';
 import reviewChecklist from '../skills/review-checklist/SKILL.md' with { type: 'skill' };
+import { reviewChange } from '../actions/review-change.ts';
 import { repositoryTools } from '../shared/repository-tools.ts';
 
 export default defineAgent(() => ({
   model: 'anthropic/claude-sonnet-4-6',
   instructions: 'Review the requested change and report only findings supported by evidence.',
   cwd: '/srv/repositories/catalog-service',
+  actions: [reviewChange],
   tools: repositoryTools,
   skills: [reviewChecklist],
   sandbox: local(),
 }));
 ```
 
-For more details, see [Tools](/docs/guide/tools/), [Skills](/docs/guide/skills/), [Sandboxes](/docs/guide/sandboxes/), and [Database](/docs/guide/database/).
+Actions let the model call finite agent-backed operations, tools execute bounded application functions, and skills provide reusable guidance. For more details, see [Actions](/docs/guide/actions/), [Tools](/docs/guide/tools/), [Skills](/docs/guide/skills/), [Sandboxes](/docs/guide/sandboxes/), and [Database](/docs/guide/database/).
 
 ### Markdown instructions
 
@@ -229,7 +231,7 @@ Your application chooses the agent instance before dispatching the event. `dispa
 ## Next steps
 
 - [Agent API](/docs/api/agent-api/) — look up session operations and their results.
-- [Tools](/docs/guide/tools/), [Skills](/docs/guide/skills/), and [Sandboxes](/docs/guide/sandboxes/) — configure what an agent can do and where it works.
+- [Actions](/docs/guide/actions/), [Tools](/docs/guide/tools/), [Skills](/docs/guide/skills/), and [Sandboxes](/docs/guide/sandboxes/) — configure what an agent can do and where it works.
 - [Subagents](/docs/guide/subagents/) — delegate focused work to specialist profiles.
 - [Routing](/docs/guide/routing/) — expose agent HTTP surfaces inside an authenticated application.
 - [Workflows](/docs/guide/workflows/) — run single-use or background agent work.

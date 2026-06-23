@@ -201,6 +201,17 @@ export default defineWorkflow({
 
 Provide MCP credentials and connection settings from trusted application code and close the connection during application shutdown. Flue prefixes each MCP tool's model-facing name with its connection name; for example, `lookup_item` from this server becomes `mcp__inventory__lookup_item`.
 
+## When to use a tool
+
+Tools are most useful when:
+
+- a model needs to read or update application data;
+- an agent needs a narrow interface to an API or service;
+- trusted application code must control credentials, authorization scope, or destinations;
+- the model should decide whether and when to call a bounded function.
+
+For application-controlled, multi-step agent work, use an [Action](/docs/guide/actions/). For reusable instructions and resources, use a [skill](/docs/guide/skills/).
+
 ## Next steps
 
 - [Agents](/docs/guide/building-agents/) — configure continuing agents that use tools.

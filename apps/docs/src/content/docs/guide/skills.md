@@ -127,6 +127,17 @@ export default defineWorkflow({
 
 See the [Agent API](/docs/api/agent-api/) for operation options and response types.
 
+## When to use a skill
+
+Skills are most useful when:
+
+- an agent needs a repeatable process, checklist, or set of conventions;
+- specialized guidance should be shared across agents and workflows;
+- instructions need supporting templates, examples, or reference files;
+- a workspace should provide its own guidance without changing application code.
+
+For executable application capabilities, use a [tool](/docs/guide/tools/). For application-controlled, multi-step agent work, use an [Action](/docs/guide/actions/).
+
 ## Next steps
 
 - [Agent Skills specification](https://agentskills.io/specification) — create and structure compatible skills.

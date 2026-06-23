@@ -1,10 +1,10 @@
 ---
 title: Project Layout
 description: Understand the source files and generated output in a Flue project.
-lastReviewedAt: 2026-05-29
+lastReviewedAt: 2026-06-22
 ---
 
-Flue discovers application entrypoints from your project's source directory. Use `src/` for new projects, with `app.ts`, `cloudflare.ts`, `agents/`, `workflows/`, and `channels/` defining the application surfaces Flue builds.
+Flue discovers application entrypoints from your project's source directory. Use `src/` for new projects, with `app.ts`, `db.ts`, `cloudflare.ts`, `agents/`, `workflows/`, and `channels/` defining the application surfaces Flue builds.
 
 ## Example project layout
 
@@ -14,6 +14,7 @@ my-project/
 ├─ flue.config.ts
 ├─ src/
 │  ├─ app.ts
+│  ├─ db.ts
 │  ├─ cloudflare.ts
 │  ├─ agents/
 │  │  └─ support-assistant.ts
@@ -31,6 +32,7 @@ Organize supporting application code however you prefer inside `src/`. The files
 | Path            | Purpose                                                                               | Learn more                                                            |
 | --------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | `app.ts`        | Optional entrypoint for composing Flue with your application's routes and middleware. | [Routing](/docs/guide/routing/)                                       |
+| `db.ts`         | Optional Node.js persistence adapter for agent sessions and workflow runs.            | [Database](/docs/guide/database/)                                     |
 | `cloudflare.ts` | Optional Cloudflare-only module for Worker exports and non-HTTP handlers.             | [Cloudflare](/docs/ecosystem/deploy/cloudflare/#extending-the-worker) |
 | `agents/`       | Addressable agents that can receive continuing interactions over time.                | [Agents](/docs/guide/building-agents/)                                |
 | `workflows/`    | Finite operations that receive input and return a result.                             | [Workflows](/docs/guide/workflows/)                                   |
@@ -41,6 +43,12 @@ Organize supporting application code however you prefer inside `src/`. The files
 `app.ts` is an optional custom application entrypoint. Add it when your server needs to compose Flue routes with application behavior such as authentication, webhooks, health endpoints, or a route prefix. A project without `app.ts` uses Flue's generated application directly.
 
 For more information, see [Routing](/docs/guide/routing/).
+
+### `db.ts`
+
+`db.ts` is an optional Node.js persistence entrypoint. Its default export configures the `PersistenceAdapter` used for agent session history, accepted submissions, and workflow-run records. Without it, Node.js uses in-memory SQLite and loses this state when the process exits. Cloudflare provides Durable Object SQLite automatically and rejects `db.ts`.
+
+For more information, see [Database](/docs/guide/database/).
 
 ### `cloudflare.ts`
 
@@ -85,7 +93,7 @@ For more information, see [Channels](/docs/guide/channels/).
 2. `src/` **(Recommended)** — The recommended layout for new projects.
 3. The project root — A compact layout for small dedicated projects.
 
-The first matching directory wins. Flue does not merge layouts: when `.flue/` exists, it does not discover agents, workflows, channels, `app.ts`, or `cloudflare.ts` from `src/` or the project root. Authored modules may still import ordinary supporting code from elsewhere in the project.
+The first matching directory wins. Flue does not merge layouts: when `.flue/` exists, it does not discover agents, workflows, channels, `app.ts`, `db.ts`, or `cloudflare.ts` from `src/` or the project root. Authored modules may still import ordinary supporting code from elsewhere in the project.
 
 The source directory is always discovered relative to your project root. To configure the project root, see [Configuration](/docs/reference/configuration/).
 
