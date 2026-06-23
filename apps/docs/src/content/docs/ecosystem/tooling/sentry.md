@@ -25,6 +25,7 @@ Sentry.init({
   enabled: Boolean(process.env.SENTRY_DSN),
   environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV,
   release: process.env.SENTRY_RELEASE,
+  attachStacktrace: true,
   tracesSampleRate: 0,
 });
 

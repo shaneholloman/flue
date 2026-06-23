@@ -62,6 +62,7 @@ Sentry.init({
   enabled: Boolean(process.env.SENTRY_DSN),
   environment: process.env.SENTRY_ENVIRONMENT ?? process.env.NODE_ENV,
   release: process.env.SENTRY_RELEASE,
+  attachStacktrace: true,
   tracesSampleRate: 0,
 });
 ```
@@ -236,6 +237,7 @@ export const cloudflare = extend<DurableObject<Env>>({
         enabled: Boolean(env.SENTRY_DSN),
         environment: env.SENTRY_ENVIRONMENT,
         release: env.SENTRY_RELEASE,
+        attachStacktrace: true,
         tracesSampleRate: 0,
       }),
       Final,
