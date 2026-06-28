@@ -1,4 +1,4 @@
-import { fauxAssistantMessage, fauxText, registerFauxProvider } from '@earendil-works/pi-ai';
+import { fauxAssistantMessage, fauxText, registerFauxProvider } from '@earendil-works/pi-ai/compat';
 import { defineAgent } from '@flue/runtime';
 
 export default defineAgent(() => {

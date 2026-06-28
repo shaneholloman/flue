@@ -8,7 +8,7 @@ import {
 	type Model,
 	registerApiProvider as piRegisterApiProvider,
 	resetApiProviders,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import type { CloudflareGatewayOptions } from '../cloudflare/gateway.ts';
 import { CLOUDFLARE_AI_BINDING_API } from '../cloudflare-model.ts';
 import { ProviderRegistrationError } from '../errors.ts';

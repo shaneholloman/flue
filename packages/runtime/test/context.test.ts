@@ -2,7 +2,7 @@ import {
 	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	registerFauxProvider,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import { afterEach, describe, expect, it } from 'vitest';
 import { defineAgent } from '../src/index.ts';
 import type { FlueContextConfig } from '../src/internal.ts';

@@ -4,7 +4,7 @@ import {
 	fauxText,
 	fauxToolCall,
 	registerFauxProvider,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import * as v from 'valibot';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defineAgent, observe, ResultUnavailableError } from '../src/index.ts';

@@ -16,8 +16,8 @@ import type {
 	ToolResultMessage,
 	Usage,
 	UserMessage,
-} from '@earendil-works/pi-ai';
-import { completeSimple, isContextOverflow } from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
+import { completeSimple, isContextOverflow } from '@earendil-works/pi-ai/compat';
 import type { PromptUsage } from './types.ts';
 import { addUsage, fromProviderUsage } from './usage.ts';
 

@@ -1,4 +1,4 @@
-import { getModel } from '@earendil-works/pi-ai';
+import { getModel } from '@earendil-works/pi-ai/compat';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defineAgent, ProviderRegistrationError } from '../src/index.ts';
 import { createFlueContext, resolveModel } from '../src/internal.ts';

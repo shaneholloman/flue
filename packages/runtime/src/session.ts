@@ -19,8 +19,8 @@ import type {
 	SimpleStreamOptions,
 	ToolResultMessage,
 	UserMessage,
-} from '@earendil-works/pi-ai';
-import { streamSimple } from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
+import { streamSimple } from '@earendil-works/pi-ai/compat';
 import type * as v from 'valibot';
 import { abortErrorFor, createCallHandle } from './abort.ts';
 import { type ActionDefinition, parseActionInput, runActionWithParsedInput } from './action.ts';

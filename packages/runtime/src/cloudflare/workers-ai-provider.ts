@@ -5,14 +5,16 @@
  * Binding access: the generated entry captures `env.AI` at module init and
  * stores it on the resolved Model as a non-pi-ai `binding` field.
  *
- * Wire format: Workers AI accepts the OpenAI-completions request body, so
- * we translate via pi-ai's `convertMessages` and parse the binding's SSE
- * response with pi-ai's `AssistantMessageEvent` stream.
+ * Wire format: the binding accepts multiple Cloudflare model families. Workers
+ * AI and OpenAI-family models use the OpenAI-compatible shape; Anthropic AI
+ * Gateway models use Anthropic Messages.
  */
 import type { Ai } from '@cloudflare/workers-types';
 import type {
+	AnthropicOptions,
 	ApiProvider,
 	AssistantMessage,
+	Context,
 	Model,
 	OpenAICompletionsCompat,
 	SimpleStreamOptions,
@@ -21,10 +23,12 @@ import type {
 	Tool,
 	ToolCall,
 	Usage,
-} from '@earendil-works/pi-ai';
-import { createAssistantMessageEventStream, parseStreamingJson } from '@earendil-works/pi-ai';
-import { convertMessages } from '@earendil-works/pi-ai/openai-completions';
+} from '@earendil-works/pi-ai/compat';
+import { createAssistantMessageEventStream, parseStreamingJson } from '@earendil-works/pi-ai/compat';
+import { stream as streamAnthropic } from '@earendil-works/pi-ai/api/anthropic-messages';
+import { convertMessages } from '@earendil-works/pi-ai/api/openai-completions';
 import { CLOUDFLARE_AI_BINDING_API, type CloudflareAIBindingApi } from '../cloudflare-model.ts';
+import { CloudflareAIBindingError } from '../errors.ts';
 import { getModelBinding, getModelGateway } from '../runtime/providers.ts';
 import type { CloudflareGatewayOptions } from './gateway.ts';
 
@@ -278,6 +282,10 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, SimpleSt
 	context,
 	options,
 ) => {
+	if (isAnthropicGatewayModel(model)) {
+		return streamCloudflareAnthropicAi(model, context, options);
+	}
+
 	const stream = createAssistantMessageEventStream();
 	void (async () => {
 		const output: AssistantMessage = {
@@ -323,15 +331,7 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, SimpleSt
 			const overridden = await options?.onPayload?.(payload, model);
 			const finalPayload = overridden === undefined ? payload : (overridden as typeof payload);
 
-			const extraHeaders: Record<string, string> = {};
-			if (options?.sessionId) {
-				// Pins related requests to the same model instance, enabling
-				// Workers AI's prompt prefix caching.
-				extraHeaders['x-session-affinity'] = options.sessionId;
-			}
-			if (options?.headers) {
-				Object.assign(extraHeaders, options.headers);
-			}
+			const extraHeaders = buildExtraHeaders(options);
 
 			// `Ai.run` only types overloads for known model IDs; we route
 			// arbitrary ids through the unknown-model overload (see RunOverload).
@@ -350,16 +350,10 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, SimpleSt
 				model,
 			);
 
-			if (!response.ok) {
-				const errorBody = await safeReadText(response);
-				throw new Error(
-					`Cloudflare AI binding returned ${response.status} ${response.statusText}` +
-						(errorBody ? `: ${errorBody}` : ''),
-				);
-			}
+			await assertSuccessfulBindingResponse(response);
 
 			if (!response.body) {
-				throw new Error('Cloudflare AI binding returned empty response body.');
+				throw new CloudflareAIBindingError({ message: 'Cloudflare AI binding returned empty response body.' });
 			}
 
 			stream.push({ type: 'start', partial: output });
@@ -594,6 +588,31 @@ const streamCloudflareWorkersAi: StreamFunction<CloudflareAIBindingApi, SimpleSt
 	return stream;
 };
 
+function streamCloudflareAnthropicAi(
+	model: Model<CloudflareAIBindingApi>,
+	context: Context,
+	options?: SimpleStreamOptions,
+) {
+	const ai = resolveBinding(model);
+	const gateway = getModelGateway(model);
+	const anthropicModel = toAnthropicGatewayModel(model);
+	const client = createAnthropicBindingClient(ai, model, options, gateway);
+
+	return streamAnthropic(anthropicModel, context, {
+		...options,
+		client,
+		cacheRetention: 'none',
+		thinkingEnabled: options?.reasoning ? true : false,
+		onPayload: async (payload, payloadModel) => {
+			const normalized = normalizeAnthropicGatewayPayload(payload as Record<string, unknown>);
+			const overridden = await options?.onPayload?.(normalized, payloadModel);
+			return overridden === undefined
+				? normalized
+				: normalizeAnthropicGatewayPayload(overridden as Record<string, unknown>);
+		},
+	} satisfies AnthropicOptions);
+}
+
 // ─── Internal helpers ───────────────────────────────────────────────────────
 
 /** Narrowed `Ai.run` shape for the unknown-model overload. */
@@ -608,20 +627,110 @@ type RunOverload = (
 	},
 ) => Promise<Response | Record<string, unknown>>;
 
+function isAnthropicGatewayModel(model: Model<CloudflareAIBindingApi>): boolean {
+	return model.id.startsWith('anthropic/');
+}
+
+function toAnthropicGatewayModel(
+	model: Model<CloudflareAIBindingApi>,
+): Model<'anthropic-messages'> {
+	return {
+		...model,
+		api: 'anthropic-messages',
+		baseUrl: '',
+		compat: {
+			supportsCacheControlOnTools: false,
+			supportsEagerToolInputStreaming: false,
+			supportsLongCacheRetention: false,
+			sendSessionAffinityHeaders: false,
+		},
+	};
+}
+
+function createAnthropicBindingClient(
+	ai: Ai,
+	model: Model<CloudflareAIBindingApi>,
+	options: SimpleStreamOptions | undefined,
+	gateway: CloudflareGatewayOptions | undefined,
+): AnthropicOptions['client'] {
+	return {
+		messages: {
+			create(params: Record<string, unknown>, requestOptions?: { signal?: AbortSignal }) {
+				return {
+					async asResponse() {
+						const extraHeaders = buildExtraHeaders(options);
+						const response = (await (ai.run as unknown as RunOverload)(model.id, params, {
+							returnRawResponse: true,
+							...(requestOptions?.signal ? { signal: requestOptions.signal } : {}),
+							...(Object.keys(extraHeaders).length > 0 ? { extraHeaders } : {}),
+							...(gateway ? { gateway } : {}),
+						})) as Response;
+
+						await assertSuccessfulBindingResponse(response);
+						return response;
+					},
+				};
+			},
+		},
+	} as unknown as AnthropicOptions['client'];
+}
+
+function buildExtraHeaders(options: SimpleStreamOptions | undefined): Record<string, string> {
+	const extraHeaders: Record<string, string> = {};
+	if (options?.sessionId) {
+		// Pins related requests to the same model instance, enabling provider-side
+		// prompt prefix caching where the Cloudflare binding supports it.
+		extraHeaders['x-session-affinity'] = options.sessionId;
+	}
+	if (options?.headers) {
+		Object.assign(extraHeaders, options.headers);
+	}
+	return extraHeaders;
+}
+
+function normalizeAnthropicGatewayPayload(payload: Record<string, unknown>): Record<string, unknown> {
+	const system = payload.system;
+	if (Array.isArray(system)) {
+		const text = system
+			.map((block) => {
+				if (typeof block === 'string') return block;
+				if (block && typeof block === 'object' && 'text' in block) {
+					const value = (block as { text?: unknown }).text;
+					return typeof value === 'string' ? value : '';
+				}
+				return '';
+			})
+			.filter((text) => text.length > 0)
+			.join('\n\n');
+		if (text.length > 0) {
+			return { ...payload, system: text };
+		}
+		const { system: _system, ...rest } = payload;
+		return rest;
+	}
+	return payload;
+}
+
+async function assertSuccessfulBindingResponse(response: Response): Promise<void> {
+	if (response.ok) return;
+	const body = await safeReadText(response);
+	throw new CloudflareAIBindingError({
+		status: response.status,
+		statusText: response.statusText,
+		body,
+	});
+}
+
 /**
  * Read the binding extension carried on the resolved Model.
  */
 function resolveBinding(model: Model<CloudflareAIBindingApi>): Ai {
 	const ai = getModelBinding(model);
 	if (!ai) {
-		throw new Error(
-			'[flue] Cloudflare AI binding not available. ' +
-				'Models prefixed with "cloudflare/" require running on the Cloudflare ' +
-				'target with `"ai": { "binding": "AI" }` declared in wrangler.jsonc. ' +
-				"For URL-based access without the binding, use pi-ai's " +
-				'`cloudflare-workers-ai/...` or `cloudflare-ai-gateway/...` providers ' +
-				'(both require Cloudflare API credentials in env vars).',
-		);
+		throw new CloudflareAIBindingError({
+			message:
+				'Cloudflare AI binding not available. Models prefixed with "cloudflare/" require a configured AI binding.',
+		});
 	}
 	return ai as Ai;
 }

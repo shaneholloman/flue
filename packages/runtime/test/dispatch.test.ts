@@ -2,7 +2,7 @@ import {
 	type FauxProviderRegistration,
 	fauxAssistantMessage,
 	registerFauxProvider,
-} from '@earendil-works/pi-ai';
+} from '@earendil-works/pi-ai/compat';
 import { afterEach, describe, expect, it } from 'vitest';
 import { defineAgent } from '../src/agent-definition.ts';
 import { OperationFailedError } from '../src/errors.ts';

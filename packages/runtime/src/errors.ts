@@ -679,6 +679,32 @@ export class ProviderRegistrationError extends FlueError {
 	}
 }
 
+export class CloudflareAIBindingError extends FlueError {
+	constructor({
+		message,
+		status,
+		statusText,
+		body,
+	}: {
+		message?: string;
+		status?: number;
+		statusText?: string;
+		body?: string;
+	}) {
+		const statusLabel = status === undefined ? undefined : `${status}${statusText ? ` ${statusText}` : ''}`;
+		super({
+			type: 'cloudflare_ai_binding_error',
+			message: message ?? `Cloudflare AI binding request failed${statusLabel ? ` with ${statusLabel}` : ''}.`,
+			details: body ? `Provider response: ${body}` : '',
+			dev: '',
+			meta: {
+				...(status !== undefined ? { status } : {}),
+				...(statusText ? { statusText } : {}),
+			},
+		});
+	}
+}
+
 export class ModelNotConfiguredError extends FlueError {
 	constructor({ callSite }: { callSite: string }) {
 		super({

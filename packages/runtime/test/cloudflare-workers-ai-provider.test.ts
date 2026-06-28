@@ -74,6 +74,106 @@ describe('Cloudflare AI binding provider', () => {
 		expect(events.at(-1)).toMatchObject({ type: 'done', reason: 'stop' });
 	});
 
+	it('formats Anthropic AI Gateway model requests with Anthropic Messages payloads', async () => {
+		const run = vi.fn(async () =>
+			createSseResponse(
+				'event: message_start\ndata: {"type":"message_start","message":{"id":"msg_1","usage":{"input_tokens":3,"output_tokens":0}}}\n\n',
+				'event: content_block_start\ndata: {"type":"content_block_start","index":0,"content_block":{"type":"text","text":""}}\n\n',
+				'event: content_block_delta\ndata: {"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"hello"}}\n\n',
+				'event: content_block_stop\ndata: {"type":"content_block_stop","index":0}\n\n',
+				'event: message_delta\ndata: {"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":1}}\n\n',
+				'event: message_stop\ndata: {"type":"message_stop"}\n\n',
+			),
+		);
+		registerProvider('cloudflare-anthropic', {
+			api: 'cloudflare-ai-binding',
+			binding: { run },
+			gateway: false,
+		});
+		const model = resolveModel('cloudflare-anthropic/anthropic/claude-3-5-sonnet-latest');
+		expect(model).toBeDefined();
+		if (!model) throw new Error('Expected a resolved Cloudflare Anthropic model.');
+
+		const events = await collectEvents(
+			getCloudflareAIBindingApiProvider().streamSimple(
+				model as Model<'cloudflare-ai-binding'>,
+				{
+					systemPrompt: 'Use short answers.',
+					messages: [{ role: 'user', content: 'Say hello', timestamp: 1 }],
+					tools: [
+						{
+							name: 'lookup',
+							description: 'Look up a value.',
+							parameters: {
+								type: 'object',
+								properties: { query: { type: 'string' } },
+								required: ['query'],
+							},
+						},
+					],
+				},
+				{ maxTokens: 1024 },
+			),
+		);
+
+		expect(run).toHaveBeenCalledWith(
+			'anthropic/claude-3-5-sonnet-latest',
+			expect.objectContaining({
+				messages: [{ role: 'user', content: 'Say hello' }],
+				system: 'Use short answers.',
+				max_tokens: 1024,
+				stream: true,
+				tools: [
+					expect.objectContaining({
+						name: 'lookup',
+						input_schema: {
+							type: 'object',
+							properties: { query: { type: 'string' } },
+							required: ['query'],
+						},
+					}),
+				],
+			}),
+			{ returnRawResponse: true },
+		);
+		expect(events.at(-1)).toMatchObject({
+			type: 'done',
+			reason: 'stop',
+			message: { content: [{ type: 'text', text: 'hello' }] },
+		});
+	});
+
+	it('surfaces Anthropic AI Gateway binding errors before parsing the stream', async () => {
+		const run = vi.fn(
+			async () => new Response('{"error":"invalid gateway token"}', { status: 401, statusText: 'Unauthorized' }),
+		);
+		registerProvider('cloudflare-anthropic-error', {
+			api: 'cloudflare-ai-binding',
+			binding: { run },
+			gateway: false,
+		});
+		const model = resolveModel('cloudflare-anthropic-error/anthropic/claude-3-5-sonnet-latest');
+		expect(model).toBeDefined();
+		if (!model) throw new Error('Expected a resolved Cloudflare Anthropic model.');
+
+		const events = await collectEvents(
+			getCloudflareAIBindingApiProvider().streamSimple(model as Model<'cloudflare-ai-binding'>, {
+				messages: [{ role: 'user', content: 'Say hello', timestamp: 1 }],
+			}),
+		);
+
+		expect(events).toEqual([
+			expect.objectContaining({
+				type: 'error',
+				reason: 'error',
+				error: expect.objectContaining({
+					stopReason: 'error',
+					errorMessage: 'Cloudflare AI binding request failed with 401 Unauthorized.',
+				}),
+			}),
+		]);
+	});
+
 	it('forwards gateway options when a provider registration enables AI Gateway', async () => {
 		const run = vi.fn(async () =>
 			createSseResponse('data: {"choices":[{"finish_reason":"stop"}]}\n\n'),
@@ -555,7 +655,7 @@ describe('Cloudflare AI binding provider', () => {
 				reason: 'error',
 				error: expect.objectContaining({
 					stopReason: 'error',
-					errorMessage: 'Cloudflare AI binding returned 429 Too Many Requests: quota exceeded',
+					errorMessage: 'Cloudflare AI binding request failed with 429 Too Many Requests.',
 				}),
 			}),
 		]);
@@ -586,8 +686,7 @@ describe('Cloudflare AI binding provider', () => {
 				reason: 'error',
 				error: expect.objectContaining({
 					stopReason: 'error',
-					errorMessage:
-						'Cloudflare AI binding returned 502 Bad Gateway: request aborted by upstream',
+					errorMessage: 'Cloudflare AI binding request failed with 502 Bad Gateway.',
 				}),
 			}),
 		]);
@@ -674,7 +773,7 @@ describe('Cloudflare AI binding provider', () => {
 				reason: 'error',
 				error: expect.objectContaining({
 					stopReason: 'error',
-					errorMessage: expect.stringContaining('[flue] Cloudflare AI binding not available.'),
+					errorMessage: expect.stringContaining('Cloudflare AI binding not available.'),
 				}),
 			}),
 		]);
