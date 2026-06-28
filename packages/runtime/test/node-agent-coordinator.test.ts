@@ -470,7 +470,12 @@ describe('NodeAgentCoordinator', () => {
 		});
 	});
 
-	describe('interrupt and recover', () => {
+	// These tests fork a fresh Node process that loads the full runtime bundle
+	// and performs SQLite I/O on both the child and the reconciling parent. The
+	// 5s default test timeout is too tight under the CPU contention of the full
+	// parallel suite (the cause of intermittent timeouts here); give generous
+	// headroom. A real hang would still fail at this ceiling.
+	describe('interrupt and recover', { timeout: 30_000 }, () => {
 		it('repairs canonical input after a real process kill before the input marker', async () => {
 			const dbPath = createTempDbPath();
 			await killAtDurableBoundary('input-marker', dbPath);
