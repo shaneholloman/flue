@@ -46,7 +46,7 @@ export default postgres({
 });
 ```
 
-Flue discovers the adapter at build time and wires it into the generated Node server. On startup, it creates or verifies the required `flue_*` tables. Agent sessions, accepted submissions, and workflow-run records then survive process restarts and can be shared across replicas; application business data remains application-owned. The blueprint applies only to Node targets because Cloudflare deployments use Durable Object SQLite instead.
+Flue discovers the adapter at build time and wires it into the generated Node server. On startup, it creates or verifies the required `flue_*` tables. Canonical agent conversations, immutable attachments, accepted submissions, and workflow history then survive process replacement. Replicas may share durable state and workflow history, but each agent instance still requires one live Node owner; Postgres does not enable active-active same-instance execution. Application business data remains application-owned. The blueprint applies only to Node targets because Cloudflare deployments use Durable Object SQLite instead.
 
 ## Configure
 
@@ -62,8 +62,7 @@ store.
 The blueprint installs `@flue/postgres` with `pg` by default and writes a
 source-root `db.ts` that wraps it. Flue discovers `db.ts` at build
 time and wires it into the generated Node server. After running the command,
-your agents' sessions, accepted submissions, and workflow-run records persist to
-Postgres instead of in-memory state.
+canonical agent conversations, immutable attachments, accepted submissions, and workflow-run records persist to Postgres instead of in-memory state.
 
 `@flue/postgres` is a **Node.js** adapter. The Cloudflare target uses Durable
 Object SQLite automatically and rejects a `db.ts` file at build time, so this
@@ -115,14 +114,15 @@ database written by a newer Flue refuses to start rather than corrupting state.
 
 A Flue database stores runtime state, not your whole application.
 
-| Stored by Flue                                          | Not stored by Flue                                             |
-| ------------------------------------------------------- | -------------------------------------------------------------- |
-| Agent session messages and compaction state             | Sandbox files and installed dependencies                       |
-| Accepted direct prompts and `dispatch(...)` submissions | External API side effects                                      |
-| Workflow-run records and persisted events               | Application-owned business data unless your own tools store it |
-| Run indexing for `/runs` lookups and `listRuns()`       | Provider credentials or secrets                                |
+| Stored by Flue                                                   | Not stored by Flue                                             |
+| ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| Canonical agent conversation streams and compaction records       | Sandbox files and installed dependencies                       |
+| Immutable attachment payloads                                    | External API side effects                                      |
+| Accepted direct prompts and `dispatch(...)` submissions          | Application-owned business data unless your own tools store it |
+| Workflow-run records and persisted events                         | Provider credentials or secrets                                |
+| Run indexing for `/runs` lookups and `listRuns()`                 |                                                                |
 
-The submission rows and their turn journals are what make accepted work
+The submission rows are what make accepted work
 recoverable after an interruption. See [Durable Agents](/docs/concepts/durable-execution/)
 for how recovery uses them, and the [Data Persistence API](/docs/api/data-persistence-api/)
 for the exact adapter contract.
@@ -133,12 +133,10 @@ for the exact adapter contract.
 | -------------------------------------------------------------- | ------------------------------------------------------------- |
 | Local development, or restart persistence is unnecessary       | `sqlite()` from `@flue/runtime/node` (file path or in-memory) |
 | Single-host Node deployment                                    | File-backed `sqlite()`                                        |
-| Multi-replica Node deployment, or state must survive host loss | `@flue/postgres`                                              |
+| Multi-replica Node deployment, or state must survive host loss | `@flue/postgres`, with one live owner per agent instance      |
 | Cloudflare deployment                                          | Built-in Durable Object SQLite (no `db.ts`)                   |
 
-Choose Postgres when more than one process needs the same accepted work and
-run history, or when a single host's disk is not a durable enough home for
-state. Managed Postgres pairs naturally with the container deploy targets —
+Choose Postgres when a replacement process must recover accepted work, when replicas need shared workflow history, or when a single host's disk is not a durable enough home for state. Keep one live owner for each agent instance and use instance-affine routing across replicas. Managed Postgres pairs naturally with the container deploy targets —
 see [Deploy on AWS](/docs/ecosystem/deploy/aws/) for RDS, and the other
 [deploy guides](/docs/ecosystem/deploy/node/) for provisioning a database
 alongside the server.

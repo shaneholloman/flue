@@ -1,488 +1,112 @@
-import type { AttachedAgentEvent, LlmMessage } from '@flue/sdk';
+import type { FlueConversationState } from '@flue/sdk';
 import { describe, expect, it } from 'vitest';
-import { emptyAgentState, reduceAgentEvent } from '../src/agent-reducer.ts';
+import { type AgentReducerEvent, emptyAgentState, reduceAgentEvent } from '../src/agent-reducer.ts';
+import { conversation } from './fixtures/observation.ts';
 
-const base = {
-	v: 3 as const,
-	instanceId: 'instance-1',
-	timestamp: '2026-06-12T00:00:00.000Z',
-};
-
-function message(
-	type: 'message_start' | 'message_end',
-	value: LlmMessage,
-	extra: Partial<AttachedAgentEvent & { submissionId?: string }> = {},
-): AttachedAgentEvent & { submissionId?: string } {
-	return { ...base, type, message: value, eventIndex: 1, ...extra } as AttachedAgentEvent & {
-		submissionId?: string;
-	};
+function observed(
+	state: FlueConversationState | undefined,
+	phase: 'loading' | 'connecting' | 'live' | 'up-to-date' | 'absent' | 'error' | 'closed' = 'live',
+	error?: Error,
+): AgentReducerEvent {
+	return { type: 'local_observation', conversation: state, phase, error };
 }
 
 describe('reduceAgentEvent()', () => {
-	it('appends distinct standalone messages when data events omit ids', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			...base,
-			type: 'data',
-			name: 'notice',
-			data: { status: 'ready' },
-			eventIndex: 1,
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'data',
-			name: 'notice',
-			data: { status: 'ready' },
-			eventIndex: 2,
-		});
-
-		expect(state.messages).toHaveLength(2);
-		expect(state.messages.map((item) => item.parts)).toEqual([
-			[{ type: 'data-notice', data: { status: 'ready' } }],
-			[{ type: 'data-notice', data: { status: 'ready' } }],
-		]);
-	});
-
-	it('reconciles data by name and id without changing first-emission order', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			...base,
-			type: 'data',
-			name: 'commit',
-			id: 'same:id',
-			data: { status: 'running' },
-			eventIndex: 1,
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'data',
-			name: 'validation',
-			id: 'same:id',
-			data: { status: 'done' },
-			eventIndex: 2,
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'data',
-			name: 'commit',
-			id: 'same:id',
-			data: { status: 'done' },
-			eventIndex: 3,
-		});
-
-		expect(state.messages).toHaveLength(2);
-		expect(state.messages.map((item) => item.parts[0])).toEqual([
-			{ type: 'data-commit', id: 'same:id', data: { status: 'done' } },
-			{ type: 'data-validation', id: 'same:id', data: { status: 'done' } },
-		]);
-	});
-
-	it('does not duplicate an unidentified data part when its stream event is replayed', () => {
-		const event = {
-			...base,
-			type: 'data' as const,
-			name: 'notice',
-			data: { status: 'ready' },
-			eventIndex: 1,
-		};
-		const state = reduceAgentEvent(reduceAgentEvent(emptyAgentState, event), event);
-
-		expect(state.messages).toHaveLength(1);
-	});
-
-	it('builds text and thinking parts from ordered deltas when a message has started', () => {
-		let state = reduceAgentEvent(
+	it('exposes the observed conversation messages directly as UI messages', () => {
+		const state = reduceAgentEvent(
 			emptyAgentState,
-			message('message_start', { role: 'assistant', content: [] }, { turnId: 'turn-1' }),
-		);
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_start',
-			contentIndex: 0,
-			eventIndex: 2,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_delta',
-			contentIndex: 0,
-			delta: 'consider',
-			eventIndex: 3,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_end',
-			contentIndex: 0,
-			content: 'consider carefully',
-			eventIndex: 4,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'text_delta',
-			text: 'hello',
-			eventIndex: 5,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'text_delta',
-			text: ' world',
-			eventIndex: 6,
-			turnId: 'turn-1',
-		});
-
-		expect(state.messages).toEqual([
-			{
-				id: 'turn:turn-1',
-				role: 'assistant',
-				metadata: undefined,
-				parts: [
-					{ type: 'reasoning', text: 'consider carefully', state: 'done' },
-					{ type: 'text', text: 'hello world', state: 'streaming' },
-				],
-			},
-		]);
-	});
-
-	it('correlates interleaved thinking events by content index', () => {
-		let state = reduceAgentEvent(
-			emptyAgentState,
-			message('message_start', { role: 'assistant', content: [] }, { turnId: 'turn-1' }),
-		);
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_start',
-			contentIndex: 0,
-			eventIndex: 2,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_start',
-			contentIndex: 2,
-			eventIndex: 3,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_delta',
-			contentIndex: 0,
-			delta: 'first',
-			eventIndex: 4,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_end',
-			contentIndex: 0,
-			content: 'first done',
-			eventIndex: 5,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_delta',
-			contentIndex: 2,
-			delta: 'second',
-			eventIndex: 6,
-			turnId: 'turn-1',
-		});
-
-		expect(state.messages[0]?.parts).toEqual([
-			{ type: 'reasoning', text: 'first done', state: 'done' },
-			{ type: 'reasoning', text: 'second', state: 'streaming' },
-		]);
-
-		state = reduceAgentEvent(state, message('message_end', {
-			role: 'assistant',
-			content: [
-				{ type: 'thinking', thinking: 'first final' },
-				{ type: 'text', text: 'answer' },
-				{ type: 'thinking', thinking: 'second final' },
-			],
-		}, { turnId: 'turn-1', eventIndex: 7 }));
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'thinking_delta',
-			contentIndex: 0,
-			delta: ' stale',
-			eventIndex: 8,
-			turnId: 'turn-1',
-		});
-		expect(state.messages[0]?.parts).toEqual([
-			{ type: 'reasoning', text: 'first final', state: 'done' },
-			{ type: 'text', text: 'answer', state: 'done' },
-			{ type: 'reasoning', text: 'second final', state: 'done' },
-		]);
-	});
-
-	it('does not duplicate provisional parts when an interrupted partial batch is replayed', () => {
-		const events: AttachedAgentEvent[] = [
-			message(
-				'message_start',
-				{ role: 'assistant', content: [] },
-				{ submissionId: 'submission-1', turnId: 'turn-1', eventIndex: 1 },
-			),
-			{
-				...base,
-				type: 'thinking_start',
-				eventIndex: 2,
-				submissionId: 'submission-1',
-				turnId: 'turn-1',
-			},
-			{
-				...base,
-				type: 'thinking_delta',
-				delta: 'checking',
-				eventIndex: 3,
-				submissionId: 'submission-1',
-				turnId: 'turn-1',
-			},
-			{
-				...base,
-				type: 'text_delta',
-				text: 'partial',
-				eventIndex: 4,
-				submissionId: 'submission-1',
-				turnId: 'turn-1',
-			},
-			{
-				...base,
-				type: 'tool_start',
-				toolName: 'search',
-				toolCallId: 'tool-1',
-				eventIndex: 5,
-				submissionId: 'submission-1',
-				turnId: 'turn-1',
-			},
-		] as AttachedAgentEvent[];
-		const once = events.reduce(reduceAgentEvent, emptyAgentState);
-		const replayed = events.reduce(reduceAgentEvent, once);
-
-		expect(replayed.messages).toEqual(once.messages);
-		expect(replayed.messages[0]?.parts).toEqual([
-			{ type: 'reasoning', text: 'checking', state: 'streaming' },
-			{ type: 'text', text: 'partial', state: 'streaming' },
-			{
-				type: 'dynamic-tool',
-				toolName: 'search',
-				toolCallId: 'tool-1',
-				state: 'input-available',
-				input: undefined,
-			},
-		]);
-	});
-
-	it('accepts restarted event indexes for distinct direct and dispatched contexts', () => {
-		const direct = message(
-			'message_end',
-			{ role: 'user', content: 'direct' },
-			{ submissionId: 'submission-1', eventIndex: 0 },
-		);
-		const dispatched = message(
-			'message_end',
-			{ role: 'user', content: 'dispatched' },
-			{
-				dispatchId: 'dispatch-1',
-				submissionId: 'dispatch-1',
-				eventIndex: 0,
-				timestamp: '2026-06-12T00:01:00.000Z',
-			},
-		);
-		let state = reduceAgentEvent(emptyAgentState, direct);
-		state = reduceAgentEvent(state, dispatched);
-
-		expect(state.messages.map((item) => item.id)).toEqual([
-			'submission:submission-1:user:0',
-			'submission:dispatch-1:user:0',
-		]);
-	});
-
-	it('reconciles streamed content to the authoritative terminal message', () => {
-		let state = reduceAgentEvent(
-			emptyAgentState,
-			message('message_start', { role: 'assistant', content: [] }, { turnId: 'turn-1' }),
-		);
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'text_delta',
-			text: 'draft',
-			eventIndex: 2,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(
-			state,
-			message(
-				'message_end',
-				{ role: 'assistant', content: [{ type: 'text', text: 'final' }] },
-				{ turnId: 'turn-1', eventIndex: 3 },
+			observed(
+				conversation([
+					{ id: 'entry-user', role: 'user', parts: [{ type: 'text', text: 'hello', state: 'done' }] },
+				]),
 			),
 		);
 
-		expect(state.messages[0]?.parts).toEqual([{ type: 'text', text: 'final', state: 'done' }]);
-	});
-
-	it('is idempotent when message_end is redelivered', () => {
-		const event = message(
-			'message_end',
-			{ role: 'assistant', content: [{ type: 'text', text: 'done' }] },
-			{ turnId: 'turn-1' },
-		);
-		const once = reduceAgentEvent(emptyAgentState, event);
-		const twice = reduceAgentEvent(once, event);
-
-		expect(twice.messages).toEqual(once.messages);
-		expect(twice.messages).toHaveLength(1);
-	});
-
-	it('provisions an assistant message when a late stream begins at tool_start', () => {
-		const state = reduceAgentEvent(emptyAgentState, {
-			...base,
-			type: 'tool_start',
-			toolName: 'search',
-			toolCallId: 'tool-1',
-			eventIndex: 20,
-			turnId: 'turn-9',
-		});
-
+		expect(state.historyReady).toBe(true);
 		expect(state.messages).toEqual([
-			{
-				id: 'turn:turn-9',
-				role: 'assistant',
-				metadata: undefined,
-				parts: [
+			{ id: 'entry-user', role: 'user', parts: [{ type: 'text', text: 'hello', state: 'done' }] },
+		]);
+	});
+
+	it('passes through dynamic-tool and file parts without reinterpretation', () => {
+		const state = reduceAgentEvent(
+			emptyAgentState,
+			observed(
+				conversation([
+					{ id: 'entry-user', role: 'user', parts: [{ type: 'file', mediaType: 'image/png' }] },
 					{
-						type: 'dynamic-tool',
-						toolName: 'search',
-						toolCallId: 'tool-1',
-						state: 'input-available',
-						input: undefined,
+						id: 'entry-assistant',
+						role: 'assistant',
+						parts: [
+							{
+								type: 'dynamic-tool',
+								toolCallId: 'call-1',
+								toolName: 'lookup',
+								input: { q: 1 },
+								state: 'output-available',
+								output: { temperature: 21 },
+							},
+						],
 					},
-				],
-			},
-		]);
-	});
-
-	it('preserves a late-stream tool result through terminal reconciliation', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			...base,
-			type: 'tool_start',
-			toolName: 'search',
-			toolCallId: 'tool-1',
-			eventIndex: 20,
-			turnId: 'turn-9',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'tool',
-			toolName: 'search',
-			toolCallId: 'tool-1',
-			isError: false,
-			result: ['result'],
-			durationMs: 1,
-			eventIndex: 21,
-		});
-		state = reduceAgentEvent(
-			state,
-			message(
-				'message_end',
-				{
-					role: 'assistant',
-					content: [{ type: 'toolCall', id: 'tool-1', name: 'search', arguments: { q: 'flue' } }],
-				},
-				{ turnId: 'turn-9', eventIndex: 22 },
+				]),
 			),
 		);
 
-		expect(state.messages[0]?.parts).toEqual([
+		expect(state.messages[0]?.parts).toEqual([{ type: 'file', mediaType: 'image/png' }]);
+		expect(state.messages[1]?.parts).toEqual([
 			{
 				type: 'dynamic-tool',
-				toolName: 'search',
-				toolCallId: 'tool-1',
+				toolName: 'lookup',
+				toolCallId: 'call-1',
+				input: { q: 1 },
 				state: 'output-available',
-				input: { q: 'flue' },
-				output: ['result'],
-				errorText: undefined,
+				output: { temperature: 21 },
 			},
 		]);
 	});
 
-	it('uses finalized tool input and preserves its result through terminal reconciliation', () => {
+	it('replaces the transcript when a new conversation is observed', () => {
 		let state = reduceAgentEvent(
 			emptyAgentState,
-			message('message_start', { role: 'assistant', content: [] }, { turnId: 'turn-1' }),
+			observed(conversation([{ id: 'entry-old', role: 'user', parts: [] }])),
 		);
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'tool_start',
-			toolName: 'search',
-			toolCallId: 'tool-1',
-			eventIndex: 2,
-			turnId: 'turn-1',
-		});
-		state = reduceAgentEvent(state, {
-			...base,
-			type: 'tool',
-			toolName: 'search',
-			toolCallId: 'tool-1',
-			isError: false,
-			result: ['result'],
-			durationMs: 1,
-			eventIndex: 3,
-		});
 		state = reduceAgentEvent(
 			state,
-			message(
-				'message_end',
-				{
-					role: 'assistant',
-					content: [{ type: 'toolCall', id: 'tool-1', name: 'search', arguments: { q: 'flue' } }],
-				},
-				{ turnId: 'turn-1', eventIndex: 4 },
+			observed(
+				conversation([
+					{ id: 'entry-selected', role: 'assistant', parts: [{ type: 'text', text: 'selected', state: 'done' }] },
+				]),
 			),
 		);
 
-		expect(state.messages[0]?.parts[0]).toEqual({
-			type: 'dynamic-tool',
-			toolName: 'search',
-			toolCallId: 'tool-1',
-			state: 'output-available',
-			input: { q: 'flue' },
-			output: ['result'],
-			errorText: undefined,
-		});
+		expect(state.messages.map((message) => message.id)).toEqual(['entry-selected']);
 	});
 
-	it('accepts terminal reconciliation after attaching too late for preceding deltas', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			...base,
-			type: 'text_delta',
-			text: 'missed start',
-			eventIndex: 20,
-			turnId: 'turn-9',
-		});
-		expect(state).toBe(emptyAgentState);
-		state = reduceAgentEvent(
-			state,
-			message(
-				'message_end',
-				{ role: 'assistant', content: [{ type: 'text', text: 'complete' }] },
-				{ turnId: 'turn-9', eventIndex: 21 },
-			),
+	it('clears the transcript when the observed conversation is absent', () => {
+		let state = reduceAgentEvent(
+			emptyAgentState,
+			observed(conversation([{ id: 'entry-user', role: 'user', parts: [] }])),
 		);
+		state = reduceAgentEvent(state, observed(undefined, 'absent'));
 
-		expect(state.messages[0]).toMatchObject({
-			id: 'turn:turn-9',
-			parts: [{ type: 'text', text: 'complete', state: 'done' }],
-		});
+		expect(state.messages).toEqual([]);
+		expect(state.status).toBe('idle');
+		expect(state.historyReady).toBe(true);
 	});
 
-	it('reconciles receipt-before-echo without matching message text', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			type: 'local_send_submitted',
-			localId: 'local-1',
-			message: 'same',
-		});
+	it('surfaces an observation error', () => {
+		const error = new Error('stream failed');
+		const state = reduceAgentEvent(emptyAgentState, observed(undefined, 'error', error));
+
+		expect(state.status).toBe('error');
+		expect(state.error).toBe(error);
+	});
+
+	it('keeps a stable optimistic id after the canonical user message arrives', () => {
+		let state = reduceAgentEvent(emptyAgentState, observed(conversation()));
+		state = reduceAgentEvent(state, { type: 'local_send_submitted', localId: 'local-1', message: 'hello' });
+		// Before confirmation the optimistic echo renders under its local id.
+		expect(state.messages[0]?.id).toBe('local-1');
 		state = reduceAgentEvent(state, {
 			type: 'local_send_admitted',
 			localId: 'local-1',
@@ -490,48 +114,26 @@ describe('reduceAgentEvent()', () => {
 		});
 		state = reduceAgentEvent(
 			state,
-			message('message_end', { role: 'user', content: 'same' }, { submissionId: 'submission-1' }),
+			observed(
+				conversation([
+					{
+						id: 'entry-user',
+						role: 'user',
+						submissionId: 'submission-1',
+						parts: [{ type: 'text', text: 'hello', state: 'done' }],
+					},
+				]),
+			),
 		);
 
+		// The canonical user message is re-keyed to the optimistic local id, so the
+		// rendered row identity is stable across the optimistic→confirmed swap (no
+		// remove+add that would churn a keyed/virtualized list).
 		expect(state.messages).toHaveLength(1);
-		expect(state.messages[0]?.id).toBe('submission:submission-1:user:0');
+		expect(state.messages[0]?.id).toBe('local-1');
 	});
 
-	it('keeps an optimistic user message position when its durable echo arrives late', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			type: 'local_send_submitted',
-			localId: 'local-1',
-			message: 'hello',
-		});
-		state = reduceAgentEvent(state, {
-			type: 'local_send_admitted',
-			localId: 'local-1',
-			submissionId: 'submission-1',
-		});
-		state = reduceAgentEvent(
-			state,
-			message(
-				'message_end',
-				{ role: 'assistant', content: [{ type: 'text', text: 'reply' }] },
-				{ submissionId: 'submission-1', turnId: 'turn-1', eventIndex: 2 },
-			),
-		);
-		state = reduceAgentEvent(
-			state,
-			message(
-				'message_end',
-				{ role: 'user', content: 'hello' },
-				{ submissionId: 'submission-1', eventIndex: 3 },
-			),
-		);
-
-		expect(state.messages.map((item) => item.id)).toEqual([
-			'submission:submission-1:user:0',
-			'turn:turn-1',
-		]);
-	});
-
-	it('reconciles echo-before-receipt by dropping the optimistic duplicate', () => {
+	it('reconciles the optimistic message when the canonical transcript arrives before admission', () => {
 		let state = reduceAgentEvent(emptyAgentState, {
 			type: 'local_send_submitted',
 			localId: 'local-1',
@@ -539,60 +141,15 @@ describe('reduceAgentEvent()', () => {
 		});
 		state = reduceAgentEvent(
 			state,
-			message('message_end', { role: 'user', content: 'hello' }, { submissionId: 'submission-1' }),
-		);
-		expect(state.messages).toHaveLength(2);
-		state = reduceAgentEvent(state, {
-			type: 'local_send_admitted',
-			localId: 'local-1',
-			submissionId: 'submission-1',
-		});
-
-		expect(state.messages).toHaveLength(1);
-		expect(state.messages[0]?.id).toBe('submission:submission-1:user:0');
-	});
-
-	it('keeps another local submission pending when one submission becomes idle', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			type: 'local_send_submitted',
-			localId: 'local-1',
-			message: 'first',
-		});
-		state = reduceAgentEvent(state, {
-			type: 'local_send_admitted',
-			localId: 'local-1',
-			submissionId: 'submission-1',
-		});
-		state = reduceAgentEvent(state, {
-			type: 'local_send_submitted',
-			localId: 'local-2',
-			message: 'second',
-		});
-		state = reduceAgentEvent(state, {
-			type: 'idle',
-			eventIndex: 10,
-			timestamp: base.timestamp,
-			v: 3,
-			instanceId: base.instanceId,
-			submissionId: 'submission-1',
-		});
-
-		expect(state.status).toBe('submitted');
-		expect(state.pendingSends).toEqual([{ localId: 'local-2' }]);
-	});
-
-	it('reconciles assistant activity that arrives before admission', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
-			type: 'local_send_submitted',
-			localId: 'local-1',
-			message: 'hello',
-		});
-		state = reduceAgentEvent(
-			state,
-			message(
-				'message_start',
-				{ role: 'assistant', content: [] },
-				{ submissionId: 'submission-1', turnId: 'turn-1' },
+			observed(
+				conversation([
+					{
+						id: 'entry-user',
+						role: 'user',
+						submissionId: 'submission-1',
+						parts: [{ type: 'text', text: 'hello', state: 'done' }],
+					},
+				]),
 			),
 		);
 		state = reduceAgentEvent(state, {
@@ -601,23 +158,100 @@ describe('reduceAgentEvent()', () => {
 			submissionId: 'submission-1',
 		});
 
+		expect(state.messages.map((message) => message.id)).toEqual(['local-1']);
+		expect(state.pendingSends).toEqual([]);
 		expect(state.status).toBe('streaming');
 	});
 
-	it('removes optimistic content when admission fails', () => {
-		let state = reduceAgentEvent(emptyAgentState, {
+	it('remains idle when a completed settlement is observed before admission', () => {
+		let state = reduceAgentEvent(emptyAgentState, observed(conversation()));
+		state = reduceAgentEvent(state, { type: 'local_send_submitted', localId: 'local-1', message: 'hello' });
+		state = reduceAgentEvent(
+			state,
+			observed(conversation([], [{ submissionId: 'submission-1', outcome: 'completed' }])),
+		);
+		state = reduceAgentEvent(state, {
+			type: 'local_send_admitted',
+			localId: 'local-1',
+			submissionId: 'submission-1',
+		});
+
+		expect(state.pendingSends).toEqual([]);
+		expect(state.activeSubmissionIds).toEqual([]);
+		expect(state.status).toBe('idle');
+	});
+
+	it('renders an instant local data-URL preview for optimistic image sends', () => {
+		let state = reduceAgentEvent(emptyAgentState, observed(conversation()));
+		state = reduceAgentEvent(state, {
 			type: 'local_send_submitted',
 			localId: 'local-1',
-			message: 'hello',
+			message: 'see this',
+			images: [{ type: 'image', data: 'AAAA', mimeType: 'image/png', filename: 'shot.png' }],
 		});
+
+		expect(state.messages[0]?.parts[1]).toEqual({
+			type: 'file',
+			mediaType: 'image/png',
+			url: 'data:image/png;base64,AAAA',
+			filename: 'shot.png',
+		});
+	});
+
+	it('retains a failed send in the transcript with retry metadata', () => {
+		let state = reduceAgentEvent(emptyAgentState, observed(conversation()));
+		state = reduceAgentEvent(state, { type: 'local_send_submitted', localId: 'local-1', message: 'hello' });
+		const error = new Error('network down');
+		state = reduceAgentEvent(state, { type: 'local_send_failed', localId: 'local-1', error });
+
+		// The optimistic message stays visible (not silently dropped) and is
+		// reported via failedSends so a UI can offer retry.
+		expect(state.messages.map((message) => message.id)).toEqual(['local-1']);
+		expect(state.failedSends).toEqual([{ id: 'local-1', message: 'hello', error }]);
+		expect(state.status).toBe('error');
+		expect(state.error).toBe(error);
+	});
+
+	it('clears a prior failed send when a new message is submitted', () => {
+		let state = reduceAgentEvent(emptyAgentState, observed(conversation()));
+		state = reduceAgentEvent(state, { type: 'local_send_submitted', localId: 'local-1', message: 'one' });
 		state = reduceAgentEvent(state, {
 			type: 'local_send_failed',
 			localId: 'local-1',
-			error: new Error('offline'),
+			error: new Error('network down'),
+		});
+		expect(state.status).toBe('error');
+
+		// Submitting again supersedes the failed send: it is dropped from the
+		// transcript and from failedSends, and status tracks the in-flight send —
+		// so a later success can't leave a stale failure poisoning status.
+		state = reduceAgentEvent(state, { type: 'local_send_submitted', localId: 'local-2', message: 'two' });
+		expect(state.messages.map((message) => message.id)).toEqual(['local-2']);
+		expect(state.status).toBe('submitted');
+		expect(state.failedSends).toEqual([]);
+	});
+
+	it('surfaces the failure when a failed settlement is observed before admission', () => {
+		let state = reduceAgentEvent(emptyAgentState, observed(conversation()));
+		state = reduceAgentEvent(state, { type: 'local_send_submitted', localId: 'local-1', message: 'hello' });
+		state = reduceAgentEvent(
+			state,
+			observed(
+				conversation(
+					[],
+					[{ submissionId: 'submission-1', outcome: 'failed', error: { message: 'failed before receipt' } }],
+				),
+			),
+		);
+		state = reduceAgentEvent(state, {
+			type: 'local_send_admitted',
+			localId: 'local-1',
+			submissionId: 'submission-1',
 		});
 
-		expect(state.messages).toEqual([]);
+		expect(state.pendingSends).toEqual([]);
+		expect(state.activeSubmissionIds).toEqual([]);
 		expect(state.status).toBe('error');
-		expect(state.error?.message).toBe('offline');
+		expect(state.error?.message).toBe('failed before receipt');
 	});
 });

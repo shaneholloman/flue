@@ -1,34 +1,26 @@
 import type { AgentExecutionStore } from '../agent-execution-store.ts';
-import { migrateFlueSqlSchema } from '../schema-version.ts';
+import { SqliteConversationStreamStore } from '../runtime/conversation-stream-store.ts';
 import {
 	createSqlAgentExecutionStoreFromSql,
-	ensureSessionTable,
 	ensureSqlAgentExecutionTables,
-	SqlSessionStore,
 } from '../sql-agent-execution-store.ts';
-import { ensureSqlPersistedChunkTable } from '../sql-persisted-chunk-store.ts';
+import { ensureSqlAttachmentTable, SqliteAttachmentStore } from '../sql-attachment-store.ts';
 import type { SqlStorage } from '../sql-storage.ts';
-import type { SessionStore } from '../types.ts';
 
 interface DurableObjectStorage {
 	readonly sql?: SqlStorage;
 	transactionSync?<T>(closure: () => T): T;
 }
 
-export function createSqlSessionStore(storage: DurableObjectStorage): SessionStore {
-	const sql = storage.sql;
-	const transactionSync = storage.transactionSync;
-	if (!sql || typeof transactionSync !== 'function') {
-		throw new Error(
-			'[flue] Cloudflare workflow session persistence requires Durable Object SQLite.',
-		);
-	}
-	migrateFlueSqlSchema(sql, () => {
-		ensureSessionTable(sql);
-		ensureSqlPersistedChunkTable(sql);
-	});
+export function createSqlConversationStores(storage: DurableObjectStorage) {
+	const sql = storage.sql as SqlStorage;
+	const transactionSync = storage.transactionSync as NonNullable<DurableObjectStorage['transactionSync']>;
 	const runTransaction = <T>(closure: () => T): T => transactionSync.call(storage, closure) as T;
-	return new SqlSessionStore(sql, runTransaction);
+	ensureSqlAttachmentTable(sql);
+	return {
+		conversationStreamStore: new SqliteConversationStreamStore(sql, runTransaction),
+		attachmentStore: new SqliteAttachmentStore(sql, runTransaction),
+	};
 }
 
 export function createSqlAgentExecutionStore(

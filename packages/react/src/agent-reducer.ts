@@ -1,620 +1,260 @@
 import {
 	type AgentPromptImage,
-	type AttachedAgentEvent,
-	IMAGE_DATA_OMITTED,
-	type LlmMessage,
-	type PromptUsage,
+	type FlueConversationMessage,
+	type FlueConversationState,
 } from '@flue/sdk';
-import type { UIMessage, UIMessagePart } from './types.ts';
 
 export type AgentStatus = 'idle' | 'connecting' | 'submitted' | 'streaming' | 'error';
 
+/** One locally-submitted message whose send failed, retained for retry UIs. */
+export interface FailedSend {
+	/** Id of the retained optimistic message in `messages` (the local id). */
+	id: string;
+	/** The text the user tried to send. */
+	message: string;
+	error: Error;
+}
+
 export interface AgentSnapshot {
-	messages: UIMessage[];
+	messages: FlueConversationMessage[];
 	status: AgentStatus;
 	historyReady: boolean;
 	error: Error | undefined;
+	/**
+	 * Sends that failed before the server accepted them. Their optimistic
+	 * messages remain in `messages` (keyed by `id`) so a UI can show them with a
+	 * retry affordance instead of having them silently disappear.
+	 */
+	failedSends: FailedSend[];
 }
 
 interface PendingSend {
 	localId: string;
 	submissionId?: string;
+	optimistic: FlueConversationMessage;
 }
 
 export interface AgentState extends AgentSnapshot {
+	conversation: FlueConversationState | undefined;
 	pendingSends: PendingSend[];
+	/** Optimistic messages for failed sends, retained so they stay rendered. */
+	failedOptimistic: FlueConversationMessage[];
+	/**
+	 * Maps a submission id to the local id its optimistic message used. The
+	 * canonical user message that later arrives is re-keyed to this local id so
+	 * the row identity is stable across the optimistic→confirmed transition
+	 * (otherwise a keyed/virtualized list sees remove+add and loses scroll/focus).
+	 */
+	localMessageIds: { submissionId: string; localId: string }[];
+	localSubmissionIds: string[];
 	activeSubmissionIds: string[];
-	settledSubmissionIds: string[];
-	recentEventIds: string[];
-	reasoningPartIndexes: Record<string, Record<number, number>>;
 }
-
-type StreamAgentEvent = AttachedAgentEvent & { submissionId?: string };
-
-type LocalAgentEvent =
-	| { type: 'local_send_submitted'; localId: string; message: string; images?: AgentPromptImage[] }
-	| { type: 'local_send_admitted'; localId: string; submissionId: string }
-	| { type: 'local_send_failed'; localId: string; error: Error }
-	| { type: 'local_connecting'; error?: Error }
-	| { type: 'local_history_ready' }
-	| { type: 'local_stream_not_found' }
-	| { type: 'local_stream_failed'; error: Error };
-
-export type AgentReducerEvent = StreamAgentEvent | LocalAgentEvent;
 
 export const emptyAgentState: AgentState = {
 	messages: [],
 	status: 'idle',
 	historyReady: false,
 	error: undefined,
+	failedSends: [],
+	conversation: undefined,
 	pendingSends: [],
+	failedOptimistic: [],
+	localMessageIds: [],
+	localSubmissionIds: [],
 	activeSubmissionIds: [],
-	settledSubmissionIds: [],
-	recentEventIds: [],
-	reasoningPartIndexes: {},
 };
 
-const RECENT_EVENT_LIMIT = 1000;
+export type AgentReducerEvent =
+	| { type: 'local_send_submitted'; localId: string; message: string; images?: AgentPromptImage[] }
+	| { type: 'local_send_admitted'; localId: string; submissionId: string }
+	| { type: 'local_send_failed'; localId: string; error: Error }
+	| {
+			type: 'local_observation';
+			conversation: FlueConversationState | undefined;
+			phase: 'loading' | 'connecting' | 'live' | 'up-to-date' | 'absent' | 'error' | 'closed';
+			error?: Error;
+	  };
 
 export function reduceAgentEvent(state: AgentState, event: AgentReducerEvent): AgentState {
-	if (!('eventIndex' in event)) return reduceAgentEventOnce(state, event);
-	const id = streamEventId(event);
-	if (state.recentEventIds.includes(id)) return state;
-	const next = reduceAgentEventOnce(state, event);
-	if (next === state) return state;
-	return {
-		...next,
-		recentEventIds: [...state.recentEventIds, id].slice(-RECENT_EVENT_LIMIT),
-	};
-}
-
-function reduceAgentEventOnce(state: AgentState, event: AgentReducerEvent): AgentState {
 	switch (event.type) {
-		case 'local_send_submitted':
-			return {
+		case 'local_send_submitted': {
+			const settledIds = new Set(
+				state.conversation?.settlements.map((settlement) => settlement.submissionId) ?? [],
+			);
+			return converge({
 				...state,
-				messages: [...state.messages, optimisticMessage(event)],
-				status: 'submitted',
+				pendingSends: [
+					...state.pendingSends,
+					{ localId: event.localId, optimistic: optimisticMessage(event) },
+				],
+				localSubmissionIds: state.localSubmissionIds.filter((id) => !settledIds.has(id)),
+				// Submitting supersedes any prior failed send: a retry re-sends and
+				// the failed row is replaced by the new pending one, and moving on to
+				// a new message dismisses the earlier failure. This keeps a stale
+				// failure from lingering in the transcript or poisoning `status`/
+				// `error` after a later send succeeds.
+				failedSends: [],
+				failedOptimistic: [],
 				error: undefined,
-				pendingSends: [...state.pendingSends, { localId: event.localId }],
-			};
-		case 'local_send_admitted': {
-			const echoId = userMessageId(event.submissionId);
-			const hasEcho = state.messages.some((message) => message.id === echoId);
-			const settled = state.settledSubmissionIds.includes(event.submissionId);
-			const active = state.activeSubmissionIds.includes(event.submissionId);
-			return {
-				...state,
-				messages: hasEcho
-					? reconcileMessageIdentity(state.messages, event.localId, echoId)
-					: state.messages,
-				status: active
-					? 'streaming'
-					: settled
-						? statusWithout(event.localId, state.pendingSends)
-						: state.status,
-				pendingSends: settled
-					? state.pendingSends.filter((send) => send.localId !== event.localId)
-					: state.pendingSends.map((send) =>
-							send.localId === event.localId ? { ...send, submissionId: event.submissionId } : send,
-						),
-			};
+			});
 		}
-		case 'local_send_failed':
-			return {
+		case 'local_send_admitted':
+			return converge({
 				...state,
-				messages: state.messages.filter((message) => message.id !== event.localId),
-				status: 'error',
-				error: event.error,
+				pendingSends: state.pendingSends.map((send) =>
+					send.localId === event.localId ? { ...send, submissionId: event.submissionId } : send,
+				),
+				localMessageIds: [
+					...state.localMessageIds,
+					{ submissionId: event.submissionId, localId: event.localId },
+				],
+				localSubmissionIds: addUnique(state.localSubmissionIds, event.submissionId),
+				activeSubmissionIds: addUnique(state.activeSubmissionIds, event.submissionId),
+			});
+		case 'local_send_failed': {
+			const failed = state.pendingSends.find((send) => send.localId === event.localId);
+			return converge({
+				...state,
 				pendingSends: state.pendingSends.filter((send) => send.localId !== event.localId),
-			};
-		case 'local_connecting':
-			return state.status === 'error'
-				? state
-				: { ...state, status: 'connecting', error: event.error };
-		case 'local_history_ready':
+				...(failed
+					? {
+							failedOptimistic: [...state.failedOptimistic, failed.optimistic],
+							failedSends: [
+								...state.failedSends,
+								{ id: failed.localId, message: messageText(failed.optimistic), error: event.error },
+							],
+						}
+					: {}),
+			});
+		}
+		case 'local_observation': {
+			if (event.phase === 'error') return { ...state, status: 'error', error: event.error };
+			if (event.phase === 'absent') {
+				return converge({ ...state, conversation: undefined, historyReady: true });
+			}
+			if (event.conversation) {
+				const merged = converge({ ...state, conversation: event.conversation, historyReady: true });
+				return event.phase === 'loading' || event.phase === 'connecting'
+					? { ...merged, status: merged.status === 'idle' ? 'connecting' : merged.status, error: event.error }
+					: merged;
+			}
 			return {
 				...state,
-				historyReady: true,
-				status:
-					state.status === 'error'
-						? 'error'
-						: state.pendingSends.length > 0
-							? 'submitted'
-							: 'idle',
-				error: state.status === 'error' ? state.error : undefined,
-			};
-		case 'local_stream_not_found':
-			return state.pendingSends.length === 0
-				? { ...state, messages: [], status: 'idle', historyReady: true, error: undefined }
-				: { ...state, status: 'submitted', historyReady: true, error: undefined };
-		case 'local_stream_failed':
-			return { ...state, status: 'error', error: event.error };
-		case 'message_start':
-			return reduceMessageBoundary(state, event);
-		case 'text_delta':
-			return reduceTextDelta(state, event);
-		case 'thinking_start':
-			return reduceThinkingStart(state, event);
-		case 'thinking_delta':
-			return reduceThinkingDelta(state, event);
-		case 'thinking_end':
-			return reduceThinkingEnd(state, event);
-		case 'message_end':
-			return reduceMessageBoundary(state, event);
-		case 'tool_start':
-			return reduceToolStart(state, event);
-		case 'tool':
-			return reduceToolResult(state, event);
-		case 'data':
-			return reduceDataPart(state, event);
-		case 'turn':
-			return reduceTurn(state, event);
-		case 'submission_settled':
-			return event.outcome === 'failed' &&
-				state.pendingSends.some((send) => send.submissionId === event.submissionId)
-				? {
-						...state,
-						status: 'error',
-						error: new Error(event.error?.message ?? 'Agent submission failed'),
-						pendingSends: state.pendingSends.filter(
-							(send) => send.submissionId !== event.submissionId,
-						),
-					}
-				: state;
-		case 'idle': {
-			const pendingSends = event.submissionId
-				? state.pendingSends.filter((send) => send.submissionId !== event.submissionId)
-				: state.pendingSends;
-			return {
-				...state,
-				status: state.status === 'error' ? 'error' : pendingSends.length > 0 ? 'submitted' : 'idle',
-				error: state.status === 'error' ? state.error : undefined,
-				pendingSends,
-				activeSubmissionIds: event.submissionId
-					? state.activeSubmissionIds.filter((id) => id !== event.submissionId)
-					: state.activeSubmissionIds,
-				settledSubmissionIds: event.submissionId
-					? addUnique(state.settledSubmissionIds, event.submissionId)
-					: state.settledSubmissionIds,
+				status: event.phase === 'loading' || event.phase === 'connecting' ? 'connecting' : state.status,
+				error: event.error,
 			};
 		}
-		default:
-			return state;
 	}
 }
 
-function reduceMessageBoundary(
-	state: AgentState,
-	event: StreamAgentEvent & { message: LlmMessage },
-): AgentState {
-	if (event.message.role === 'toolResult') return state;
-	const id = messageId(event, event.message.role);
-	const existing = state.messages.find((message) => message.id === id);
-	const local =
-		event.message.role === 'user' && event.submissionId
-			? state.pendingSends.find((send) => send.submissionId === event.submissionId)
-			: undefined;
-	const optimistic = local
-		? state.messages.find((message) => message.id === local.localId)
-		: undefined;
-	const message = snapshotMessage(
-		id,
-		event.message,
-		event.type === 'message_end',
-		optimistic ?? existing,
+function converge(state: AgentState): AgentState {
+	const conversation = state.conversation;
+	const settledIds = new Set(conversation?.settlements.map((settlement) => settlement.submissionId) ?? []);
+	const localIdBySubmissionId = new Map(
+		state.localMessageIds.map((entry) => [entry.submissionId, entry.localId] as const),
 	);
-	const messages = local
-		? replaceOptimisticMessage(state.messages, local.localId, id, message)
-		: replaceById(state.messages, id, message);
-	const ownAssistant =
-		event.message.role === 'assistant' &&
-		event.submissionId !== undefined &&
-		state.pendingSends.some((send) => send.submissionId === event.submissionId);
+
+	// Re-key each canonical message that originated from a local send back to the
+	// id its optimistic echo used, so the rendered row is stable across the
+	// optimistic→confirmed swap.
+	const canonical = (conversation?.messages ?? []).map((message) => {
+		const localId = message.submissionId ? localIdBySubmissionId.get(message.submissionId) : undefined;
+		return localId ? { ...message, id: localId } : message;
+	});
+	const canonicalSubmissionIds = new Set(
+		(conversation?.messages ?? [])
+			.map((message) => message.submissionId)
+			.filter((value): value is string => typeof value === 'string'),
+	);
+
+	// Keep showing an optimistic echo until its canonical copy (or settlement)
+	// arrives; once it does, the re-keyed canonical message takes its place.
+	const pendingSends: PendingSend[] = [];
+	const pendingEchoes: FlueConversationMessage[] = [];
+	for (const pending of state.pendingSends) {
+		const confirmed = pending.submissionId
+			? canonicalSubmissionIds.has(pending.submissionId) || settledIds.has(pending.submissionId)
+			: false;
+		if (confirmed) continue;
+		pendingSends.push(pending);
+		pendingEchoes.push(pending.optimistic);
+	}
+
+	const messages = [...canonical, ...pendingEchoes, ...state.failedOptimistic];
+
+	const ownStreaming = (conversation?.messages ?? []).some(
+		(message) =>
+			message.role === 'assistant' &&
+			message.parts.some(
+				(part) => (part.type === 'text' || part.type === 'reasoning') && part.state === 'streaming',
+			),
+	);
+	const failedSettlement = conversation?.settlements.find(
+		(settlement) =>
+			settlement.outcome === 'failed' && state.localSubmissionIds.includes(settlement.submissionId),
+	);
+	const activeSubmissionIds = state.activeSubmissionIds.filter((id) => !settledIds.has(id));
+	const hasFailedSend = state.failedSends.length > 0;
+
+	const status: AgentStatus = failedSettlement
+		? 'error'
+		: ownStreaming
+			? 'streaming'
+			: pendingSends.length > 0
+				? 'submitted'
+				: activeSubmissionIds.length > 0
+					? 'streaming'
+					: hasFailedSend
+						? 'error'
+						: 'idle';
+
 	return {
 		...state,
 		messages,
-		status: ownAssistant ? 'streaming' : state.status,
-		activeSubmissionIds:
-			event.message.role === 'assistant' && event.submissionId
-				? addUnique(state.activeSubmissionIds, event.submissionId)
-				: state.activeSubmissionIds,
-		reasoningPartIndexes: event.message.role === 'assistant'
-			? { ...state.reasoningPartIndexes, [id]: reasoningIndexes(event.message) }
-			: state.reasoningPartIndexes,
-	};
-}
-
-function reduceTextDelta(
-	state: AgentState,
-	event: StreamAgentEvent & { text: string },
-): AgentState {
-	const index = findEventAssistant(state.messages, event);
-	if (index < 0) return state;
-	const current = state.messages[index];
-	if (!current) return state;
-	const parts = [...current.parts];
-	const last = parts.at(-1);
-	if (last?.type === 'text' && last.state !== 'done') {
-		parts[parts.length - 1] = { ...last, text: last.text + event.text, state: 'streaming' };
-	} else {
-		parts.push({ type: 'text', text: event.text, state: 'streaming' });
-	}
-	return replaceMessageAt(state, index, { ...current, parts });
-}
-
-function reduceThinkingStart(
-	state: AgentState,
-	event: StreamAgentEvent & { contentIndex?: number },
-): AgentState {
-	const index = findEventAssistant(state.messages, event);
-	if (index < 0) return state;
-	const current = state.messages[index];
-	if (!current) return state;
-	const known = event.contentIndex === undefined
-		? undefined
-		: state.reasoningPartIndexes[current.id]?.[event.contentIndex];
-	if (known !== undefined && current.parts[known]?.type === 'reasoning') return state;
-	const partIndex = current.parts.length;
-	const next = replaceMessageAt(state, index, {
-		...current,
-		parts: [...current.parts, { type: 'reasoning', text: '', state: 'streaming' }],
-	});
-	return event.contentIndex === undefined
-		? next
-		: {
-				...next,
-				reasoningPartIndexes: setReasoningPartIndex(
-					state.reasoningPartIndexes,
-					current.id,
-					event.contentIndex,
-					partIndex,
-				),
-			};
-}
-
-function reduceThinkingDelta(
-	state: AgentState,
-	event: StreamAgentEvent & { contentIndex?: number; delta: string },
-): AgentState {
-	const index = findEventAssistant(state.messages, event);
-	if (index < 0) return state;
-	const current = state.messages[index];
-	if (!current) return state;
-	const reasoning = event.contentIndex === undefined
-		? current.parts.findLastIndex((part) => part.type === 'reasoning' && part.state !== 'done')
-		: state.reasoningPartIndexes[current.id]?.[event.contentIndex];
-	if (reasoning === undefined || reasoning < 0) return state;
-	const part = current.parts[reasoning];
-	if (!part || part.type !== 'reasoning' || part.state === 'done') return state;
-	const parts = [...current.parts];
-	parts[reasoning] = { ...part, text: part.text + event.delta, state: 'streaming' };
-	return replaceMessageAt(state, index, { ...current, parts });
-}
-
-function reduceThinkingEnd(
-	state: AgentState,
-	event: StreamAgentEvent & { contentIndex?: number; content: string },
-): AgentState {
-	const index = findEventAssistant(state.messages, event);
-	if (index < 0) return state;
-	const current = state.messages[index];
-	if (!current) return state;
-	const reasoning = event.contentIndex === undefined
-		? current.parts.findLastIndex((part) => part.type === 'reasoning')
-		: state.reasoningPartIndexes[current.id]?.[event.contentIndex];
-	if (reasoning === undefined || reasoning < 0) return state;
-	const part = current.parts[reasoning];
-	if (!part || part.type !== 'reasoning') return state;
-	const parts = [...current.parts];
-	parts[reasoning] = { ...part, text: event.content, state: 'done' };
-	return replaceMessageAt(state, index, { ...current, parts });
-}
-
-function reduceToolStart(
-	state: AgentState,
-	event: StreamAgentEvent & { toolName: string; toolCallId: string },
-): AgentState {
-	let messages = state.messages;
-	let index = findToolMessage(messages, event.toolCallId);
-	if (index < 0 && event.turnId) {
-		const id = `turn:${event.turnId}`;
-		index = messages.findIndex((message) => message.id === id);
-		if (index < 0) {
-			messages = [...messages, { id, role: 'assistant', metadata: undefined, parts: [] }];
-			index = messages.length - 1;
-		}
-	}
-	if (index < 0) return state;
-	const current = messages[index];
-	if (!current) return state;
-	const exists = current.parts.some(
-		(part) => part.type === 'dynamic-tool' && part.toolCallId === event.toolCallId,
-	);
-	const parts: UIMessagePart[] = exists
-		? current.parts.map(
-				(part): UIMessagePart =>
-					part.type === 'dynamic-tool' && part.toolCallId === event.toolCallId
-						? {
-								type: 'dynamic-tool',
-								toolName: event.toolName,
-								toolCallId: part.toolCallId,
-								input: part.input,
-								state: 'input-available',
-							}
-						: part,
-			)
-		: [
-				...current.parts,
-				{
-					type: 'dynamic-tool' as const,
-					toolName: event.toolName,
-					toolCallId: event.toolCallId,
-					state: 'input-available' as const,
-					input: undefined,
-				},
-			];
-	return replaceMessageAt({ ...state, messages }, index, { ...current, parts });
-}
-
-function reduceToolResult(
-	state: AgentState,
-	event: StreamAgentEvent & {
-		toolName: string;
-		toolCallId: string;
-		isError: boolean;
-		result?: unknown;
-	},
-): AgentState {
-	const index = findToolMessage(state.messages, event.toolCallId);
-	if (index < 0) return state;
-	const current = state.messages[index];
-	if (!current) return state;
-	const parts = current.parts.map((part) => {
-		if (part.type !== 'dynamic-tool' || part.toolCallId !== event.toolCallId) return part;
-		return event.isError
-			? {
-					...part,
-					state: 'output-error' as const,
-					output: undefined,
-					errorText: errorText(event.result),
-				}
-			: { ...part, state: 'output-available' as const, output: event.result, errorText: undefined };
-	});
-	return replaceMessageAt(state, index, { ...current, parts });
-}
-
-function reduceDataPart(
-	state: AgentState,
-	event: StreamAgentEvent & { name: string; id?: string; data: unknown },
-): AgentState {
-	const id =
-		event.id === undefined
-			? `data-event:${streamEventId(event)}`
-			: `data:${JSON.stringify([event.name, event.id])}`;
-	const part: UIMessagePart = {
-		type: `data-${event.name}`,
-		...(event.id === undefined ? {} : { id: event.id }),
-		data: event.data,
-	};
-	return {
-		...state,
-		messages: replaceById(state.messages, id, {
-			id,
-			role: 'assistant',
-			parts: [part],
-		}),
-	};
-}
-
-function reduceTurn(
-	state: AgentState,
-	event: StreamAgentEvent & {
-		turnId: string;
-		response: { usage?: PromptUsage };
-		request: { providerId: string; requestedModel: string };
-	},
-): AgentState {
-	let index = state.messages.findIndex((message) => message.id === `turn:${event.turnId}`);
-	if (index < 0) index = findLastAssistant(state.messages);
-	if (index < 0) return state;
-	const current = state.messages[index];
-	if (!current) return state;
-	const metadata = {
-		...current.metadata,
-		...(event.response.usage ? { usage: event.response.usage } : {}),
-		model: { provider: event.request.providerId, id: event.request.requestedModel },
-	};
-	return replaceMessageAt(state, index, { ...current, metadata });
-}
-
-function snapshotMessage(
-	id: string,
-	message: Exclude<LlmMessage, { role: 'toolResult' }>,
-	done: boolean,
-	previous?: UIMessage,
-): UIMessage {
-	const parts: UIMessagePart[] = [];
-	let previousFileIndex = 0;
-	const previousFiles = previous?.parts.filter((part) => part.type === 'file') ?? [];
-	const content =
-		typeof message.content === 'string'
-			? [{ type: 'text' as const, text: message.content }]
-			: message.content;
-	for (const block of content) {
-		if (block.type === 'text')
-			parts.push({ type: 'text', text: block.text, state: done ? 'done' : 'streaming' });
-		if (block.type === 'thinking') {
-			parts.push({ type: 'reasoning', text: block.thinking, state: done ? 'done' : 'streaming' });
-		}
-		if (block.type === 'toolCall') {
-			const prior = previous?.parts.find(
-				(part): part is Extract<UIMessagePart, { type: 'dynamic-tool' }> =>
-					part.type === 'dynamic-tool' && part.toolCallId === block.id,
-			);
-			parts.push(
-				prior
-					? { ...prior, toolName: block.name, input: block.arguments }
-					: {
-							type: 'dynamic-tool',
-							toolName: block.name,
-							toolCallId: block.id,
-							state: 'input-available',
-							input: block.arguments,
-						},
-			);
-		}
-		if (block.type === 'image') {
-			const prior = previousFiles[previousFileIndex++];
-			parts.push(
-				block.data === IMAGE_DATA_OMITTED && prior?.mediaType === block.mimeType
-					? prior
-					: { type: 'file', mediaType: block.mimeType, url: imageUrl(block.data, block.mimeType) },
-			);
-		}
-	}
-	return { id, role: message.role, metadata: previous?.metadata, parts };
-}
-
-function reasoningIndexes(message: LlmMessage): Record<number, number> {
-	if (message.role !== 'assistant' || typeof message.content === 'string') return {};
-	const indexes: Record<number, number> = {};
-	let partIndex = 0;
-	for (const [contentIndex, block] of message.content.entries()) {
-		if (block.type === 'thinking') indexes[contentIndex] = partIndex;
-		partIndex++;
-	}
-	return indexes;
-}
-
-function setReasoningPartIndex(
-	indexes: AgentState['reasoningPartIndexes'],
-	messageId: string,
-	contentIndex: number,
-	partIndex: number,
-): AgentState['reasoningPartIndexes'] {
-	return {
-		...indexes,
-		[messageId]: { ...indexes[messageId], [contentIndex]: partIndex },
+		pendingSends,
+		activeSubmissionIds,
+		status,
+		error: failedSettlement
+			? new Error(settlementError(failedSettlement.error))
+			: status === 'error' && hasFailedSend
+				? state.failedSends[state.failedSends.length - 1]?.error
+				: undefined,
 	};
 }
 
 function optimisticMessage(
-	event: Extract<LocalAgentEvent, { type: 'local_send_submitted' }>,
-): UIMessage {
+	event: Extract<AgentReducerEvent, { type: 'local_send_submitted' }>,
+): FlueConversationMessage {
 	return {
 		id: event.localId,
 		role: 'user',
 		parts: [
 			{ type: 'text', text: event.message, state: 'done' },
+			// The echo has no durable attachment id yet, but it does have the bytes
+			// the caller passed — so render an instant local preview via a data URL.
+			// On the optimistic→confirmed swap, the canonical part (carrying the
+			// hosted `url` + `id`) takes its place; consumers read `part.url` either
+			// way, with no flicker and no object-URL lifecycle to manage.
 			...(event.images ?? []).map((image) => ({
 				type: 'file' as const,
 				mediaType: image.mimeType,
-				url: imageUrl(image.data, image.mimeType),
+				url: `data:${image.mimeType};base64,${image.data}`,
+				...(image.filename ? { filename: image.filename } : {}),
 			})),
 		],
 	};
 }
 
-function streamEventId(event: StreamAgentEvent): string {
-	const contextId = event.dispatchId ?? event.submissionId;
-	return contextId
-		? `${event.instanceId}:${contextId}:${event.timestamp}:${event.eventIndex}`
-		: `${event.instanceId}:${event.timestamp}:${event.eventIndex}`;
-}
-
-function messageId(event: StreamAgentEvent, role: 'user' | 'assistant'): string {
-	if (role === 'assistant' && event.turnId) return `turn:${event.turnId}`;
-	if (role === 'user' && event.submissionId) return userMessageId(event.submissionId);
-	return `event:${event.timestamp}:${event.eventIndex}:${role}`;
-}
-
-function userMessageId(submissionId: string): string {
-	return `submission:${submissionId}:user:0`;
-}
-
-function imageUrl(data: string, mimeType: string): string {
-	return data === IMAGE_DATA_OMITTED
-		? data
-		: data.startsWith('data:')
-			? data
-			: `data:${mimeType};base64,${data}`;
-}
-
-function replaceOptimisticMessage(
-	messages: UIMessage[],
-	localId: string,
-	durableId: string,
-	message: UIMessage,
-): UIMessage[] {
-	const localIndex = messages.findIndex((item) => item.id === localId);
-	if (localIndex < 0) return replaceById(messages, durableId, message);
-	const next = messages.filter((item) => item.id !== durableId);
-	const targetIndex = next.findIndex((item) => item.id === localId);
-	if (targetIndex < 0) return replaceById(next, durableId, message);
-	next[targetIndex] = message;
-	return next;
-}
-
-function reconcileMessageIdentity(
-	messages: UIMessage[],
-	localId: string,
-	durableId: string,
-): UIMessage[] {
-	const localIndex = messages.findIndex((message) => message.id === localId);
-	const durableIndex = messages.findIndex((message) => message.id === durableId);
-	if (localIndex < 0 || durableIndex < 0)
-		return messages.filter((message) => message.id !== localId);
-	if (durableIndex < localIndex) return messages.filter((message) => message.id !== localId);
-	const durable = messages[durableIndex];
-	if (!durable) return messages;
-	const next = messages.filter((message) => message.id !== durableId);
-	const targetIndex = next.findIndex((message) => message.id === localId);
-	if (targetIndex < 0) return next;
-	next[targetIndex] = durable;
-	return next;
-}
-
-function replaceById(messages: UIMessage[], id: string, message: UIMessage): UIMessage[] {
-	const index = messages.findIndex((item) => item.id === id);
-	if (index < 0) return [...messages, message];
-	const next = [...messages];
-	next[index] = message;
-	return next;
-}
-
-function replaceMessageAt(state: AgentState, index: number, message: UIMessage): AgentState {
-	const messages = [...state.messages];
-	messages[index] = message;
-	return { ...state, messages };
-}
-
-function findToolMessage(messages: UIMessage[], toolCallId: string): number {
-	return messages.findIndex((message) =>
-		message.parts.some((part) => part.type === 'dynamic-tool' && part.toolCallId === toolCallId),
-	);
-}
-
-function findEventAssistant(messages: UIMessage[], event: StreamAgentEvent): number {
-	return event.turnId
-		? messages.findIndex((message) => message.id === `turn:${event.turnId}`)
-		: findLastAssistant(messages);
-}
-
-function findLastAssistant(messages: UIMessage[]): number {
-	return messages.findLastIndex((message) => message.role === 'assistant');
-}
-
-function statusWithout(localId: string, pendingSends: PendingSend[]): AgentStatus {
-	return pendingSends.some((send) => send.localId !== localId) ? 'submitted' : 'idle';
+function messageText(message: FlueConversationMessage): string {
+	const part = message.parts.find((value) => value.type === 'text');
+	return part && part.type === 'text' ? part.text : '';
 }
 
 function addUnique(values: string[], value: string): string[] {
 	return values.includes(value) ? values : [...values, value];
 }
 
-function errorText(value: unknown): string {
-	if (value instanceof Error) return value.message;
-	if (typeof value === 'string') return value;
-	return JSON.stringify(value) ?? String(value);
+function settlementError(value: unknown): string {
+	if (value && typeof value === 'object' && 'message' in value) return String(value.message);
+	return 'Agent submission failed';
 }

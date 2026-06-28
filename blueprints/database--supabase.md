@@ -8,10 +8,10 @@ You are an AI coding agent configuring Supabase Postgres persistence for a Flue
 project using the existing first-party `@flue/postgres` adapter and the `pg`
 driver. Do not create a Supabase-specific package or modify `@flue/postgres`.
 
-This gives the project's agent sessions, accepted submissions, and workflow-run
-records durable state that survives process restart and is shared across
-replicas. It does not store the application's own business data — keep customer
-records, tickets, and payments in application-owned tables.
+This persists canonical agent conversation streams, immutable attachments,
+accepted submissions, workflow-run records, and event
+streams across process restarts and replicas. It does not store application
+business data.
 
 ## Check the target first
 
@@ -107,11 +107,13 @@ startup, creates the `flue_*` tables idempotently, and stamps a schema version.
 There is no separate migration command. A database written by a newer Flue
 version refuses to start rather than risking incompatible writes.
 
-The adapter stores Flue runtime state: agent session messages and compaction
-state, accepted direct prompts and `dispatch(...)` submissions, durable turn
-journals, workflow-run records, persisted events, and run indexes. It does not
-store sandbox files, external API side effects, provider secrets, or
-application-owned business records unless the application writes those itself.
+The adapter stores canonical append-only conversation streams, immutable external
+attachments, accepted submissions and durable turn journals, workflow-run records
+and indexes, and distinct event streams. The canonical stream is the sole transcript
+and is replayed from its beginning; replay acceleration and persisted-log compaction
+are deferred. Sessions append for the instance lifetime and have no per-session
+deletion. Whole-instance stream and attachment deletion methods are low-level primitives. It does not store sandbox
+files, external API effects, provider secrets, or application business data.
 
 ## Verify
 

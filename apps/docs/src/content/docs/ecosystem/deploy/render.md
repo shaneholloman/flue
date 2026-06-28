@@ -32,7 +32,7 @@ services:
 
 Push the file and create a Blueprint from the Render Dashboard (**New > Blueprint**), or click **Deploy to Render** from a template. Render copies the template repo to your GitHub account, prompts for any `sync: false` secrets, and deploys. To auto-deploy on every push, set `autoDeployTrigger: commit` on the service (this replaces the deprecated `autoDeploy` field).
 
-The template uses `plan: free`, so first deploys cost nothing. Free web services spin down after 15 minutes without inbound traffic, and the next request pays a cold start — about a minute — while the Node process restarts. In-memory session state is also lost across that restart. For agents that see sporadic production traffic, move to `starter` or higher to keep the service warm, and add Postgres for durable sessions.
+The template uses `plan: free`, so first deploys cost nothing. Free web services spin down after 15 minutes without inbound traffic, and the next request pays a cold start — about a minute — while the Node process restarts. In-memory conversation and submission state is also lost across that restart. For agents that see sporadic production traffic, move to `starter` or higher to keep the service warm, and add Postgres for durable recovery.
 
 ## Environment and secrets
 
@@ -57,9 +57,9 @@ Render ignores `sync: false` variables when updating an existing Blueprint, so r
 
 ## Persistence
 
-The Node target keeps agent sessions and accepted submissions in memory by default. That state is lost on every restart, deploy, and free-plan spin-down, and it is not shared across instances — an in-memory service that scales past one instance routes follow-up requests to processes that never saw the original session.
+The Node target keeps canonical agent conversations and accepted submissions in memory by default. That state is lost on every restart, deploy, and free-plan spin-down.
 
-For durable, shared session history, add a Render Postgres database to the Blueprint and wire its connection string into the web service with `fromDatabase`:
+For durable process or host replacement, add a Render Postgres database to the Blueprint and wire its connection string into the web service with `fromDatabase`. A shared database does not enable active-active ownership of one agent instance: route each instance to one live Node process and avoid overlapping owners during replacement.
 
 ```yaml title="render.yaml"
 databases:
@@ -95,7 +95,7 @@ import { postgres } from '@flue/postgres';
 export default postgres(process.env.DATABASE_URL!);
 ```
 
-Flue discovers `db.ts` at build time and wires it into the generated server — schema creation, session snapshots, and durable submission state are handled by the adapter. See [Database](/docs/guide/database/) for the adapter contract and alternatives. Note that a `free` Postgres database expires 30 days after creation; use a `basic-256mb` or larger plan for anything you intend to keep.
+Flue discovers `db.ts` at build time and wires it into the generated server — schema creation, canonical conversation streams, immutable attachments, durable submission state, and workflow history are handled by the adapter. See [Database](/docs/guide/database/) for the adapter contract and alternatives. Note that a `free` Postgres database expires 30 days after creation; use a `basic-256mb` or larger plan for anything you intend to keep.
 
 ## Health and streaming
 

@@ -246,9 +246,9 @@ The Ecosystem catalog lists available provider integrations, including [Daytona]
 
 Start with the local or virtual sandbox. Move to a remote sandbox when you need per-session isolation.
 
-## Session persistence
+## Conversation persistence
 
-On Node.js, agent sessions and accepted submissions use in-memory SQLite by default, so they persist for the lifetime of one process but are lost on restart. Add `db.ts` when that state must survive restart or be shared outside one process.
+On Node.js, canonical agent conversations, attachments, and accepted submissions use in-memory SQLite by default, so they persist for the lifetime of one process but are lost on restart. Add `db.ts` when that state must survive restart or support replacement recovery. A shared database does not remove the requirement for one live Node owner per agent instance.
 
 See [Database](/docs/guide/database/) for `db.ts`, SQLite, Postgres, and custom adapter setup. See [Data Persistence API](/docs/api/data-persistence-api/) for the adapter contract.
 

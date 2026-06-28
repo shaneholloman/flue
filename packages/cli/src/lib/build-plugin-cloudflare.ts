@@ -170,8 +170,8 @@ import {
   createSqlRunStore,
   CLOUDFLARE_AGENT_INTERNAL_DISPATCH_PATH,
   createCloudflareAgentRuntime,
-  createSqlSessionStore,
-   SqliteEventStreamStore,
+  createSqlConversationStores,
+  SqliteEventStreamStore,
   bashFactoryToSessionEnv,
   resolveModel,
   handleWorkflowRequest,
@@ -293,7 +293,6 @@ function createAgentContextForRequest({ executionStore, instance, agentName, req
     dispatchId,
     agentConfig: { resolveModel },
     createDefaultEnv,
-    defaultStore: executionStore.sessions,
     submissionStore: executionStore.submissions,
   });
 }
@@ -307,7 +306,6 @@ function createWorkflowContextForRequest({ runId, request, initialEventIndex }, 
     initialEventIndex,
     agentConfig: { resolveModel },
     createDefaultEnv,
-    defaultStore: createSqlSessionStore(doInstance.ctx.storage),
   });
 }
 
@@ -352,6 +350,15 @@ function createDurableObjectIdentity(doInstance, identity) {
 }
 
 const eventStreamStores = new WeakMap();
+const conversationStores = new WeakMap();
+
+function createConversationStoresForInstance(doInstance) {
+  const existing = conversationStores.get(doInstance);
+  if (existing) return existing;
+  const stores = createSqlConversationStores(doInstance?.ctx?.storage);
+  conversationStores.set(doInstance, stores);
+  return stores;
+}
 
 function createEventStreamStoreForInstance(doInstance) {
   const existing = eventStreamStores.get(doInstance);
@@ -370,7 +377,6 @@ const cloudflareAgents = createCloudflareAgentRuntime({
   agents,
   createContext: createAgentContextForRequest,
   runWithInstanceContext: (instance, agentName, fn) => runWithInstanceContext(instance, agentRuntimeIdentity(agentName), fn),
-  createEventStreamStore: (instance) => createEventStreamStoreForInstance(instance),
   onInteractionStart: devLifecycle?.onAgentInteractionStart,
 });
 

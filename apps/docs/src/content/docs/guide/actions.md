@@ -75,7 +75,7 @@ export default defineAgent(() => ({
 }));
 ```
 
-Flue presents each configured Action to the model as a framework-managed tool using its name, description, and input schema. When the model calls it, Flue runs the Action with an isolated child harness and returns its result to the conversation. The child has independent sessions while sharing the parent agent's configuration, sandbox, and filesystem.
+Flue presents each configured Action to the model as a framework-managed tool using its name, description, and input schema. When the model calls it, Flue runs the Action with an isolated child harness and returns its result to the conversation. The child has independent sessions while sharing the parent agent's configuration, sandbox, and filesystem. Its conversation records remain in the append-only agent-instance stream rather than being recursively deleted.
 
 Actions share the model-facing namespace with custom and framework-provided tools, so every active capability needs a distinct name.
 

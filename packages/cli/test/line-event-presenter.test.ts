@@ -2,6 +2,17 @@ import { describe, expect, it } from 'vitest';
 import { createLineEventPresenter } from '../src/lib/line-event-presenter.ts';
 
 describe('createLineEventPresenter()', () => {
+	it('renders agent conversation chunks for text and tool updates', () => {
+		const lines: string[] = [];
+		const presenter = createLineEventPresenter({ write: (line) => lines.push(line) });
+
+		presenter.present({ type: 'message-delta', conversationId: 'c1', messageId: 'a1', kind: 'text', delta: 'hello' });
+		presenter.present({ type: 'tool-input', conversationId: 'c1', messageId: 'a1', toolCallId: 't1', toolName: 'bash', input: {} });
+		presenter.present({ type: 'tool-output', conversationId: 'c1', toolCallId: 't1', output: {} });
+
+		expect(lines).toEqual(['  hello', 'tool bash', 'tool done bash']);
+	});
+
 	it('keeps partial line buffers isolated by presenter instance', () => {
 		const first: string[] = [];
 		const second: string[] = [];

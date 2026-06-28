@@ -22,10 +22,10 @@
  * `defineRunStoreContractTests`, and `defineEventStreamStoreContractTests`
  * from `@flue/runtime/test-utils`.
  *
- * Stability: `SessionStore`, `RunStore`, and `EventStreamStore` are stable.
- * The `AgentSubmissionStore` turn-journal, stream-chunk, and lease method
- * groups mirror the durable-execution engine and are subject to change until
- * 1.0 — for every backend equally.
+ * Stability: `RunStore` and `EventStreamStore` are stable.
+ * The `AgentSubmissionStore` settlement and lease method groups mirror the
+ * durable-execution engine and are subject to change until 1.0 — for every
+ * backend equally.
  */
 
 // ─── Store interfaces and vocabulary types ──────────────────────────────────
@@ -37,15 +37,12 @@ export type {
 	AgentExecutionStore,
 	AgentSubmission,
 	AgentSubmissionStore,
-	AgentTurnJournal,
-	AgentTurnJournalPhase,
-	CreateTurnJournalInput,
 	PersistenceAdapter,
 	PersistenceStores,
 	SubmissionAttemptRef,
 	SubmissionClaimRef,
 	SubmissionDurability,
-	SubmissionTerminalOutbox,
+	SubmissionSettlementObligation,
 } from './agent-execution-store.ts';
 
 export {
@@ -70,7 +67,6 @@ export type { DispatchInput } from './runtime/dispatch-queue.ts';
 export type { SubmissionPayloadContext } from './adapter-helpers.ts';
 export {
 	clampLimit,
-	deduplicateSessionDeletion,
 	isSubmissionPayload,
 	parseAcceptedAt,
 	SUBMISSION_HARNESS_NAME,
@@ -81,7 +77,12 @@ export { createSessionStorageKey } from './session-identity.ts';
 
 // ─── Schema versioning ──────────────────────────────────────────────────────
 
-export { PersistedSchemaVersionError } from './errors.ts';
+export {
+	AttachmentConflictError,
+	AttachmentIntegrityError,
+	ConversationStreamStoreError,
+	PersistedSchemaVersionError,
+} from './errors.ts';
 export { assertSupportedFlueSchemaVersion, FLUE_SCHEMA_VERSION } from './schema-version.ts';
 
 // ─── Persisted chunk placement ───────────────────────────────────────────────
@@ -93,12 +94,9 @@ export type {
 } from './persisted-image-placement.ts';
 export {
 	hydratePersistedDirectSubmission,
-	hydratePersistedSessionEntry,
 	matchesPersistedDirectSubmission,
 	prepareDirectSubmission,
-	prepareSessionEntry,
 	samePersistedChunks,
-	sessionEntryChunkOwner,
 	submissionChunkOwner,
 } from './persisted-image-placement.ts';
 
@@ -121,6 +119,45 @@ export {
 	MAX_LIST_LIMIT,
 } from './runtime/run-store.ts';
 
+// ─── Canonical conversation stream store ────────────────────────────────────
+
+export type {
+	AttachmentRef,
+	ConversationRecord,
+	SubmissionSettledRecord,
+} from './conversation-records.ts';
+export type {
+	AttachmentStore,
+	GetAttachmentInput,
+	PutAttachmentInput,
+	StoredAttachment,
+} from './runtime/attachment-store.ts';
+export {
+	attachmentBytesEqual,
+	copyAttachmentBytes,
+	createAttachmentRef,
+	InMemoryAttachmentStore,
+	sameAttachmentRef,
+	verifyAttachmentBytes,
+} from './runtime/attachment-store.ts';
+export type {
+	ConversationProducerClaim,
+	ConversationStreamBatch,
+	ConversationStreamIdentity,
+	ConversationStreamMeta,
+	ConversationStreamReadResult,
+	ConversationStreamStore,
+} from './runtime/conversation-stream-store.ts';
+export {
+	InMemoryConversationStreamStore,
+	StreamListenerRegistry,
+} from './runtime/conversation-stream-store.ts';
+export type {
+	SqlConversationDialect,
+	SqlConversationDialectTx,
+} from './runtime/sql-conversation-stream-store.ts';
+export { defineSqlConversationStreamStore } from './runtime/sql-conversation-stream-store.ts';
+
 // ─── Event stream store ─────────────────────────────────────────────────────
 
 export type {
@@ -134,14 +171,3 @@ export {
 	MAX_READ_LIMIT,
 	parseOffset,
 } from './runtime/event-stream-store.ts';
-
-// ─── Re-export session types needed for SessionStore implementations ────────
-
-export type {
-	ChildSessionRef,
-	CompactionEntry,
-	MessageEntry,
-	SessionData,
-	SessionEntry,
-	SessionStore,
-} from './types.ts';

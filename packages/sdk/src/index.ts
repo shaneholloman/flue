@@ -21,21 +21,41 @@ export type {
 export { createFlueClient } from './client.ts';
 export { FlueApiError } from './http.ts';
 export type {
+	FlueConversationHistoryOptions,
+	FlueConversationMessage,
+	FlueConversationPart,
+	FlueConversationSettlement,
+	FlueConversationSnapshot,
+	FlueConversationState,
+} from './public/conversation.ts';
+export type {
+	AgentConversationObservation,
+	AgentConversationObservationPhase,
+	AgentConversationObservationSnapshot,
+	AgentConversationObserveOptions,
+	ConversationLiveMode,
+} from './public/observe.ts';
+// The conversation `updates` wire union is not stable application API, but
+// first-party presenters (CLI, dev console) reduce it directly, so the type is
+// exported for them. Application code should consume materialized
+// `FlueConversationState` via `observe()` rather than handling chunks.
+export type { ConversationStreamChunk } from './public/conversation-stream.ts';
+export type {
 	AgentPromptImage,
 	AgentPromptOptions,
 	AgentPromptResult,
 	AgentSendResult,
 } from './public/invoke.ts';
 export {
-	FlueExecutionError,
 	type AgentWaitOptions,
+	FlueExecutionError,
 	type FlueExecutionFailure,
 	type FlueExecutionTarget,
 	type WorkflowRunOptions,
 	type WorkflowRunResult,
 } from './public/settle.ts';
-export { UnsupportedFlueEventVersionError } from './public/stream.ts';
 export type { FlueEventStream, FlueStreamOptions } from './public/stream.ts';
+export { UnsupportedFlueEventVersionError } from './public/stream.ts';
 export type {
 	AgentPromptResponse,
 	AgentSubmissionSettledEvent,

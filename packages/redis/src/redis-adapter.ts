@@ -1,13 +1,11 @@
 import { randomUUID } from 'node:crypto';
+import type { WorkflowRunPointer } from '@flue/runtime';
 import type {
 	AgentAttemptMarker,
 	AgentDispatchAdmission,
 	AgentSubmission,
 	AgentSubmissionStore,
-	AgentTurnJournal,
-	AgentTurnJournalPhase,
 	CreateRunInput,
-	CreateTurnJournalInput,
 	DirectAgentSubmissionInput,
 	DispatchAgentSubmissionInput,
 	DispatchInput,
@@ -17,20 +15,14 @@ import type {
 	EventStreamStore,
 	ListRunsOpts,
 	ListRunsResponse,
-	PersistedChunkOwner,
 	PersistedChunkRow,
-	PersistedChunkStore,
 	PersistenceAdapter,
 	RunPointer,
 	RunRecord,
 	RunStatus,
-	SessionData,
-	SessionEntry,
-	SessionStore,
 	SubmissionAttemptRef,
 	SubmissionClaimRef,
 } from '@flue/runtime/adapter';
-import type { WorkflowRunPointer } from '@flue/runtime';
 import {
 	assertSupportedFlueSchemaVersion,
 	clampLimit,
@@ -41,12 +33,10 @@ import {
 	DURABILITY_DEFAULT_MAX_ATTEMPTS,
 	DURABILITY_DEFAULT_TIMEOUT_MS,
 	decodeRunCursor,
-	deduplicateSessionDeletion,
 	encodeRunCursor,
 	FLUE_SCHEMA_VERSION,
 	formatOffset,
 	hydratePersistedDirectSubmission,
-	hydratePersistedSessionEntry,
 	isSubmissionPayload,
 	LEASE_DURATION_MS,
 	MAX_LIST_LIMIT,
@@ -55,44 +45,35 @@ import {
 	parseAcceptedAt,
 	parseOffset,
 	prepareDirectSubmission,
-	prepareSessionEntry,
 	SUBMISSION_HARNESS_NAME,
 	SUBMISSION_SESSION_NAME,
-	submissionChunkOwner,
 } from '@flue/runtime/adapter';
+import { RedisAttachmentStore } from './attachment-store.ts';
+import { RedisConversationStreamStore } from './conversation-store.ts';
 import { encodeSegment, RedisKeys } from './redis-keys.ts';
 import type { RedisArgument, RedisOptions, RedisRunner } from './redis-runner.ts';
 import {
-	acquireDeletionScript,
 	acquireGenerationScript,
 	admitSubmissionScript,
-	appendEventScript,
 	appendEventOnceScript,
+	appendEventScript,
 	claimSubmissionScript,
 	closeEventScript,
 	createRunScript,
-	deleteSubmissionScript,
 	endRunScript,
-	finishDeletionScript,
-	journalScript,
+	finalizeSettlementScript,
 	lifecycleScript,
-	publishChunksScript,
-	publishGenerationScript,
-	prepareTerminalScript,
-	recordTerminalOffsetScript,
-	finalizeTerminalScript,
+	markSubmissionCanonicalReadyScript,
 	quarantineSubmissionScript,
 	reclaimGenerationsScript,
 	releaseGenerationScript,
-	renewDeletionScript,
 	renewLeasesScript,
 	replaceAttemptScript,
+	reserveSettlementScript,
 } from './redis-scripts.ts';
 
 const empty = '';
 const GENERATION_GRACE_MS = 60_000;
-const DELETION_LEASE_MS = 30_000;
-const DELETION_POLL_MS = 50;
 
 type Hash = Record<string, string>;
 
@@ -195,24 +176,33 @@ export function redis(runner: RedisRunner, options: RedisOptions = {}): Persiste
 		async migrate() {
 			await inspectServer(backend, options.inspectServer !== false);
 			const stored = await backend.command('HGET', [backend.keys.meta(), 'schemaVersion']);
-			if (stored == null)
+			if (stored == null) {
+				let cursor = '0';
+				let existing = false;
+				do {
+					const result = await backend.command('SCAN', [cursor, 'MATCH', `${backend.keys.prefix}:*`, 'COUNT', 100]);
+					const page = Array.isArray(result) ? result : [];
+					cursor = String(page[0] ?? '0');
+					const keys = strings(page[1]);
+					if (keys.some((key) => key !== backend.keys.meta())) existing = true;
+				} while (cursor !== '0' && !existing);
+				if (existing) assertSupportedFlueSchemaVersion('unversioned');
 				await backend.command('HSETNX', [
 					backend.keys.meta(),
 					'schemaVersion',
 					FLUE_SCHEMA_VERSION,
 				]);
-			else if (String(stored) === '2' && FLUE_SCHEMA_VERSION === 3)
-				await backend.command('HSET', [backend.keys.meta(), 'schemaVersion', FLUE_SCHEMA_VERSION]);
-			else assertSupportedFlueSchemaVersion(String(stored));
+			} else assertSupportedFlueSchemaVersion(String(stored));
 		},
 		connect() {
 			return {
 				executionStore: {
-					sessions: new RedisSessionStore(backend),
 					submissions: new RedisSubmissionStore(backend),
 				},
 				runStore: new RedisRunStore(backend),
 				eventStreamStore: new RedisEventStreamStore(backend),
+				conversationStreamStore: new RedisConversationStreamStore(runner, backend.keys),
+				attachmentStore: new RedisAttachmentStore(runner, backend.keys),
 			};
 		},
 		async close() {
@@ -301,206 +291,23 @@ async function readGeneration<T>(
 	}
 }
 
-class RedisSessionStore implements SessionStore {
-	constructor(private backend: Backend) {}
-
-	async save(id: string, data: SessionData): Promise<void> {
-		const generation = randomUUID();
-		const generationKey = this.backend.keys.sessionGeneration(id, generation);
-		await this.backend.command('ZADD', [
-			this.backend.keys.sessionGenerations(id),
-			Date.now(),
-			generation,
-		]);
-		const { entries, ...session } = data;
-		const fields: Array<[string, string]> = [
-			['session', json(session)],
-			['entryCount', String(entries.length)],
-		];
-		for (const [index, entry] of entries.entries()) {
-			const prepared = prepareSessionEntry(entry);
-			fields.push([
-				`entry:${index}`,
-				json({ id: entry.id, value: prepared.value, chunks: prepared.chunks }),
-			]);
-		}
-		try {
-			await stageHash(this.backend, generationKey, fields);
-		} catch (error) {
-			await this.backend.command('DEL', [generationKey]);
-			throw error;
-		}
-		const pointer = this.backend.keys.session(id);
-		const generations = this.backend.keys.sessionGenerations(id);
-		await this.backend.eval(
-			publishGenerationScript,
-			[pointer, generationKey, generations],
-			[generation, Date.now()],
-		);
-		await reclaimGenerations(
-			this.backend,
-			pointer,
-			this.backend.keys.sessionReaders(id),
-			generations,
-			(value) => this.backend.keys.sessionGeneration(id, value),
-		);
-	}
-
-	async load(id: string): Promise<SessionData | null> {
-		return readGeneration(
-			this.backend,
-			this.backend.keys.session(id),
-			this.backend.keys.sessionReaders(id),
-			(value) => this.backend.keys.sessionGeneration(id, value),
-			(record) => {
-				if (!record.session)
-					throw new TypeError('Persisted Redis session generation is malformed.');
-				const session = JSON.parse(record.session) as Omit<SessionData, 'entries'>;
-				const entries = [];
-				for (let index = 0; index < integer(record.entryCount); index++) {
-					const raw = record[`entry:${index}`];
-					if (!raw) throw new TypeError('Persisted Redis session entry is malformed.');
-					const entry = JSON.parse(raw) as { value: SessionEntry; chunks: PersistedChunkRow[] };
-					entries.push(hydratePersistedSessionEntry(entry.value, entry.chunks));
-				}
-				return { ...session, entries };
-			},
-		);
-	}
-
-	async delete(id: string): Promise<void> {
-		const generations = this.backend.keys.sessionGenerations(id);
-		await this.backend.command('HDEL', [this.backend.keys.session(id), 'generation']);
-		await reclaimGenerations(
-			this.backend,
-			this.backend.keys.session(id),
-			this.backend.keys.sessionReaders(id),
-			generations,
-			(value) => this.backend.keys.sessionGeneration(id, value),
-			true,
-		);
-		await this.backend.command('DEL', [
-			this.backend.keys.session(id),
-			generations,
-			this.backend.keys.sessionReaders(id),
-		]);
-	}
-}
-
-function createChunkStore(backend: Backend): PersistedChunkStore<Promise<void>> {
-	return {
-		async read(owner) {
-			return (
-				(await readGeneration(
-					backend,
-					backend.keys.chunkOwner(owner),
-					backend.keys.chunkReaders(owner),
-					(value) => backend.keys.chunkGeneration(owner, value),
-					(record) => {
-						const count = integer(record.count ?? 0);
-						const rows: PersistedChunkRow[] = [];
-						for (let index = 0; index < count; index++) {
-							const value = record[`chunk:${index}`];
-							if (!value) throw new TypeError('Persisted Redis image chunk is malformed.');
-							rows.push(JSON.parse(value));
-						}
-						return rows;
-					},
-				)) ?? []
-			);
-		},
-		async replace(owner, chunks) {
-			const generation = randomUUID();
-			const generationKey = backend.keys.chunkGeneration(owner, generation);
-			const pointer = backend.keys.chunkOwner(owner);
-			const generations = `${pointer}:generations`;
-			await backend.command('ZADD', [generations, Date.now(), generation]);
-			try {
-				await stageHash(backend, generationKey, [
-					['count', String(chunks.length)],
-					...chunks.map((chunk, index) => [`chunk:${index}`, json(chunk)] as [string, string]),
-				]);
-			} catch (error) {
-				await backend.command('DEL', [generationKey]);
-				throw error;
-			}
-			await backend.eval(
-				publishChunksScript,
-				[pointer, generationKey, generations, backend.keys.chunkOwners()],
-				[generation, Date.now()],
-			);
-			await reclaimGenerations(
-				backend,
-				pointer,
-				backend.keys.chunkReaders(owner),
-				generations,
-				(value) => backend.keys.chunkGeneration(owner, value),
-			);
-		},
-		async delete(owner) {
-			await deleteChunkOwner(backend, owner);
-		},
-		async deleteMany(owners) {
-			for (const owner of owners) await deleteChunkOwner(backend, owner);
-		},
-		async deleteOwner(kind, id) {
-			const pointers = strings(await backend.command('SMEMBERS', [backend.keys.chunkOwners()]));
-			const prefix = backend.keys.encoded('chunk-owner', kind, id);
-			for (const pointer of pointers.filter((value) => value.startsWith(`${prefix}:`)))
-				await deleteChunkPointer(backend, pointer);
-		},
-	};
-}
-
-async function deleteChunkOwner(backend: Backend, owner: PersistedChunkOwner): Promise<void> {
-	await deleteChunkPointer(backend, backend.keys.chunkOwner(owner), owner);
-}
-
-async function deleteChunkPointer(
-	backend: Backend,
-	pointer: string,
-	owner?: PersistedChunkOwner,
-): Promise<void> {
-	const generations = `${pointer}:generations`;
-	const values = strings(await backend.command('ZRANGE', [generations, 0, -1]));
-	if (values.length > 0) {
-		let resolvedOwner = owner;
-		if (!resolvedOwner) {
-			const parts = pointer
-				.split(':')
-				.slice(-3)
-				.map((part) => Buffer.from(part, 'base64url').toString());
-			const kind = parts[0];
-			const id = parts[1];
-			const part = parts[2];
-			if (!kind || !id || !part) throw new TypeError('Persisted Redis chunk owner is malformed.');
-			resolvedOwner = { kind: kind as PersistedChunkOwner['kind'], id, part };
-		}
-		await backend.command(
-			'DEL',
-			values.map((value) => backend.keys.chunkGeneration(resolvedOwner, value)),
-		);
-	}
-	await backend.command('DEL', [pointer, generations]);
-	await backend.command('SREM', [backend.keys.chunkOwners(), pointer]);
-}
-
 class RedisSubmissionStore implements AgentSubmissionStore {
-	private pendingSessionDeletions = new Map<string, Promise<void>>();
-	private chunks: PersistedChunkStore<Promise<void>>;
-
-	constructor(private backend: Backend) {
-		this.chunks = createChunkStore(backend);
-	}
+	constructor(private backend: Backend) {}
 
 	async getSubmission(submissionId: string): Promise<AgentSubmission | null> {
 		const row = await this.backend.hgetall(this.backend.keys.submission(submissionId));
 		return row.submissionId ? this.parseSubmission(row) : null;
 	}
 
-	async getTurnJournal(submissionId: string): Promise<AgentTurnJournal | null> {
-		const row = await this.backend.hgetall(this.backend.keys.journal(submissionId));
-		return row.submissionId ? parseJournal(row) : null;
+	async markSubmissionCanonicalReady(submissionId: string): Promise<AgentSubmission | null> {
+		const changed = integer(
+			await this.backend.eval(
+				markSubmissionCanonicalReadyScript,
+				[this.backend.keys.submission(submissionId)],
+				[Date.now()],
+			),
+		);
+		return changed === 1 ? this.getSubmission(submissionId) : null;
 	}
 
 	async hasUnsettledSubmissions(): Promise<boolean> {
@@ -516,13 +323,22 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 		);
 	}
 
+	async listUnreadySubmissions(): Promise<AgentSubmission[]> {
+		const output: AgentSubmission[] = [];
+		for (const id of await this.backend.zrange(this.backend.keys.submissionStatus('queued'))) {
+			const submission = await this.readOperationalSubmission(id, 'queued');
+			if (submission?.canonicalReadyAt === null) output.push(submission);
+		}
+		return output;
+	}
+
 	async listRunnableSubmissions(): Promise<AgentSubmission[]> {
 		const ids = await this.backend.zrange(this.backend.keys.submissionStatus('queued'));
 		const output: AgentSubmission[] = [];
 		const seen = new Set<string>();
 		for (const id of ids) {
 			const submission = await this.readOperationalSubmission(id, 'queued');
-			if (submission && !seen.has(submission.sessionKey)) {
+			if (submission && submission.canonicalReadyAt !== null && !seen.has(submission.sessionKey)) {
 				seen.add(submission.sessionKey);
 				const head = await this.findSessionHead(submission.sessionKey);
 				if (head?.submissionId === id && head.status === 'queued') output.push(submission);
@@ -540,115 +356,7 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 		return output;
 	}
 
-	async beginTurnJournal(input: CreateTurnJournalInput): Promise<boolean> {
-		const now = Date.now();
-		return (
-			integer(
-				await this.backend.eval(
-					journalScript,
-					[this.backend.keys.journal(input.submissionId), this.backend.keys.journals()],
-					[
-						'begin',
-						input.submissionId,
-						input.sessionKey,
-						input.kind,
-						input.attemptId,
-						input.operationId,
-						input.turnId,
-						input.phase,
-						now,
-						input.checkpointLeafId ?? empty,
-						optionalJson(input.toolRequest),
-					],
-				),
-			) === 1
-		);
-	}
-
-	async updateTurnJournalPhase(
-		attempt: SubmissionAttemptRef,
-		phase: AgentTurnJournalPhase,
-		options: { checkpointLeafId?: string; toolRequest?: unknown; streamKey?: string } = {},
-	): Promise<boolean> {
-		return (
-			integer(
-				await this.backend.eval(
-					journalScript,
-					[this.backend.keys.journal(attempt.submissionId)],
-					[
-						'phase',
-						attempt.attemptId,
-						phase,
-						Date.now(),
-						options.checkpointLeafId ?? empty,
-						optionalJson(options.toolRequest),
-						options.streamKey ?? empty,
-					],
-				),
-			) === 1
-		);
-	}
-
-	async commitTurnJournal(
-		attempt: SubmissionAttemptRef,
-		committedLeafId: string,
-	): Promise<boolean> {
-		return (
-			integer(
-				await this.backend.eval(
-					journalScript,
-					[this.backend.keys.journal(attempt.submissionId)],
-					['commit', attempt.attemptId, Date.now(), committedLeafId],
-				),
-			) === 1
-		);
-	}
-
-	async markStreamConsumed(attempt: SubmissionAttemptRef, streamKey: string): Promise<boolean> {
-		return (
-			integer(
-				await this.backend.eval(
-					journalScript,
-					[this.backend.keys.journal(attempt.submissionId)],
-					['consumed', attempt.attemptId, streamKey, Date.now()],
-				),
-			) === 1
-		);
-	}
-
-	async appendStreamChunkSegment(
-		streamKey: string,
-		segmentIndex: number,
-		body: string,
-	): Promise<boolean> {
-		const inserted =
-			integer(
-				await this.backend.command('HSETNX', [
-					this.backend.keys.streamSegments(streamKey),
-					String(segmentIndex),
-					body,
-				]),
-			) === 1;
-		if (inserted)
-			await this.backend.command('SADD', [this.backend.keys.streamSegmentKeys(), streamKey]);
-		return inserted;
-	}
-
-	async getStreamChunkSegments(
-		streamKey: string,
-	): Promise<Array<{ segmentIndex: number; body: string }>> {
-		const row = await this.backend.hgetall(this.backend.keys.streamSegments(streamKey));
-		return Object.entries(row)
-			.map(([index, body]) => ({ segmentIndex: integer(index), body }))
-			.sort((a, b) => a.segmentIndex - b.segmentIndex);
-	}
-
-	async deleteStreamChunkSegments(streamKey: string): Promise<void> {
-		await this.backend.command('DEL', [this.backend.keys.streamSegments(streamKey)]);
-		await this.backend.command('SREM', [this.backend.keys.streamSegmentKeys(), streamKey]);
-	}
-
-	async replaceTurnJournalAttempt(
+	async replaceSubmissionAttempt(
 		attempt: SubmissionAttemptRef,
 		nextAttemptId: string,
 		lease?: { ownerId: string; leaseExpiresAt: number },
@@ -657,10 +365,7 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 			integer(
 				await this.backend.eval(
 					replaceAttemptScript,
-					[
-						this.backend.keys.submission(attempt.submissionId),
-						this.backend.keys.journal(attempt.submissionId),
-					],
+					[this.backend.keys.submission(attempt.submissionId)],
 					[
 						attempt.attemptId,
 						nextAttemptId,
@@ -736,29 +441,27 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 		return this.lifecycle(attempt, 'requeue', Date.now());
 	}
 
-	async listPendingTerminalOutboxes(): Promise<any[]> {
-		const output = [];
+	async listPendingSubmissionSettlements(): Promise<import('@flue/runtime/adapter').SubmissionSettlementObligation[]> {
+		const output: import('@flue/runtime/adapter').SubmissionSettlementObligation[] = [];
 		for (const id of await this.backend.zrange(this.backend.keys.submissionStatus('terminalizing'))) {
 			const row = await this.backend.hgetall(this.backend.keys.submission(id));
-			if (row.kind === 'direct' && row.status === 'terminalizing') output.push({ submissionId: id, sessionKey: required(row.sessionKey, 'Persisted Redis terminal session is missing.'), attemptId: required(row.attemptId, 'Persisted Redis terminal attempt is missing.'), eventKey: required(row.terminalKey, 'Persisted Redis terminal key is missing.'), event: JSON.parse(required(row.terminalEvent, 'Persisted Redis terminal event is missing.')), ...(row.terminalOffset ? { offset: row.terminalOffset } : {}) });
+			if (row.kind === 'direct' && row.status === 'terminalizing') output.push({ submissionId: id, sessionKey: required(row.sessionKey, 'Persisted Redis settlement session is missing.'), attemptId: required(row.attemptId, 'Persisted Redis settlement attempt is missing.'), recordId: required(row.settlementRecordId, 'Persisted Redis settlement record id is missing.'), record: JSON.parse(required(row.settlementRecord, 'Persisted Redis settlement record is missing.')) });
 		}
 		return output;
 	}
-	async reserveSubmissionTerminal(attempt: SubmissionAttemptRef, terminal: { eventKey: string; event: unknown }): Promise<any | null> {
+	async reserveSubmissionSettlement(attempt: SubmissionAttemptRef, settlement: { recordId: string; record: import('@flue/runtime/adapter').SubmissionSettledRecord }): Promise<import('@flue/runtime/adapter').SubmissionSettlementObligation | null> {
+		if (settlement.record.id !== settlement.recordId) return null;
 		const id = attempt.submissionId;
 		const row = await this.backend.hgetall(this.backend.keys.submission(id));
 		if (!row.sessionKey) return null;
-		await this.backend.eval(prepareTerminalScript, [this.backend.keys.submission(id), this.backend.keys.submissionStatus('running'), this.backend.keys.submissionStatus('terminalizing'), this.backend.keys.sessionUnsettled(row.sessionKey)], [attempt.attemptId, id, terminal.eventKey, json(terminal.event)]);
+		await this.backend.eval(reserveSettlementScript, [this.backend.keys.submission(id), this.backend.keys.submissionStatus('running'), this.backend.keys.submissionStatus('terminalizing'), this.backend.keys.sessionUnsettled(row.sessionKey)], [attempt.attemptId, id, settlement.recordId, json(settlement.record)]);
 		const current = await this.backend.hgetall(this.backend.keys.submission(id));
-		return current.status === 'terminalizing' && current.attemptId === attempt.attemptId && current.terminalKey === terminal.eventKey && current.terminalEvent === json(terminal.event) ? { submissionId: id, sessionKey: current.sessionKey, attemptId: attempt.attemptId, eventKey: terminal.eventKey, event: terminal.event, ...(current.terminalOffset ? { offset: current.terminalOffset } : {}) } : null;
+		return current.status === 'terminalizing' && current.sessionKey && current.attemptId === attempt.attemptId && current.settlementRecordId === settlement.recordId && current.settlementRecord === json(settlement.record) ? { submissionId: id, sessionKey: current.sessionKey, attemptId: attempt.attemptId, recordId: settlement.recordId, record: settlement.record } : null;
 	}
-	async recordSubmissionTerminalOffset(attempt: SubmissionAttemptRef, eventKey: string, offset: string): Promise<boolean> {
-		return integer(await this.backend.eval(recordTerminalOffsetScript, [this.backend.keys.submission(attempt.submissionId)], [attempt.attemptId, eventKey, offset])) === 1;
-	}
-	async finalizeSubmissionTerminal(attempt: SubmissionAttemptRef, eventKey: string): Promise<boolean> {
+	async finalizeSubmissionSettlement(attempt: SubmissionAttemptRef, recordId: string): Promise<boolean> {
 		const row = await this.backend.hgetall(this.backend.keys.submission(attempt.submissionId));
-		if (!row.sessionKey || row.attemptId !== attempt.attemptId || row.terminalKey !== eventKey || !row.terminalOffset) return false;
-		return integer(await this.backend.eval(finalizeTerminalScript, [this.backend.keys.submission(attempt.submissionId), this.backend.keys.submissionStatus('terminalizing'), this.backend.keys.sessionUnsettled(row.sessionKey)], [attempt.submissionId, Date.now(), row.terminalOffset])) === 1;
+		if (!row.sessionKey) return false;
+		return integer(await this.backend.eval(finalizeSettlementScript, [this.backend.keys.submission(attempt.submissionId), this.backend.keys.submissionStatus('terminalizing'), this.backend.keys.sessionUnsettled(row.sessionKey)], [attempt.submissionId, Date.now(), attempt.attemptId, recordId])) === 1;
 	}
 
 	completeSubmission(attempt: SubmissionAttemptRef): Promise<boolean> {
@@ -825,16 +528,6 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 		return running.filter((item) => item.leaseExpiresAt > 0 && item.leaseExpiresAt < now);
 	}
 
-	deleteSession(sessionKey: string, deleteSessionTree: () => Promise<void>): Promise<void> {
-		return deduplicateSessionDeletion(this.pendingSessionDeletions, sessionKey, () =>
-			this.runSessionDeletion(sessionKey, deleteSessionTree),
-		);
-	}
-
-	async listPendingSessionDeletions(): Promise<string[]> {
-		return strings(await this.backend.command('ZRANGE', [this.backend.keys.deletions(), 0, -1]));
-	}
-
 	private async admitSubmission(
 		input: DispatchAgentSubmissionInput | DirectAgentSubmissionInput,
 	): Promise<AgentDispatchAdmission> {
@@ -866,18 +559,6 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 			throw error;
 		}
 		const acceptedAt = parseAcceptedAt(input.acceptedAt, `${input.kind} admission`);
-		if (
-			integer(await this.backend.command('EXISTS', [this.backend.keys.deletion(sessionKey)])) === 1
-		) {
-			await this.backend.command('DEL', [generationKey]);
-			await this.backend.command('ZREM', [
-				this.backend.keys.submissionGenerations(input.submissionId),
-				generation,
-			]);
-			throw new TypeError(
-				'Durable agent submission admission is unavailable while this session is being deleted.',
-			);
-		}
 		let result: string[];
 		try {
 			result = strings(
@@ -893,7 +574,6 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 						this.backend.keys.sessionSubmissions(sessionKey),
 						this.backend.keys.submissionGenerations(input.submissionId),
 						this.backend.keys.receipt(input.submissionId),
-						this.backend.keys.deletion(sessionKey),
 						this.backend.keys.sessionUnsettled(sessionKey),
 					],
 					[
@@ -954,10 +634,6 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 				kind: 'retained_receipt',
 				receipt: { submissionId: input.submissionId, acceptedAt: integer(result[1]) },
 			};
-		if (result[0] === 'deleting')
-			throw new TypeError(
-				'Durable agent submission admission is unavailable while this session is being deleted.',
-			);
 		const existingRow = await this.backend.hgetall(
 			this.backend.keys.submission(input.submissionId),
 		);
@@ -1036,106 +712,11 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 		await this.backend.pipeline(commands);
 	}
 
-	private async runSessionDeletion(
-		sessionKey: string,
-		deleteSessionTree: () => Promise<void>,
-	): Promise<void> {
-		const ownerId = randomUUID();
-		let cutoff: number;
-		while (true) {
-			const now = Date.now();
-			const result = strings(
-				await this.backend.eval(
-					acquireDeletionScript,
-					[
-						this.backend.keys.deletion(sessionKey),
-						this.backend.keys.sessionUnsettled(sessionKey),
-						this.backend.keys.sequence(),
-						this.backend.keys.deletions(),
-					],
-					[ownerId, now, sessionKey, now + DELETION_LEASE_MS],
-				),
-			);
-			if (result[0] === 'active')
-				throw new TypeError(
-					'Session cannot be deleted while durable agent submissions are queued or running.',
-				);
-			if (result[0] === 'owned') {
-				cutoff = integer(result[1]);
-				break;
-			}
-			await new Promise((resolve) => setTimeout(resolve, DELETION_POLL_MS));
-			if (
-				integer(await this.backend.command('EXISTS', [this.backend.keys.deletion(sessionKey)])) ===
-				0
-			)
-				return;
-		}
-		const heartbeat = setInterval(() => {
-			void this.backend.eval(
-				renewDeletionScript,
-				[this.backend.keys.deletion(sessionKey)],
-				[ownerId, Date.now() + DELETION_LEASE_MS],
-			);
-		}, DELETION_LEASE_MS / 3);
-		try {
-			await deleteSessionTree();
-		} catch (error) {
-			clearInterval(heartbeat);
-			await this.backend.eval(
-				finishDeletionScript,
-				[this.backend.keys.deletion(sessionKey), this.backend.keys.deletions()],
-				[ownerId, sessionKey],
-			);
-			throw error;
-		}
-		clearInterval(heartbeat);
-		for (const id of await this.backend.zrange(this.backend.keys.sessionSubmissions(sessionKey))) {
-			const row = await this.backend.hgetall(this.backend.keys.submission(id));
-			if (row.status !== 'settled' || integer(row.sequence) > cutoff) continue;
-			const journal = await this.backend.hgetall(this.backend.keys.journal(id));
-			if (journal.streamKey) await this.deleteStreamChunkSegments(journal.streamKey);
-			await this.chunks.delete(submissionChunkOwner(id));
-			const generationIds = strings(
-				await this.backend.command('ZRANGE', [this.backend.keys.submissionGenerations(id), 0, -1]),
-			);
-			const deleted = integer(
-				await this.backend.eval(
-					deleteSubmissionScript,
-					[
-						this.backend.keys.submission(id),
-						this.backend.keys.submissionIds(),
-						this.backend.keys.submissionOrder(),
-						this.backend.keys.submissionStatus('settled'),
-						this.backend.keys.sessionSubmissions(sessionKey),
-						this.backend.keys.sessionUnsettled(sessionKey),
-						this.backend.keys.deletion(sessionKey),
-						this.backend.keys.journals(),
-						this.backend.keys.submissionGenerations(id),
-						this.backend.keys.receipt(id),
-					],
-					[ownerId, cutoff, id],
-				),
-			);
-			if (deleted === 1) {
-				await this.backend.command('DEL', [
-					this.backend.keys.journal(id),
-					this.backend.keys.submissionReaders(id),
-					...generationIds.map((value) => this.backend.keys.submissionGeneration(id, value)),
-				]);
-			}
-		}
-		await this.backend.eval(
-			finishDeletionScript,
-			[this.backend.keys.deletion(sessionKey), this.backend.keys.deletions()],
-			[ownerId, sessionKey],
-		);
-	}
-
 	private async findSessionHead(sessionKey: string): Promise<AgentSubmission | null> {
 		const ids = await this.backend.zrange(this.backend.keys.sessionUnsettled(sessionKey));
 		for (const id of ids) {
 			const row = await this.backend.hgetall(this.backend.keys.submission(id));
+			if (row.status === 'terminalizing') return null;
 			const status = row.status === 'running' ? 'running' : 'queued';
 			const value = await this.readOperationalSubmission(id, status);
 			if (value) return value;
@@ -1223,6 +804,7 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 			input,
 			status: row.status as AgentSubmission['status'],
 			acceptedAt,
+			canonicalReadyAt: row.canonicalReadyAt ? integer(row.canonicalReadyAt) : null,
 			...(row.attemptId ? { attemptId: row.attemptId } : {}),
 			...(row.inputAppliedAt ? { inputAppliedAt: integer(row.inputAppliedAt) } : {}),
 			...(row.recoveryRequestedAt ? { recoveryRequestedAt: integer(row.recoveryRequestedAt) } : {}),
@@ -1235,28 +817,6 @@ class RedisSubmissionStore implements AgentSubmissionStore {
 			leaseExpiresAt: integer(row.leaseExpiresAt),
 		};
 	}
-}
-
-function parseJournal(row: Hash): AgentTurnJournal {
-	const malformed = 'Persisted Redis turn journal is malformed.';
-	return {
-		submissionId: required(row.submissionId, malformed),
-		sessionKey: required(row.sessionKey, malformed),
-		kind: row.kind as 'dispatch' | 'direct',
-		attemptId: required(row.attemptId, malformed),
-		operationId: required(row.operationId, malformed),
-		turnId: required(row.turnId, malformed),
-		phase: row.phase as AgentTurnJournalPhase,
-		revision: integer(row.revision),
-		createdAt: integer(row.createdAt),
-		updatedAt: integer(row.updatedAt),
-		...(row.checkpointLeafId ? { checkpointLeafId: row.checkpointLeafId } : {}),
-		...(row.toolRequest ? { toolRequest: JSON.parse(row.toolRequest) } : {}),
-		...(row.streamKey ? { streamKey: row.streamKey } : {}),
-		...(row.streamConsumedAt ? { streamConsumedAt: integer(row.streamConsumedAt) } : {}),
-		committed: row.committed === '1',
-		...(row.committedLeafId ? { committedLeafId: row.committedLeafId } : {}),
-	};
 }
 
 class RedisRunStore {

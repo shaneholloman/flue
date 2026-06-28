@@ -473,13 +473,13 @@ For full details, see the [outbound Workers documentation](https://developers.cl
 
 Most agents don't need a remote sandbox. Start with a virtual sandbox and only move to a remote sandbox when you need the full environment.
 
-## Session persistence
+## Conversation persistence
 
-When a generated Cloudflare application handles agent or workflow work through its Durable Object-backed runtime path, Flue stores session conversation state in Durable Object SQLite by default. This retains message history and compaction checkpoints for later operations in that stored session.
+For agents, generated Cloudflare applications store one append-only canonical conversation stream per agent instance in Durable Object SQLite, with attachment bytes in a separate immutable store. Sessions select conversations from that stream; there is no second session transcript or persisted conversation snapshot. Workflow harness conversation state is execution-scoped to its run, while workflow run records and event history use the workflow durable-runtime path.
 
-Filesystem durability remains a separate decision. The default lightweight sandbox uses an in-memory filesystem and must not be treated as durable merely because conversation state is stored in a Durable Object. Use a durable workspace or container-backed integration when files or installed artifacts must survive later activity. Workflow run history is likewise stored through the workflow durable-runtime path and is distinct from agent session storage.
+Filesystem durability remains a separate decision. The default lightweight sandbox uses an in-memory filesystem and must not be treated as durable merely because conversation state is stored in a Durable Object. Use a durable workspace or container-backed integration when files or installed artifacts must survive later activity.
 
-Agent events are durably stored and can be replayed from any offset via the Durable Streams protocol at `GET /agents/:name/:id`.
+Agent clients read materialized history or projected updates at `GET /agents/:name/:id`; see the [Streaming Protocol](/docs/api/streaming-protocol/).
 
 ## Interruption and recovery semantics
 

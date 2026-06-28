@@ -1,5 +1,3 @@
-import type { PersistedChunkOwner } from '@flue/runtime/adapter';
-
 export function encodeSegment(value: string): string {
 	return Buffer.from(value).toString('base64url');
 }
@@ -23,11 +21,6 @@ export class RedisKeys {
 
 	meta = () => this.key('meta');
 	sequence = () => this.key('sequence', 'admission');
-	session = (id: string) => this.encoded('session', id);
-	sessionGeneration = (id: string, generation: string) =>
-		this.encoded('session-generation', id, generation);
-	sessionGenerations = (id: string) => this.encoded('session-generations', id);
-	sessionReaders = (id: string) => this.encoded('session-readers', id);
 	submission = (id: string) => this.encoded('submission', id);
 	submissionGeneration = (id: string, generation: string) =>
 		this.encoded('submission-generation', id, generation);
@@ -38,12 +31,6 @@ export class RedisKeys {
 	submissionStatus = (status: string) => this.key('submissions', 'status', status);
 	sessionSubmissions = (sessionKey: string) => this.encoded('session-submissions', sessionKey);
 	sessionUnsettled = (sessionKey: string) => this.encoded('session-unsettled', sessionKey);
-	journal = (submissionId: string) => this.encoded('journal', submissionId);
-	journals = () => this.key('journals');
-	streamSegments = (streamKey: string) => this.encoded('stream-segments', streamKey);
-	streamSegmentKeys = () => this.key('stream-segment-keys');
-	deletion = (sessionKey: string) => this.encoded('deletion', sessionKey);
-	deletions = () => this.key('deletions');
 	receipt = (id: string) => this.encoded('receipt', id);
 	marker = (submissionId: string, attemptId: string) =>
 		this.encoded('marker', submissionId, attemptId);
@@ -58,14 +45,11 @@ export class RedisKeys {
 	eventOrder = (path: string) => this.encoded('event-order', path);
 	eventKeys = (path: string) => this.encoded('event-keys', path);
 	events = () => this.key('events');
-	chunkOwner(owner: PersistedChunkOwner) {
-		return this.encoded('chunk-owner', owner.kind, owner.id, owner.part);
-	}
-	chunkGeneration(owner: PersistedChunkOwner, generation: string) {
-		return this.encoded('chunk-generation', owner.kind, owner.id, owner.part, generation);
-	}
-	chunkReaders(owner: PersistedChunkOwner) {
-		return this.encoded('chunk-readers', owner.kind, owner.id, owner.part);
-	}
-	chunkOwners = () => this.key('chunk-owners');
+	conversation = (path: string) => this.encoded('conversation', path);
+	conversationBatches = (path: string) => this.encoded('conversation-batches', path);
+	conversationOrder = (path: string) => this.encoded('conversation-order', path);
+	conversationRetries = (path: string) => this.encoded('conversation-retries', path);
+	conversations = () => this.key('conversations');
+	attachment = (path: string, attachmentId: string) => this.encoded('attachment', path, attachmentId);
+	attachments = (path: string) => this.encoded('attachments', path);
 }

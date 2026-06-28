@@ -1,4 +1,22 @@
-import type { FlueEvent } from '@flue/sdk';
+import type { ConversationStreamChunk, FlueEvent } from '@flue/sdk';
+
+const CONVERSATION_CHUNK_TYPES = new Set<ConversationStreamChunk['type']>([
+	'conversation-reset',
+	'message-appended',
+	'message-started',
+	'message-delta',
+	'tool-input',
+	'tool-output',
+	'tool-output-error',
+	'message-completed',
+	'submission-settled',
+]);
+
+function isConversationChunk(
+	event: ConversationStreamChunk | FlueEvent,
+): event is ConversationStreamChunk {
+	return CONVERSATION_CHUNK_TYPES.has(event.type as ConversationStreamChunk['type']);
+}
 
 type TranscriptTone = 'normal' | 'dim' | 'error' | 'success' | 'accent' | 'user';
 
@@ -16,7 +34,7 @@ export interface ConsoleTranscript {
 }
 
 export type TranscriptAction =
-	| { type: 'event'; event: FlueEvent }
+	| { type: 'event'; event: ConversationStreamChunk | FlueEvent }
 	| { type: 'prompt'; message: string }
 	| { type: 'error'; error: unknown }
 	| { type: 'clear-streaming' };
@@ -39,7 +57,11 @@ export function reduceConsoleTranscript(
 	return reduceEvent(state, action.event);
 }
 
-function reduceEvent(state: ConsoleTranscript, event: FlueEvent): ConsoleTranscript {
+function reduceEvent(
+	state: ConsoleTranscript,
+	event: ConversationStreamChunk | FlueEvent,
+): ConsoleTranscript {
+	if (isConversationChunk(event)) return reduceChunk(state, event);
 	if (event.type === 'text_delta') {
 		const key = event.turnId ?? FALLBACK_STREAM_KEY;
 		return { ...state, streaming: { ...state.streaming, [key]: `${state.streaming[key] ?? ''}${event.text}` } };
@@ -80,6 +102,51 @@ function reduceEvent(state: ConsoleTranscript, event: FlueEvent): ConsoleTranscr
 	if (event.type === 'run_resume') return append(state, `run ${event.runId} resumed`, 'dim');
 	if (event.type === 'run_end') return append(state, `run ${event.runId} ${event.isError ? 'failed' : 'completed'} ${event.durationMs}ms`, event.isError ? 'error' : 'success');
 	return state;
+}
+
+function reduceChunk(state: ConsoleTranscript, chunk: ConversationStreamChunk): ConsoleTranscript {
+	switch (chunk.type) {
+		case 'message-delta': {
+			// A `kind` change closes the previous streaming block into a record;
+			// streaming content for the current kind accumulates until then or until
+			// the message completes.
+			const other = chunk.kind === 'text' ? 'reasoning' : 'text';
+			const flushed = flushStreamingKind(state, other);
+			return {
+				...flushed,
+				streaming: { ...flushed.streaming, [chunk.kind]: `${flushed.streaming[chunk.kind] ?? ''}${chunk.delta}` },
+			};
+		}
+		case 'message-completed':
+			return flushStreamingKind(flushStreamingKind(state, 'reasoning'), 'text');
+		case 'tool-input': {
+			const flushed = flushStreamingKind(flushStreamingKind(state, 'reasoning'), 'text');
+			return append(flushed, `tool  ${chunk.toolName} ${toolDetail(chunk.toolName, chunk.input)}`, 'dim');
+		}
+		case 'tool-output':
+			return append(state, `tool done  ${detail(chunk.output)}`, 'dim');
+		case 'tool-output-error':
+			return append(state, `tool failed  ${detail(chunk.errorText)}`, 'error');
+		case 'submission-settled':
+			return chunk.outcome === 'failed'
+				? append({ ...state, streaming: {} }, `error  ${errorMessage(chunk.error)}`, 'error')
+				: { ...state, streaming: {} };
+		default:
+			return state;
+	}
+}
+
+function flushStreamingKind(
+	state: ConsoleTranscript,
+	kind: 'text' | 'reasoning',
+): ConsoleTranscript {
+	const value = state.streaming[kind];
+	if (value === undefined) return state;
+	const { [kind]: _removed, ...streaming } = state.streaming;
+	if (!value) return { ...state, streaming };
+	return kind === 'reasoning'
+		? append({ ...state, streaming }, `Thinking...\n${value}`, 'dim', 'thinking')
+		: append({ ...state, streaming }, value, 'normal');
 }
 
 function append(

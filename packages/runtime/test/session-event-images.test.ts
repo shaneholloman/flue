@@ -7,8 +7,8 @@ import {
 } from '@earendil-works/pi-ai';
 import { afterEach, describe, expect, it } from 'vitest';
 import { defineAgent, IMAGE_DATA_OMITTED } from '../src/index.ts';
-import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
-import type { FlueEvent, SessionData, SessionStore } from '../src/types.ts';
+import { createFlueContext } from '../src/internal.ts';
+import type { FlueEvent } from '../src/types.ts';
 import { createNoopSessionEnv } from './fixtures/session-env.ts';
 
 const IMAGE_BYTES = 'aGVsbG8taW1hZ2UtYnl0ZXM=';
@@ -28,7 +28,7 @@ function createProvider(): FauxProviderRegistration {
 	return provider;
 }
 
-function createContext(provider: FauxProviderRegistration, store?: SessionStore) {
+function createContext(provider: FauxProviderRegistration) {
 	return createFlueContext({
 		id: 'session-event-images-instance',
 		env: {},
@@ -39,24 +39,7 @@ function createContext(provider: FauxProviderRegistration, store?: SessionStore)
 			},
 		},
 		createDefaultEnv: async () => createNoopSessionEnv(),
-		defaultStore: store ?? new InMemorySessionStore(),
 	});
-}
-
-class RecordingSessionStore implements SessionStore {
-	readonly records = new Map<string, SessionData>();
-
-	async save(id: string, data: SessionData): Promise<void> {
-		this.records.set(id, structuredClone(data));
-	}
-
-	async load(id: string): Promise<SessionData | null> {
-		return structuredClone(this.records.get(id) ?? null);
-	}
-
-	async delete(id: string): Promise<void> {
-		this.records.delete(id);
-	}
 }
 
 describe('session event image redaction', () => {
@@ -78,18 +61,21 @@ describe('session event image redaction', () => {
 		});
 
 		expect(JSON.stringify(events)).not.toContain(IMAGE_BYTES);
-		const userMessageEnd = events
-			.filter(
-				(event): event is Extract<FlueEvent, { type: 'message_end' }> =>
-					event.type === 'message_end',
-			)
-			.map((event) => event.message)
-			.find(
-				(message): message is Extract<AgentMessage, { role: 'user' }> => message.role === 'user',
-			);
-		expect(userMessageEnd?.content).toContainEqual(
+		const userMessageStart = events.find(
+			(event): event is Extract<FlueEvent, { type: 'message_start' }> =>
+				event.type === 'message_start' && event.message.role === 'user',
+		);
+		const userMessageEnd = events.find(
+			(event): event is Extract<FlueEvent, { type: 'message_end' }> =>
+				event.type === 'message_end' && event.message.role === 'user',
+		);
+		expect((userMessageStart?.message as Extract<AgentMessage, { role: 'user' }> | undefined)?.content).toContainEqual(
 			expect.objectContaining({ type: 'image', data: IMAGE_DATA_OMITTED, mimeType: 'image/png' }),
 		);
+		expect((userMessageEnd?.message as Extract<AgentMessage, { role: 'user' }> | undefined)?.content).toContainEqual(
+			expect.objectContaining({ type: 'image', data: IMAGE_DATA_OMITTED, mimeType: 'image/png' }),
+		);
+		expect(events.indexOf(userMessageStart as FlueEvent)).toBeLessThan(events.indexOf(userMessageEnd as FlueEvent));
 		const agentEnd = events.find(
 			(event): event is Extract<FlueEvent, { type: 'agent_end' }> => event.type === 'agent_end',
 		);
@@ -196,9 +182,8 @@ describe('session event image redaction', () => {
 				return fauxAssistantMessage('Described the image.');
 			},
 		]);
-		const store = new RecordingSessionStore();
 		const events: FlueEvent[] = [];
-		const ctx = createContext(provider, store);
+		const ctx = createContext(provider);
 		ctx.subscribeEvent((event) => {
 			events.push(event);
 		});
@@ -220,8 +205,6 @@ describe('session event image redaction', () => {
 				]),
 			}),
 		);
-		const data = [...store.records.values()][0];
-		expect(JSON.stringify(data?.entries)).toContain(IMAGE_BYTES);
 	});
 
 	it('keeps real tool-result image bytes in the next provider request when tool events are redacted', async () => {

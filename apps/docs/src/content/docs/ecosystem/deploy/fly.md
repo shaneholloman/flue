@@ -59,7 +59,7 @@ Use the env var your provider expects — `ANTHROPIC_API_KEY` for Anthropic, `OP
 
 ## Persistence
 
-On Node.js, agent sessions live in memory by default — fine for a single Machine, but lost on restart and not shared across Machines. Once you run more than one Machine, or need state to survive a deploy, back Flue with Postgres.
+On Node.js, canonical agent conversations, attachments, and accepted submissions live in memory by default — fine for a single Machine, but lost on restart. Back Flue with Postgres for replacement recovery and shared workflow history. Multiple Machines must route each agent instance to one live owner; shared storage alone does not make same-instance active-active execution safe.
 
 [Fly Managed Postgres](https://fly.io/docs/mpg/) (MPG) is the recommended option; the older unmanaged Fly Postgres (`fly postgres`) still exists, but Fly no longer provides support or guidance for it. `fly mpg create` prompts for a name, region, and plan (or pass `--name` / `--region` / `--plan`); `fly mpg attach` sets `DATABASE_URL` as a secret on the app — the pooled (PgBouncer) connection URL — and restarts it:
 
@@ -80,7 +80,7 @@ import { postgres } from '@flue/postgres';
 export default postgres(process.env.DATABASE_URL!);
 ```
 
-Flue discovers `db.ts` at build time and wires it into the generated server. The adapter handles schema creation, session snapshots, and durable submission state. See [Database](/docs/guide/database/) for adapter details and [Data Persistence API](/docs/api/data-persistence-api/) for the contract.
+Flue discovers `db.ts` at build time and wires it into the generated server. The adapter handles schema creation, canonical conversation streams, immutable attachments, durable submission state, and workflow history. See [Database](/docs/guide/database/) for adapter details and [Data Persistence API](/docs/api/data-persistence-api/) for the contract.
 
 ## Health and streaming
 
@@ -90,7 +90,7 @@ Exposed workflow runs use long-lived `GET /runs/:runId` reads (long-poll/SSE). K
 
 ## Going further
 
-- **Regions and scaling.** `fly scale count` adds Machines and `fly scale vm` resizes them; run more than one Machine across regions for availability. Multi-Machine deployments require shared Postgres for session state — in-memory state is per-Machine.
+- **Regions and scaling.** `fly scale count` adds Machines and `fly scale vm` resizes them. Multi-Machine deployments need shared Postgres for replacement recovery and workflow history, plus routing that keeps each agent instance on one live Machine and prevents overlapping owners.
 - **Scheduled workflows.** Use Fly [scheduled Machines](https://fly.io/docs/machines/) to call the deployed application's authenticated workflow endpoint, or run `npx flue run workflow:<name> --server https://<host>/<flue-mount>`. Remote attachment exercises the deployed application without building and starting another local runtime.
 
 ## References

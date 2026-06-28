@@ -32,7 +32,7 @@ Organize supporting application code however you prefer inside `src/`. The files
 | Path            | Purpose                                                                               | Learn more                                                            |
 | --------------- | ------------------------------------------------------------------------------------- | --------------------------------------------------------------------- |
 | `app.ts`        | Optional entrypoint for composing Flue with your application's routes and middleware. | [Routing](/docs/guide/routing/)                                       |
-| `db.ts`         | Optional Node.js persistence adapter for agent sessions and workflow runs.            | [Database](/docs/guide/database/)                                     |
+| `db.ts`         | Optional Node.js persistence adapter for agent conversations and workflow runs.       | [Database](/docs/guide/database/)                                     |
 | `cloudflare.ts` | Optional Cloudflare-only module for Worker exports and non-HTTP handlers.             | [Cloudflare](/docs/ecosystem/deploy/cloudflare/#extending-the-worker) |
 | `agents/`       | Addressable agents that can receive continuing interactions over time.                | [Agents](/docs/guide/building-agents/)                                |
 | `workflows/`    | Finite operations that receive input and return a result.                             | [Workflows](/docs/guide/workflows/)                                   |
@@ -46,7 +46,7 @@ For more information, see [Routing](/docs/guide/routing/).
 
 ### `db.ts`
 
-`db.ts` is an optional Node.js persistence entrypoint. Its default export configures the `PersistenceAdapter` used for agent session history, accepted submissions, and workflow-run records. Without it, Node.js uses in-memory SQLite and loses this state when the process exits. Cloudflare provides Durable Object SQLite automatically and rejects `db.ts`.
+`db.ts` is an optional Node.js persistence entrypoint. Its default export configures the `PersistenceAdapter` used for canonical agent conversations, attachments, accepted submissions, and workflow-run records. Without it, Node.js uses in-memory SQLite and loses this state when the process exits. Cloudflare provides Durable Object SQLite automatically and rejects `db.ts`.
 
 For more information, see [Database](/docs/guide/database/).
 

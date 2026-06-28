@@ -1,10 +1,9 @@
-import { getEventListeners } from 'node:events';
 import { describe, expect, it } from 'vitest';
 import {
 	type AgentPromptOptions,
+	type ConversationStreamChunk,
 	createFlueClient,
 	FlueApiError,
-	UnsupportedFlueEventVersionError,
 } from '../src/index.ts';
 
 describe('createFlueClient', () => {
@@ -37,6 +36,32 @@ describe('createFlueClient', () => {
 		});
 	});
 
+	describe('default global fetch', () => {
+		it('calls the global fetch with the correct receiver in a browser-like global', async () => {
+			// Regression for "Illegal invocation" in browsers: when no custom fetch
+			// is supplied, the SDK must invoke the global `fetch` with `globalThis`
+			// as its receiver, not the HttpClient instance.
+			const original = globalThis.fetch;
+			let calledWithCorrectReceiver = false;
+			globalThis.fetch = function (this: unknown) {
+				if (this !== globalThis) {
+					throw new TypeError("Failed to execute 'fetch': Illegal invocation");
+				}
+				calledWithCorrectReceiver = true;
+				return Promise.resolve(Response.json({ result: { ok: true } }));
+			} as typeof fetch;
+			try {
+				const client = createFlueClient({ baseUrl: 'https://flue.test' });
+				await expect(
+					client.agents.prompt('hello', 'inst-1', { message: 'hi' }),
+				).resolves.toEqual({ result: { ok: true } });
+				expect(calledWithCorrectReceiver).toBe(true);
+			} finally {
+				globalThis.fetch = original;
+			}
+		});
+	});
+
 	describe('agents.send()', () => {
 		it('sends images in the accepted prompt body', async () => {
 			const seen: Request[] = [];
@@ -58,255 +83,161 @@ describe('createFlueClient', () => {
 		});
 	});
 
-	describe('agents.stream()', () => {
-		it('rejects every non-v3 event without compatibility normalization', async () => {
-			for (const version of [1, 2, 4, undefined]) {
-				const client = createFlueClient({
-					baseUrl: 'https://flue.test',
-					fetch: async () => dsJsonResponse([{ type: 'idle', v: version }]),
-				});
-				const iterator = client.agents.stream('agent', 'id', { live: false })[Symbol.asyncIterator]();
-
-				const error = await iterator.next().catch((error: unknown) => error);
-
-				expect(error).toBeInstanceOf(UnsupportedFlueEventVersionError);
-				expect(error).toMatchObject({ received: version, supported: 3 });
-			}
-		});
-
-		it('constructs the correct stream URL from agent name and id', async () => {
-			const urls: string[] = [];
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test/api/',
-				fetch: async (input) => {
-					urls.push(typeof input === 'string' ? input : new Request(input).url);
-					return dsJsonResponse([{ type: 'idle', v: 3 }]);
-				},
-			});
-
-			const eventStream = client.agents.stream('my-agent', 'inst-1', {
-				offset: '0000000000000000_0000000000000042',
-				live: false,
-			});
-			const events = [];
-			for await (const event of eventStream) {
-				events.push(event);
-			}
-			expect(events).toEqual([{ type: 'idle', v: 3 }]);
-			expect(urls.length).toBeGreaterThanOrEqual(1);
-			const [url] = urls;
-			if (!url) throw new Error('Expected a stream request URL.');
-			const parsed = new URL(url);
-			expect(parsed.pathname).toBe('/api/agents/my-agent/inst-1');
-			expect(parsed.searchParams.get('offset')).toBe('0000000000000000_0000000000000042');
-		});
-
-		it('preserves tail alongside Durable Streams query parameters', async () => {
-			let url = '';
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test/api',
-				fetch: async (input) => {
-					url = typeof input === 'string' ? input : new Request(input).url;
-					return dsJsonResponse([]);
-				},
-			});
-
-			for await (const _ of client.agents.stream('agent', 'id', {
-				offset: '-1',
-				tail: 100,
-				live: false,
-			})) {
-			}
-
-			const parsed = new URL(url);
-			expect(parsed.searchParams.get('tail')).toBe('100');
-			expect(parsed.searchParams.get('offset')).toBe('-1');
-		});
-
-		it('passes auth headers to the DS stream via fetch wrapper', async () => {
-			const seenHeaders: Record<string, string>[] = [];
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test',
-				token: 'test-token-123',
-				headers: { 'x-custom': 'value' },
-				fetch: async (_input, init) => {
-					const h = init?.headers as Record<string, string> | undefined;
-					if (h) seenHeaders.push({ ...h });
-					return dsJsonResponse([]);
-				},
-			});
-
-			const eventStream = client.agents.stream('agent', 'id', { live: false });
-			// Consume the stream to trigger the fetch.
-			for await (const _ of eventStream) {
-				// empty
-			}
-			expect(seenHeaders.length).toBeGreaterThanOrEqual(1);
-			expect(seenHeaders[0]).toMatchObject({
-				authorization: 'Bearer test-token-123',
-				'x-custom': 'value',
-			});
-		});
-
-		it('cancel() before iteration does not start a connection', async () => {
-			let fetchCount = 0;
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test',
-				fetch: async () => {
-					fetchCount++;
-					return dsJsonResponse([]);
-				},
-			});
-
-			const eventStream = client.agents.stream('agent', 'id', { live: false });
-			eventStream.cancel();
-			const events = [];
-			for await (const event of eventStream) {
-				events.push(event);
-			}
-
-			expect(events).toEqual([]);
-			expect(fetchCount).toBe(0);
-		});
-
-		it('stops cleanly when canceled during initial connection', async () => {
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test',
-				fetch: async (_input, init) =>
-					await new Promise<Response>((_resolve, reject) => {
-						init?.signal?.addEventListener('abort', () =>
-							reject(new DOMException('Aborted', 'AbortError')),
-						);
-					}),
-			});
-
-			const eventStream = client.agents.stream('agent', 'id', { live: false });
-			const next = eventStream[Symbol.asyncIterator]().next();
-			await new Promise((resolve) => setTimeout(resolve, 0));
-			eventStream.cancel();
-
-			await expect(next).resolves.toEqual({ value: undefined, done: true });
-		});
-
-		it('removes the listener on an external signal when the initial connection fails', async () => {
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test',
-				fetch: async () => new Response('not found', { status: 404 }),
-			});
-
-			// A long-lived signal reused across retry attempts must not
-			// accumulate one 'abort' listener per failed connection.
-			const controller = new AbortController();
-			const eventStream = client.agents.stream('agent', 'missing', {
-				live: false,
-				signal: controller.signal,
-			});
-			const iterator = eventStream[Symbol.asyncIterator]();
-
-			await expect(iterator.next()).rejects.toThrow();
-			expect(getEventListeners(controller.signal, 'abort')).toHaveLength(0);
-		});
-
-		it('delivers events in call order when next() is called concurrently', async () => {
+	describe('agents.history() attachment urls', () => {
+		it('resolves a url on durably-recorded file parts and leaves preview parts untouched', async () => {
 			const client = createFlueClient({
 				baseUrl: 'https://flue.test',
 				fetch: async () =>
-					dsJsonResponse([{ type: 'agent_start' }, { type: 'turn_start' }, { type: 'idle', v: 3 }]),
-			});
-
-			// The async-iterator protocol permits issuing next() before the
-			// previous call settles (e.g. read-ahead buffering); concurrent
-			// calls must queue onto sequential results instead of dropping a
-			// waiter or surfacing an internal error.
-			const iterator = client.agents.stream('agent', 'id', { live: false })[Symbol.asyncIterator]();
-			const results = await Promise.all([
-				iterator.next(),
-				iterator.next(),
-				iterator.next(),
-				iterator.next(),
-			]);
-
-			expect(results).toEqual([
-				{ value: { type: 'agent_start', v: 3 }, done: false },
-				{ value: { type: 'turn_start', v: 3 }, done: false },
-				{ value: { type: 'idle', v: 3 }, done: false },
-				{ value: undefined, done: true },
-			]);
-		});
-
-		it('tracks the latest stream offset after reading an event', async () => {
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test',
-				fetch: async () =>
-					dsJsonResponse([{ type: 'agent_start' }], {
-						nextOffset: '0000000000000000_0000000000000001',
-						closed: true,
+					Response.json({
+						v: 1,
+						conversationId: 'c1',
+						offset: '0000000000000000_0000000000000001',
+						messages: [
+							{
+								id: 'u1',
+								role: 'user',
+								parts: [
+									{ type: 'file', mediaType: 'image/png', id: 'att-1', size: 3 },
+									{ type: 'file', mediaType: 'image/png', url: 'data:image/png;base64,AAAA' },
+								],
+							},
+						],
+						settlements: [],
 					}),
 			});
 
-			const eventStream = client.agents.stream('agent', 'id', { live: false });
-			expect(eventStream.offset).toBe('-1');
-			const iterator = eventStream[Symbol.asyncIterator]();
-			await iterator.next();
-			expect(eventStream.offset).toBe('0000000000000000_0000000000000001');
+			const snapshot = await client.agents.history('agent', 'inst-1');
+			const parts = snapshot.messages[0]?.parts as Array<{ url?: string }>;
+			expect(parts[0]?.url).toBe('https://flue.test/agents/agent/inst-1/attachments/att-1');
+			// A part that already carries a url (e.g. an optimistic data URL) is left as-is.
+			expect(parts[1]?.url).toBe('data:image/png;base64,AAAA');
 		});
+	});
 
-		it('advances offset only when the last event of a batch has been delivered', async () => {
+	describe('agents.observe()', () => {
+		it('materializes history before following updates from the snapshot offset', async () => {
+			const seen: string[] = [];
 			const client = createFlueClient({
 				baseUrl: 'https://flue.test',
 				fetch: async (input) => {
 					const url = new URL(typeof input === 'string' ? input : new Request(input).url);
-					if (url.searchParams.get('offset') === '-1') {
-						return dsJsonResponse([{ type: 'agent_start' }, { type: 'turn_start' }], {
-							nextOffset: '0000000000000000_0000000000000002',
+					seen.push(`${url.searchParams.get('view')}:${url.searchParams.get('offset') ?? ''}`);
+					if (url.searchParams.get('view') === 'history') {
+						return Response.json({
+							v: 1,
+							conversationId: 'conversation-1',
+							offset: '0000000000000000_0000000000000001',
+							messages: [{ id: 'entry-user', role: 'user', parts: [{ type: 'text', text: 'hello', state: 'done' }] }],
+							settlements: [],
 						});
 					}
-					return dsJsonResponse([{ type: 'idle', v: 3 }], {
-						closed: true,
-						nextOffset: '0000000000000000_0000000000000003',
+					return dsJsonResponse([], {
+						nextOffset: '0000000000000000_0000000000000001',
+						upToDate: true,
+					});
+				},
+			});
+			const observation = client.agents.observe('agent', 'id', { live: false });
+			const completed = new Promise<void>((resolve) => {
+				const unsubscribe = observation.subscribe(() => {
+					if (observation.getSnapshot().phase === 'up-to-date') {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
+
+			await completed;
+
+			expect(observation.getSnapshot()).toMatchObject({
+				phase: 'up-to-date',
+				offset: '0000000000000000_0000000000000001',
+				conversation: { conversationId: 'conversation-1', messages: [{ id: 'entry-user' }] },
+			});
+			expect(seen).toEqual([
+				'history:',
+				'updates:0000000000000000_0000000000000001',
+			]);
+			observation.close();
+		});
+
+		it('reports an absent conversation and rehydrates after refresh', async () => {
+			let historyCalls = 0;
+			const client = createFlueClient({
+				baseUrl: 'https://flue.test',
+				fetch: async (input) => {
+					const url = new URL(typeof input === 'string' ? input : new Request(input).url);
+					if (url.searchParams.get('view') === 'history') {
+						historyCalls++;
+						if (historyCalls === 1) return Response.json({ error: { message: 'missing' } }, { status: 404 });
+						return Response.json({
+							v: 1,
+							conversationId: 'conversation-1',
+							offset: '0000000000000000_0000000000000001',
+							messages: [],
+							settlements: [],
+						});
+					}
+					return dsJsonResponse([], {
+						nextOffset: '0000000000000000_0000000000000001',
+						upToDate: true,
+					});
+				},
+			});
+			const observation = client.agents.observe('agent', 'id', { live: false });
+			const absent = new Promise<void>((resolve) => {
+				const unsubscribe = observation.subscribe(() => {
+					if (observation.getSnapshot().phase === 'absent') {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
+			await absent;
+
+			const complete = new Promise<void>((resolve) => {
+				const unsubscribe = observation.subscribe(() => {
+					if (observation.getSnapshot().phase === 'up-to-date') {
+						unsubscribe();
+						resolve();
+					}
+				});
+			});
+			observation.refresh();
+			await complete;
+
+			expect(observation.getSnapshot()).toMatchObject({
+				phase: 'up-to-date',
+				conversation: { conversationId: 'conversation-1' },
+			});
+			observation.close();
+		});
+	});
+
+	describe('agents.history()', () => {
+		it('reads one materialized snapshot via the history view', async () => {
+			let seen = '';
+			const client = createFlueClient({
+				baseUrl: 'https://flue.test/api',
+				fetch: async (input) => {
+					seen = typeof input === 'string' ? input : new Request(input).url;
+					return Response.json({
+						v: 1,
+						conversationId: 'conversation-1',
+						offset: 'offset-1',
+						messages: [],
+						settlements: [],
 					});
 				},
 			});
 
-			// Default live mode: the DS client prefetches the next batch while
-			// the current one is still being delivered. The public offset must
-			// track delivered batches, not fetched responses, or resuming from
-			// a checkpoint skips events that were never delivered.
-			const eventStream = client.agents.stream('agent', 'id');
-			const iterator = eventStream[Symbol.asyncIterator]();
+			await client.agents.history('agent', 'id');
 
-			await iterator.next(); // agent_start — mid-batch 1
-			expect(eventStream.offset).toBe('-1');
-			await iterator.next(); // turn_start — last event of batch 1
-			expect(eventStream.offset).toBe('0000000000000000_0000000000000002');
-			await iterator.next(); // idle — last event of batch 2
-			expect(eventStream.offset).toBe('0000000000000000_0000000000000003');
-			await expect(iterator.next()).resolves.toEqual({ value: undefined, done: true });
-		});
-
-		it('cancel() stops iteration and aborts the underlying connection', async () => {
-			let fetchCount = 0;
-			let lastSignal: AbortSignal | undefined;
-			const client = createFlueClient({
-				baseUrl: 'https://flue.test',
-				fetch: async (_input, init) => {
-					fetchCount++;
-					lastSignal = init?.signal as AbortSignal | undefined;
-					return dsJsonResponse([{ type: 'agent_start' }]);
-				},
-			});
-
-			const eventStream = client.agents.stream('agent', 'id', { live: false });
-			const events = [];
-			for await (const event of eventStream) {
-				events.push(event);
-				// Cancel after receiving the first event.
-				eventStream.cancel();
-			}
-			expect(events).toHaveLength(1);
-			expect(events[0]).toMatchObject({ type: 'agent_start' });
-			expect(fetchCount).toBe(1);
-			expect(lastSignal?.aborted).toBe(true);
+			const url = new URL(seen);
+			expect(url.searchParams.get('view')).toBe('history');
+			expect(url.searchParams.has('harness')).toBe(false);
+			expect(url.searchParams.has('session')).toBe(false);
+			expect(url.searchParams.has('tail')).toBe(false);
 		});
 	});
 
@@ -524,7 +455,7 @@ describe('createFlueClient', () => {
 	});
 
 	describe('agents.wait()', () => {
-		it('follows an admission from its offset and returns its correlated result', async () => {
+		it('follows an admission from its offset and resolves on its settlement chunk', async () => {
 			const offsets: Array<string | null> = [];
 			const seenEvents: string[] = [];
 			const client = createFlueClient({
@@ -534,15 +465,10 @@ describe('createFlueClient', () => {
 					offsets.push(url.searchParams.get('offset'));
 					return dsJsonResponse(
 						[
-							{ type: 'text_delta', submissionId: 'other', text: 'ignore' },
-							{ type: 'text_delta', submissionId: 'submission-1', text: 'hello' },
-							{
-								type: 'submission_settled',
-								submissionId: 'submission-1',
-								outcome: 'completed',
-								result: { text: 'done' },
-							},
-						],
+							{ type: 'message-delta', conversationId: 'c1', messageId: 'a1', kind: 'text', delta: 'hello' },
+							{ type: 'submission-settled', conversationId: 'c1', submissionId: 'other', outcome: 'completed', result: { text: 'ignore' } },
+							{ type: 'submission-settled', conversationId: 'c1', submissionId: 'submission-1', outcome: 'completed', result: { text: 'done' } },
+						] satisfies ConversationStreamChunk[],
 						{ closed: true },
 					);
 				},
@@ -559,7 +485,7 @@ describe('createFlueClient', () => {
 				),
 			).resolves.toEqual({ text: 'done' });
 			expect(offsets).toEqual(['admission-offset']);
-			expect(seenEvents).toEqual(['text_delta', 'submission_settled']);
+			expect(seenEvents).toEqual(['message-delta', 'submission-settled', 'submission-settled']);
 		});
 
 		it('throws a structured SDK error when the submission fails', async () => {
@@ -569,12 +495,13 @@ describe('createFlueClient', () => {
 					dsJsonResponse(
 						[
 							{
-								type: 'submission_settled',
+								type: 'submission-settled',
+								conversationId: 'c1',
 								submissionId: 'submission-1',
 								outcome: 'failed',
 								error: { name: 'Error', message: 'model unavailable' },
 							},
-						],
+						] satisfies ConversationStreamChunk[],
 						{ closed: true },
 					),
 			});

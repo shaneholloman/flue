@@ -60,7 +60,7 @@ docker run --init -p 8080:8080 \
 
 ## Persistence
 
-Without a `db.ts` adapter the server keeps agent sessions, accepted submissions, and workflow-run records in process-local memory — they are lost when the container restarts or redeploys, and they are not shared across replicas. For durable state, or to run more than one instance, add a [`PersistenceAdapter`](/docs/guide/database/) backed by a Postgres reachable from the container:
+Without a `db.ts` adapter the server keeps canonical agent conversations, attachments, accepted submissions, and workflow-run records in process-local memory, so a restart or redeploy loses them. Add a Postgres-backed [`PersistenceAdapter`](/docs/guide/database/) for replacement recovery and shared workflow history. Multiple replicas must still route each agent instance to one live owner; shared storage does not enable active-active same-instance execution:
 
 ```typescript title=".flue/db.ts"
 import { postgres } from '@flue/postgres';
@@ -74,7 +74,7 @@ Flue discovers `db.ts` at build time and wires it into the generated server. Pro
 
 Flue does not generate a health endpoint. If your platform health-checks the container, define the route it expects (commonly `/health`) in your `app.ts`.
 
-Exposed workflow runs use long-lived `GET /runs/:runId` reads (long-poll/SSE). Ensure the platform's request and idle-connection timeouts allow them. Workflow admission returns `runId`; clients can reconnect to that run and resume with a stream offset. Agent stream receipts are unchanged. See [Streaming Protocol](/docs/api/streaming-protocol/).
+Exposed workflow runs use long-lived `GET /runs/:runId` reads (long-poll/SSE). Ensure the platform's request and idle-connection timeouts allow them. Workflow admission returns `runId`; clients can reconnect to that run and resume with a stream offset. Agent admission returns `streamUrl`, `offset`, and `submissionId`. See [Streaming Protocol](/docs/api/streaming-protocol/).
 
 ## References
 

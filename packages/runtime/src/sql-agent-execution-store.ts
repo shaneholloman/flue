@@ -3,7 +3,7 @@
  *
  * Used by both Cloudflare (DO SQLite) and Node (`node:sqlite`). Contains all
  * SQL-level storage logic — table DDL, row parsing, and the
- * {@link AgentSubmissionStore} and {@link SessionStore} implementations.
+ * {@link AgentSubmissionStore} implementation.
  *
  * Platform-specific wiring (opening the database, providing a transaction
  * wrapper) lives in `cloudflare/agent-execution-store.ts` and
@@ -19,7 +19,6 @@
  */
 
 import {
-	deduplicateSessionDeletion,
 	isSubmissionPayload,
 	parseAcceptedAt,
 	SUBMISSION_HARNESS_NAME,
@@ -32,12 +31,9 @@ import type {
 	AgentExecutionStore,
 	AgentSubmission,
 	AgentSubmissionStore,
-	AgentTurnJournal,
-	AgentTurnJournalPhase,
-	CreateTurnJournalInput,
 	SubmissionAttemptRef,
-	SubmissionTerminalOutbox,
 	SubmissionClaimRef,
+	SubmissionSettlementObligation,
 } from './agent-execution-store.ts';
 import {
 	DURABILITY_DEFAULT_MAX_ATTEMPTS,
@@ -50,12 +46,9 @@ type SqlRow = Record<string, unknown>;
 
 import {
 	hydratePersistedDirectSubmission,
-	hydratePersistedSessionEntry,
 	matchesPersistedDirectSubmission,
 	prepareDirectSubmission,
-	prepareSessionEntry,
 	samePersistedChunks,
-	sessionEntryChunkOwner,
 	submissionChunkOwner,
 } from './persisted-image-placement.ts';
 import {
@@ -70,13 +63,10 @@ import {
 	createSqlPersistedChunkStore,
 	ensureSqlPersistedChunkTable,
 } from './sql-persisted-chunk-store.ts';
-import type { SessionData, SessionEntry, SessionStore } from './types.ts';
 
 export function ensureSqlAgentExecutionTables(sql: SqlStorage): void {
 	migrateFlueSqlSchema(sql, () => {
-		ensureSessionTable(sql);
 		ensureSubmissionTable(sql);
-		ensureTurnJournalTable(sql);
 		ensureSqlPersistedChunkTable(sql);
 	});
 }
@@ -93,114 +83,11 @@ export function createSqlAgentExecutionStoreFromSql(
 	runTransaction: <T>(closure: () => T) => T,
 ): AgentExecutionStore {
 	return {
-		sessions: new SqlSessionStore(sql, runTransaction),
 		submissions: new AgentSubmissionStoreImpl(sql, runTransaction),
 	};
 }
 
-export class SqlSessionStore implements SessionStore {
-	constructor(
-		private sql: SqlStorage,
-		private transactionSync: <T>(closure: () => T) => T,
-	) {}
-
-	async save(id: string, data: SessionData): Promise<void> {
-		const { entries: sessionEntries, ...session } = data;
-		const entries = sessionEntries.map((entry, position) => {
-			const prepared = prepareSessionEntry(entry);
-			return { entry, position, data: JSON.stringify(prepared.value), chunks: prepared.chunks };
-		});
-		this.transactionSync(() => {
-			const chunkStore = createSqlPersistedChunkStore(this.sql);
-			this.sql.exec(
-				`INSERT INTO flue_sessions (id, data) VALUES (?, ?)
-				 ON CONFLICT (id) DO UPDATE SET data = excluded.data`,
-				id,
-				JSON.stringify(session),
-			);
-			const existingRows = this.sql
-				.exec('SELECT entry_id, position, data FROM flue_session_entries WHERE session_id = ?', id)
-				.toArray();
-			const existing = new Map(existingRows.map((row) => [row.entry_id, row]));
-			const retained = new Set<string>();
-			for (const { entry, position, data: entryData, chunks } of entries) {
-				retained.add(entry.id);
-				const current = existing.get(entry.id);
-				const owner = sessionEntryChunkOwner(id, entry.id);
-				const currentChunks = chunkStore.read(owner);
-				const entryChanged = current?.position !== position || current.data !== entryData;
-				const chunksChanged = !samePersistedChunks(currentChunks, chunks);
-				if (!entryChanged && !chunksChanged) continue;
-				if (entryChanged) {
-					this.sql.exec(
-						`INSERT INTO flue_session_entries (session_id, entry_id, position, data)
-						 VALUES (?, ?, ?, ?)
-						 ON CONFLICT (session_id, entry_id) DO UPDATE SET
-						 position = excluded.position, data = excluded.data`,
-						id,
-						entry.id,
-						position,
-						entryData,
-					);
-				}
-				if (chunksChanged) chunkStore.replace(owner, chunks);
-			}
-			for (const row of existingRows) {
-				if (typeof row.entry_id === 'string' && !retained.has(row.entry_id)) {
-					chunkStore.delete(sessionEntryChunkOwner(id, row.entry_id));
-					this.sql.exec(
-						'DELETE FROM flue_session_entries WHERE session_id = ? AND entry_id = ?',
-						id,
-						row.entry_id,
-					);
-				}
-			}
-		});
-	}
-
-	async load(id: string): Promise<SessionData | null> {
-		return this.transactionSync(() => {
-			const chunkStore = createSqlPersistedChunkStore(this.sql);
-			const rows = this.sql.exec('SELECT data FROM flue_sessions WHERE id = ?', id).toArray();
-			const row = rows[0];
-			if (!row) return null;
-			if (typeof row.data !== 'string') {
-				throw new Error('[flue] Persisted session row is malformed.');
-			}
-			const session = JSON.parse(row.data) as Omit<SessionData, 'entries'>;
-			const entryRows = this.sql
-				.exec(
-					'SELECT entry_id, data FROM flue_session_entries WHERE session_id = ? ORDER BY position ASC',
-					id,
-				)
-				.toArray();
-			return {
-				...session,
-				entries: entryRows.map((entryRow) => {
-					if (typeof entryRow.entry_id !== 'string' || typeof entryRow.data !== 'string') {
-						throw new Error('[flue] Persisted session entry row is malformed.');
-					}
-					return hydratePersistedSessionEntry(
-						JSON.parse(entryRow.data) as SessionEntry,
-						chunkStore.read(sessionEntryChunkOwner(id, entryRow.entry_id)),
-					);
-				}),
-			};
-		});
-	}
-
-	async delete(id: string): Promise<void> {
-		this.transactionSync(() => {
-			createSqlPersistedChunkStore(this.sql).deleteOwner('session_entry', id);
-			this.sql.exec('DELETE FROM flue_session_entries WHERE session_id = ?', id);
-			this.sql.exec('DELETE FROM flue_sessions WHERE id = ?', id);
-		});
-	}
-}
-
 class AgentSubmissionStoreImpl implements AgentSubmissionStore {
-	private pendingSessionDeletions = new Map<string, Promise<void>>();
-
 	constructor(
 		private sql: SqlStorage,
 		private transactionSync: <T>(closure: () => T) => T,
@@ -211,214 +98,33 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 		return row ? this.parseSubmission(row) : null;
 	}
 
-	async getTurnJournal(submissionId: string): Promise<AgentTurnJournal | null> {
-		const row = this.sql
-			.exec(
-				`SELECT submission_id, session_key, kind, attempt_id, operation_id, turn_id,
-					        phase, revision, created_at, updated_at, checkpoint_leaf_id,
-					        tool_request_json, stream_key, stream_consumed_at, committed, committed_leaf_id
-				 FROM flue_agent_turn_journals
-				 WHERE submission_id = ?
-				 LIMIT 1`,
-				submissionId,
-			)
-			.toArray()[0];
-		return row ? parseTurnJournal(row) : null;
-	}
-
-	async beginTurnJournal(input: CreateTurnJournalInput): Promise<boolean> {
-		const now = Date.now();
-		return (
-			this.sql
-				.exec(
-					`INSERT INTO flue_agent_turn_journals
-					 (submission_id, session_key, kind, attempt_id, operation_id, turn_id,
-						  phase, revision, created_at, updated_at, checkpoint_leaf_id,
-						  tool_request_json, stream_key, stream_consumed_at, committed, committed_leaf_id)
-							 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, 0, NULL)
-						 ON CONFLICT(submission_id) DO UPDATE SET
-						  attempt_id = excluded.attempt_id,
-						  operation_id = excluded.operation_id,
-						  turn_id = excluded.turn_id,
-						  phase = excluded.phase,
-						  revision = flue_agent_turn_journals.revision + 1,
-						  updated_at = excluded.updated_at,
-						  checkpoint_leaf_id = excluded.checkpoint_leaf_id,
-						  tool_request_json = excluded.tool_request_json,
-						  stream_key = NULL,
-						  stream_consumed_at = NULL,
-						  committed = 0,
-						  committed_leaf_id = NULL
-						 RETURNING submission_id`,
-					input.submissionId,
-					input.sessionKey,
-					input.kind,
-					input.attemptId,
-					input.operationId,
-					input.turnId,
-					input.phase,
-					now,
-					now,
-					input.checkpointLeafId ?? null,
-					input.toolRequest === undefined ? null : JSON.stringify(input.toolRequest),
-				)
-				.toArray().length > 0
-		);
-	}
-
-	async updateTurnJournalPhase(
-		attempt: SubmissionAttemptRef,
-		phase: AgentTurnJournalPhase,
-		options: { checkpointLeafId?: string; toolRequest?: unknown; streamKey?: string } = {},
-	): Promise<boolean> {
-		const now = Date.now();
-		return (
-			this.sql
-				.exec(
-					`UPDATE flue_agent_turn_journals
-					 SET phase = ?, revision = revision + 1, updated_at = ?,
-						     checkpoint_leaf_id = COALESCE(?, checkpoint_leaf_id),
-						     tool_request_json = COALESCE(?, tool_request_json),
-						     stream_key = COALESCE(?, stream_key)
-					 WHERE submission_id = ? AND attempt_id = ? AND committed = 0
-					 RETURNING submission_id`,
-					phase,
-					now,
-					options.checkpointLeafId ?? null,
-					options.toolRequest === undefined ? null : JSON.stringify(options.toolRequest),
-					options.streamKey ?? null,
-					attempt.submissionId,
-					attempt.attemptId,
-				)
-				.toArray().length > 0
-		);
-	}
-
-	async commitTurnJournal(
-		attempt: SubmissionAttemptRef,
-		committedLeafId: string,
-	): Promise<boolean> {
-		const now = Date.now();
-		return (
-			this.sql
-				.exec(
-					`UPDATE flue_agent_turn_journals
-					 SET phase = 'committed', revision = revision + 1, updated_at = ?,
-					     committed = 1, committed_leaf_id = ?
-					 WHERE submission_id = ? AND attempt_id = ? AND committed = 0
-					 RETURNING submission_id`,
-					now,
-					committedLeafId,
-					attempt.submissionId,
-					attempt.attemptId,
-				)
-				.toArray().length > 0
-		);
-	}
-
-	async markStreamConsumed(attempt: SubmissionAttemptRef, streamKey: string): Promise<boolean> {
-		const now = Date.now();
-		return (
-			this.sql
-				.exec(
-					`UPDATE flue_agent_turn_journals
-					 SET revision = revision + 1, updated_at = ?, stream_consumed_at = ?
-					 WHERE submission_id = ? AND attempt_id = ? AND committed = 0
-					   AND stream_key = ? AND stream_consumed_at IS NULL
-					 RETURNING submission_id`,
-					now,
-					now,
-					attempt.submissionId,
-					attempt.attemptId,
-					streamKey,
-				)
-				.toArray().length > 0
-		);
-	}
-
-	async appendStreamChunkSegment(
-		streamKey: string,
-		segmentIndex: number,
-		body: string,
-	): Promise<boolean> {
-		return (
-			this.sql
-				.exec(
-					`INSERT OR IGNORE INTO flue_agent_stream_chunks
-					 (stream_key, segment_index, body)
-					 VALUES (?, ?, ?)
-					 RETURNING stream_key`,
-					streamKey,
-					segmentIndex,
-					body,
-				)
-				.toArray().length > 0
-		);
-	}
-
-	async getStreamChunkSegments(
-		streamKey: string,
-	): Promise<Array<{ segmentIndex: number; body: string }>> {
-		const rows = this.sql
-			.exec(
-				`SELECT segment_index, body
-				 FROM flue_agent_stream_chunks
-				 WHERE stream_key = ?
-				 ORDER BY segment_index ASC`,
-				streamKey,
-			)
-			.toArray();
-		return rows.map((row) => {
-			if (typeof row.segment_index !== 'number' || typeof row.body !== 'string') {
-				throw new Error('[flue] Persisted stream chunk row is malformed.');
-			}
-			return { segmentIndex: row.segment_index, body: row.body };
-		});
-	}
-
-	async deleteStreamChunkSegments(streamKey: string): Promise<void> {
-		this.sql.exec('DELETE FROM flue_agent_stream_chunks WHERE stream_key = ?', streamKey);
-	}
-
-	async replaceTurnJournalAttempt(
+	async replaceSubmissionAttempt(
 		attempt: SubmissionAttemptRef,
 		nextAttemptId: string,
 		lease?: { ownerId: string; leaseExpiresAt: number },
 	): Promise<AgentSubmission | null> {
-		return this.transactionSync(() => {
-			const now = Date.now();
-			const row = this.sql
-				.exec(
-					`UPDATE flue_agent_submissions
-					 SET attempt_id = ?, recovery_requested_at = NULL, started_at = ?, attempt_count = attempt_count + 1${
-							lease ? ', owner_id = ?, lease_expires_at = ?' : ''
-						}
-					 WHERE submission_id = ? AND status = 'running' AND attempt_id = ?
-					 RETURNING ${submissionColumns}`,
-					...(lease
-						? [
-								nextAttemptId,
-								now,
-								lease.ownerId,
-								lease.leaseExpiresAt,
-								attempt.submissionId,
-								attempt.attemptId,
-							]
-						: [nextAttemptId, now, attempt.submissionId, attempt.attemptId]),
-				)
-				.toArray()[0];
-			if (!row) return null;
-			this.sql.exec(
-				`UPDATE flue_agent_turn_journals
-				 SET attempt_id = ?, revision = revision + 1, updated_at = ?
-				 WHERE submission_id = ? AND attempt_id = ? AND committed = 0`,
-				nextAttemptId,
-				now,
-				attempt.submissionId,
-				attempt.attemptId,
-			);
-			return this.parseSubmission(row);
-		});
+		const now = Date.now();
+		const row = this.sql
+			.exec(
+				`UPDATE flue_agent_submissions
+				 SET attempt_id = ?, recovery_requested_at = NULL, started_at = ?, attempt_count = attempt_count + 1${
+						lease ? ', owner_id = ?, lease_expires_at = ?' : ''
+					}
+				 WHERE submission_id = ? AND status = 'running' AND attempt_id = ?
+				 RETURNING ${submissionColumns}`,
+				...(lease
+					? [
+							nextAttemptId,
+							now,
+							lease.ownerId,
+							lease.leaseExpiresAt,
+							attempt.submissionId,
+							attempt.attemptId,
+						]
+					: [nextAttemptId, now, attempt.submissionId, attempt.attemptId]),
+			)
+			.toArray()[0];
+		return row ? this.parseSubmission(row) : null;
 	}
 
 	private getDispatchReceipt(submissionId: string): AgentDispatchReceipt | null {
@@ -447,6 +153,20 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 		return admission.submission;
 	}
 
+	async markSubmissionCanonicalReady(submissionId: string): Promise<AgentSubmission | null> {
+		const row = this.sql
+			.exec(
+				`UPDATE flue_agent_submissions
+				 SET canonical_ready_at = COALESCE(canonical_ready_at, ?)
+				 WHERE submission_id = ? AND status = 'queued'
+				 RETURNING ${submissionColumns}`,
+				Date.now(),
+				submissionId,
+			)
+			.toArray()[0];
+		return row ? this.parseSubmission(row) : null;
+	}
+
 	async hasUnsettledSubmissions(): Promise<boolean> {
 		return (
 			this.sql
@@ -460,12 +180,27 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 		);
 	}
 
+	async listUnreadySubmissions(): Promise<AgentSubmission[]> {
+		return this.parseOperationalRows(
+			this.sql
+				.exec(
+					`SELECT ${submissionColumns}
+					 FROM flue_agent_submissions
+					 WHERE status = 'queued' AND canonical_ready_at IS NULL
+					 ORDER BY sequence ASC`,
+				)
+				.toArray(),
+			'queued',
+		);
+	}
+
 	async listRunnableSubmissions(): Promise<AgentSubmission[]> {
 		const rows = this.sql
 			.exec(
 				`SELECT ${submissionColumnsFor('current')}
 				 FROM flue_agent_submissions AS current
 				 WHERE current.status = 'queued'
+				   AND current.canonical_ready_at IS NOT NULL
 				   AND NOT EXISTS (
 				     SELECT 1
 				     FROM flue_agent_submissions AS earlier
@@ -493,17 +228,17 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 		);
 	}
 
-	async listPendingTerminalOutboxes(): Promise<SubmissionTerminalOutbox[]> {
+	async listPendingSubmissionSettlements(): Promise<SubmissionSettlementObligation[]> {
 		return this.sql
 			.exec(
-				`SELECT submission_id, session_key, attempt_id, terminal_event_key,
-				        terminal_event_json, terminal_event_offset
+				`SELECT submission_id, session_key, attempt_id, settlement_record_id,
+				        settlement_record_json
 				 FROM flue_agent_submissions
 				 WHERE status = 'terminalizing'
 				 ORDER BY sequence ASC`,
 			)
 			.toArray()
-			.map(parseTerminalOutbox);
+			.map(parseSettlementObligation);
 	}
 
 	// ── Attempt markers ──────────────────────────────────────────────────
@@ -580,120 +315,6 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 		);
 	}
 
-	deleteSession(sessionKey: string, deleteSessionTree: () => Promise<void>): Promise<void> {
-		return deduplicateSessionDeletion(this.pendingSessionDeletions, sessionKey, () =>
-			this.runSessionDeletion(sessionKey, deleteSessionTree),
-		);
-	}
-
-	async listPendingSessionDeletions(): Promise<string[]> {
-		return this.sql
-			.exec('SELECT session_key FROM flue_agent_session_deletions')
-			.toArray()
-			.map((row) => String(row.session_key));
-	}
-
-	private async runSessionDeletion(
-		sessionKey: string,
-		deleteSessionTree: () => Promise<void>,
-	): Promise<void> {
-		this.transactionSync(() => {
-			const active = this.sql
-				.exec(
-					`SELECT 1
-					 FROM flue_agent_submissions
-					 WHERE session_key = ? AND status IN ('queued', 'running', 'terminalizing')
-					 LIMIT 1`,
-					sessionKey,
-				)
-				.toArray();
-			if (active.length > 0) {
-				throw new Error(
-					'[flue] Session cannot be deleted while durable agent submissions are queued or running. Wait for accepted work to settle, then retry deletion.',
-				);
-			}
-			this.sql.exec(
-				'INSERT OR IGNORE INTO flue_agent_session_deletions (session_key, started_at) VALUES (?, ?)',
-				sessionKey,
-				Date.now(),
-			);
-		});
-		try {
-			await deleteSessionTree();
-		} catch (error) {
-			// Remove the deletion marker so the session returns to a usable
-			// state. A persistent deleteSessionTree failure must not leave the
-			// marker indefinitely blocking future admissions.
-			this.sql.exec('DELETE FROM flue_agent_session_deletions WHERE session_key = ?', sessionKey);
-			throw error;
-		}
-		this.transactionSync(() => {
-			const deletionRows = this.sql
-				.exec(
-					'SELECT started_at FROM flue_agent_session_deletions WHERE session_key = ?',
-					sessionKey,
-				)
-				.toArray();
-			const deletionRow = deletionRows[0];
-			if (!deletionRow || typeof deletionRow.started_at !== 'number') {
-				// The marker is gone: a concurrent deletion run (e.g. a startup
-				// resume in another process sharing this database) already
-				// completed phase 3. Nothing left to clean up.
-				return;
-			}
-			const startedAt = deletionRow.started_at;
-			this.sql.exec(
-				`INSERT OR IGNORE INTO flue_agent_dispatch_receipts (dispatch_id, accepted_at)
-				 SELECT submission_id, accepted_at
-				 FROM flue_agent_submissions
-				 WHERE session_key = ? AND kind = 'dispatch' AND status = 'settled' AND accepted_at <= ?`,
-				sessionKey,
-				startedAt,
-			);
-			// Clean up orphaned stream chunks for journals belonging to deleted submissions.
-			this.sql.exec(
-				`DELETE FROM flue_agent_stream_chunks
-				 WHERE stream_key IN (
-				   SELECT j.stream_key FROM flue_agent_turn_journals j
-				   INNER JOIN flue_agent_submissions s ON j.submission_id = s.submission_id
-				   WHERE s.session_key = ? AND s.status = 'settled' AND s.accepted_at <= ?
-				     AND j.stream_key IS NOT NULL
-				 )`,
-				sessionKey,
-				startedAt,
-			);
-			// Clean up orphaned turn journals for deleted submissions.
-			this.sql.exec(
-				`DELETE FROM flue_agent_turn_journals
-				 WHERE submission_id IN (
-				   SELECT submission_id FROM flue_agent_submissions
-				   WHERE session_key = ? AND status = 'settled' AND accepted_at <= ?
-				 )`,
-				sessionKey,
-				startedAt,
-			);
-			const deletedSubmissionRows = this.sql
-				.exec(
-					`SELECT submission_id FROM flue_agent_submissions
-				 WHERE session_key = ? AND status = 'settled' AND accepted_at <= ?`,
-					sessionKey,
-					startedAt,
-				)
-				.toArray();
-			const submissionOwners = deletedSubmissionRows.flatMap((row) =>
-				typeof row.submission_id === 'string' ? [submissionChunkOwner(row.submission_id)] : [],
-			);
-			createSqlPersistedChunkStore(this.sql).deleteMany(submissionOwners);
-			this.sql.exec(
-				`DELETE FROM flue_agent_submissions
-				 WHERE session_key = ? AND status = 'settled' AND accepted_at <= ?`,
-				sessionKey,
-				startedAt,
-			);
-			this.sql.exec('DELETE FROM flue_agent_session_deletions WHERE session_key = ?', sessionKey);
-		});
-	}
-
 	async claimSubmission(claim: SubmissionClaimRef): Promise<AgentSubmission | null> {
 		const now = Date.now();
 		const timeoutAt = now + DURABILITY_DEFAULT_TIMEOUT_MS;
@@ -704,6 +325,7 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 				     max_retry = ?, timeout_at = CASE WHEN timeout_at = 0 THEN ? ELSE timeout_at END,
 				     owner_id = ?, lease_expires_at = ?
 				 WHERE current.submission_id = ? AND current.status = 'queued'
+				   AND current.canonical_ready_at IS NOT NULL
 				   AND NOT EXISTS (
 				     SELECT 1
 				     FROM flue_agent_submissions AS earlier
@@ -771,77 +393,59 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 		);
 	}
 
-	async reserveSubmissionTerminal(
+	async reserveSubmissionSettlement(
 		attempt: SubmissionAttemptRef,
-		terminal: { eventKey: string; event: unknown },
-	): Promise<SubmissionTerminalOutbox | null> {
-		const eventJson = JSON.stringify(terminal.event);
+		settlement: { recordId: string; record: import('./conversation-records.ts').SubmissionSettledRecord },
+	): Promise<SubmissionSettlementObligation | null> {
+		if (settlement.record.id !== settlement.recordId) return null;
+		const recordJson = JSON.stringify(settlement.record);
 		return this.transactionSync(() => {
 			const inserted = this.sql
 				.exec(
 					`UPDATE flue_agent_submissions
-					 SET status = 'terminalizing', terminal_event_key = ?, terminal_event_json = ?
+					 SET status = 'terminalizing', settlement_record_id = ?, settlement_record_json = ?
 					 WHERE submission_id = ? AND kind = 'direct' AND status = 'running' AND attempt_id = ?
-					 RETURNING submission_id, session_key, attempt_id, terminal_event_key,
-					           terminal_event_json, terminal_event_offset`,
-					terminal.eventKey,
-					eventJson,
+					 RETURNING submission_id, session_key, attempt_id, settlement_record_id,
+					           settlement_record_json`,
+					settlement.recordId,
+					recordJson,
 					attempt.submissionId,
 					attempt.attemptId,
 				)
 				.toArray()[0];
-			if (inserted) return parseTerminalOutbox(inserted);
+			if (inserted) return parseSettlementObligation(inserted);
 			const existing = this.sql
 				.exec(
-					`SELECT submission_id, session_key, attempt_id, terminal_event_key,
-					        terminal_event_json, terminal_event_offset
+					`SELECT submission_id, session_key, attempt_id, settlement_record_id,
+					        settlement_record_json
 					 FROM flue_agent_submissions
 					 WHERE submission_id = ? AND kind = 'direct' AND status = 'terminalizing'
-					   AND attempt_id = ? AND terminal_event_key = ? AND terminal_event_json = ?`,
+					   AND attempt_id = ? AND settlement_record_id = ? AND settlement_record_json = ?`,
 					attempt.submissionId,
 					attempt.attemptId,
-					terminal.eventKey,
-					eventJson,
+					settlement.recordId,
+					recordJson,
 				)
 				.toArray()[0];
-			return existing ? parseTerminalOutbox(existing) : null;
+			return existing ? parseSettlementObligation(existing) : null;
 		});
 	}
 
-	async recordSubmissionTerminalOffset(
-		attempt: SubmissionAttemptRef,
-		eventKey: string,
-		offset: string,
-	): Promise<boolean> {
-		return this.updateOwnedSubmission(
-			`UPDATE flue_agent_submissions
-			 SET terminal_event_offset = COALESCE(terminal_event_offset, ?)
-			 WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ?
-			   AND terminal_event_key = ?
-			   AND (terminal_event_offset IS NULL OR terminal_event_offset = ?)
-			 RETURNING submission_id`,
-			offset,
-			attempt.submissionId,
-			attempt.attemptId,
-			eventKey,
-			offset,
-		);
-	}
 
-	async finalizeSubmissionTerminal(
+	async finalizeSubmissionSettlement(
 		attempt: SubmissionAttemptRef,
-		eventKey: string,
+		recordId: string,
 	): Promise<boolean> {
 		return this.updateOwnedSubmission(
 			`UPDATE flue_agent_submissions
 			 SET status = 'settled', settled_at = ?, error = NULL
 			 WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ?
-			   AND terminal_event_key = ? AND terminal_event_offset IS NOT NULL
+			   AND settlement_record_id = ?
 			 RETURNING submission_id`,
 			Date.now(),
 			attempt.submissionId,
 			attempt.attemptId,
-			eventKey,
+			recordId,
 		);
 	}
 
@@ -886,17 +490,6 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 			if (kind === 'dispatch') {
 				const receipt = this.getDispatchReceipt(submissionId);
 				if (receipt) return { kind: 'retained_receipt', receipt };
-			}
-			const deleting = this.sql
-				.exec(
-					'SELECT 1 FROM flue_agent_session_deletions WHERE session_key = ? LIMIT 1',
-					sessionKey,
-				)
-				.toArray();
-			if (deleting.length > 0) {
-				throw new Error(
-					'[flue] Durable agent submission admission is unavailable while this session is being deleted. Retry after deletion completes.',
-				);
 			}
 			this.sql.exec(
 				`INSERT OR IGNORE INTO flue_agent_submissions
@@ -994,7 +587,7 @@ class AgentSubmissionStoreImpl implements AgentSubmissionStore {
 }
 
 const submissionColumns =
-	'sequence, submission_id, session_key, kind, payload, status, accepted_at, attempt_id, input_applied_at, recovery_requested_at, started_at, error, attempt_count, max_retry, timeout_at, owner_id, lease_expires_at';
+	'sequence, submission_id, session_key, kind, payload, status, accepted_at, canonical_ready_at, attempt_id, input_applied_at, recovery_requested_at, started_at, error, attempt_count, max_retry, timeout_at, owner_id, lease_expires_at';
 
 function submissionColumnsFor(table: string): string {
 	return submissionColumns
@@ -1008,87 +601,22 @@ function submissionColumnsFor(table: string): string {
 // local avoids a shared abstraction that would need to accommodate every
 // backend's quirks.
 
-function parseTurnJournal(row: SqlRow): AgentTurnJournal {
-	if (
-		typeof row.submission_id !== 'string' ||
-		typeof row.session_key !== 'string' ||
-		(row.kind !== 'dispatch' && row.kind !== 'direct') ||
-		typeof row.attempt_id !== 'string' ||
-		typeof row.operation_id !== 'string' ||
-		typeof row.turn_id !== 'string' ||
-		(row.phase !== 'before_provider' &&
-			row.phase !== 'provider_started' &&
-			row.phase !== 'tool_request_recorded' &&
-			row.phase !== 'committed') ||
-		typeof row.revision !== 'number' ||
-		typeof row.created_at !== 'number' ||
-		typeof row.updated_at !== 'number' ||
-		(row.checkpoint_leaf_id !== null &&
-			row.checkpoint_leaf_id !== undefined &&
-			typeof row.checkpoint_leaf_id !== 'string') ||
-		(row.stream_key !== null &&
-			row.stream_key !== undefined &&
-			typeof row.stream_key !== 'string') ||
-		(row.stream_consumed_at !== null &&
-			row.stream_consumed_at !== undefined &&
-			typeof row.stream_consumed_at !== 'number') ||
-		(row.committed !== 0 && row.committed !== 1) ||
-		(row.committed_leaf_id !== null &&
-			row.committed_leaf_id !== undefined &&
-			typeof row.committed_leaf_id !== 'string')
-	) {
-		throw new Error('[flue] Persisted turn journal row is malformed.');
-	}
-	return {
-		submissionId: row.submission_id,
-		sessionKey: row.session_key,
-		kind: row.kind,
-		attemptId: row.attempt_id,
-		operationId: row.operation_id,
-		turnId: row.turn_id,
-		phase: row.phase,
-		revision: row.revision,
-		createdAt: row.created_at,
-		updatedAt: row.updated_at,
-		...(typeof row.checkpoint_leaf_id === 'string'
-			? { checkpointLeafId: row.checkpoint_leaf_id }
-			: {}),
-		...(typeof row.tool_request_json === 'string'
-			? { toolRequest: JSON.parse(row.tool_request_json) as unknown }
-			: {}),
-		...(typeof row.stream_key === 'string' ? { streamKey: row.stream_key } : {}),
-		...(typeof row.stream_consumed_at === 'number'
-			? { streamConsumedAt: row.stream_consumed_at }
-			: {}),
-		committed: row.committed === 1,
-		...(typeof row.committed_leaf_id === 'string'
-			? { committedLeafId: row.committed_leaf_id }
-			: {}),
-	};
-}
-
-function parseTerminalOutbox(row: SqlRow): SubmissionTerminalOutbox {
+function parseSettlementObligation(row: SqlRow): SubmissionSettlementObligation {
 	if (
 		typeof row.submission_id !== 'string' ||
 		typeof row.session_key !== 'string' ||
 		typeof row.attempt_id !== 'string' ||
-		typeof row.terminal_event_key !== 'string' ||
-		typeof row.terminal_event_json !== 'string' ||
-		(row.terminal_event_offset !== null &&
-			row.terminal_event_offset !== undefined &&
-			typeof row.terminal_event_offset !== 'string')
+		typeof row.settlement_record_id !== 'string' ||
+		typeof row.settlement_record_json !== 'string'
 	) {
-		throw new Error('[flue] Persisted submission terminal outbox is malformed.');
+		throw new Error('[flue] Persisted submission settlement obligation is malformed.');
 	}
 	return {
 		submissionId: row.submission_id,
 		sessionKey: row.session_key,
 		attemptId: row.attempt_id,
-		eventKey: row.terminal_event_key,
-		event: JSON.parse(row.terminal_event_json),
-		...(typeof row.terminal_event_offset === 'string'
-			? { offset: row.terminal_event_offset }
-			: {}),
+		recordId: row.settlement_record_id,
+		record: JSON.parse(row.settlement_record_json),
 	};
 }
 
@@ -1107,6 +635,9 @@ function parseSubmission(
 			row.status !== 'terminalizing' &&
 			row.status !== 'settled') ||
 		typeof row.accepted_at !== 'number' ||
+		(row.canonical_ready_at !== null &&
+			row.canonical_ready_at !== undefined &&
+			typeof row.canonical_ready_at !== 'number') ||
 		(row.attempt_id !== null &&
 			row.attempt_id !== undefined &&
 			typeof row.attempt_id !== 'string') ||
@@ -1155,6 +686,7 @@ function parseSubmission(
 		input,
 		status: row.status,
 		acceptedAt: row.accepted_at,
+		canonicalReadyAt: typeof row.canonical_ready_at === 'number' ? row.canonical_ready_at : null,
 		...(typeof row.attempt_id === 'string' ? { attemptId: row.attempt_id } : {}),
 		...(typeof row.input_applied_at === 'number' ? { inputAppliedAt: row.input_applied_at } : {}),
 		...(typeof row.recovery_requested_at === 'number'
@@ -1170,59 +702,6 @@ function parseSubmission(
 	};
 }
 
-export function ensureSessionTable(sql: SqlStorage): void {
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_sessions (
-		 id TEXT PRIMARY KEY,
-		 data TEXT NOT NULL
-		)`,
-	);
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_session_entries (
-		 session_id TEXT NOT NULL,
-		 entry_id TEXT NOT NULL,
-		 position INTEGER NOT NULL,
-		 data TEXT NOT NULL,
-		 PRIMARY KEY (session_id, entry_id)
-		)`,
-	);
-	sql.exec(
-		`CREATE INDEX IF NOT EXISTS flue_session_entries_session_position_idx
-		 ON flue_session_entries (session_id, position ASC)`,
-	);
-}
-
-function ensureTurnJournalTable(sql: SqlStorage): void {
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_agent_turn_journals (
-		 submission_id TEXT PRIMARY KEY,
-		 session_key TEXT NOT NULL,
-		 kind TEXT NOT NULL,
-		 attempt_id TEXT NOT NULL,
-		 operation_id TEXT NOT NULL,
-		 turn_id TEXT NOT NULL,
-		 phase TEXT NOT NULL,
-		 revision INTEGER NOT NULL,
-		 created_at INTEGER NOT NULL,
-		 updated_at INTEGER NOT NULL,
-		 checkpoint_leaf_id TEXT,
-		 tool_request_json TEXT,
-		 stream_key TEXT,
-		 stream_consumed_at INTEGER,
-		 committed INTEGER NOT NULL DEFAULT 0,
-		 committed_leaf_id TEXT
-		)`,
-	);
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_agent_stream_chunks (
-		 stream_key TEXT NOT NULL,
-		 segment_index INTEGER NOT NULL,
-		 body TEXT NOT NULL,
-		 PRIMARY KEY (stream_key, segment_index)
-		)`,
-	);
-}
-
 function ensureSubmissionTable(sql: SqlStorage): void {
 	sql.exec(
 		`CREATE TABLE IF NOT EXISTS flue_agent_submissions (
@@ -1233,6 +712,7 @@ function ensureSubmissionTable(sql: SqlStorage): void {
 		 payload TEXT NOT NULL,
 		 status TEXT NOT NULL,
 		 accepted_at INTEGER NOT NULL,
+		 canonical_ready_at INTEGER,
 		 attempt_id TEXT,
 		 input_applied_at INTEGER,
 		 recovery_requested_at INTEGER,
@@ -1244,15 +724,8 @@ function ensureSubmissionTable(sql: SqlStorage): void {
 		 timeout_at INTEGER NOT NULL DEFAULT 0,
 		 owner_id TEXT,
 		 lease_expires_at INTEGER NOT NULL DEFAULT 0,
-		 terminal_event_key TEXT,
-		 terminal_event_json TEXT,
-		 terminal_event_offset TEXT
-		)`,
-	);
-	sql.exec(
-		`CREATE TABLE IF NOT EXISTS flue_agent_session_deletions (
-		 session_key TEXT PRIMARY KEY,
-		 started_at INTEGER NOT NULL
+		 settlement_record_id TEXT,
+		 settlement_record_json TEXT
 		)`,
 	);
 	sql.exec(

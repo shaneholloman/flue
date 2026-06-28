@@ -1,5 +1,7 @@
-import { PersistedSchemaVersionError, type SessionData } from '@flue/runtime/adapter';
+import { PersistedSchemaVersionError } from '@flue/runtime/adapter';
 import {
+	defineAttachmentStoreContractTests,
+	defineConversationStreamStoreContractTests,
 	defineEventStreamStoreContractTests,
 	defineRunStoreContractTests,
 	defineStoreContractTests,
@@ -76,11 +78,46 @@ function defineContracts(): void {
 	}
 	{
 		let adapter: ReturnType<typeof mysql> | undefined;
+		defineAttachmentStoreContractTests('MySQL AttachmentStore', {
+			async create() {
+				adapter = mysql((await createMysqlRunner()).runner);
+				await adapter.migrate?.();
+				return (await adapter.connect()).attachmentStore;
+			},
+			async cleanup() {
+				await adapter?.close?.();
+				adapter = undefined;
+			},
+		});
+	}
+	{
+		let adapter: ReturnType<typeof mysql> | undefined;
 		defineRunStoreContractTests('MySQL RunStore', {
 			async create() {
 				adapter = mysql((await createMysqlRunner()).runner);
 				await adapter.migrate?.();
 				return (await adapter.connect()).runStore;
+			},
+			async cleanup() {
+				await adapter?.close?.();
+				adapter = undefined;
+			},
+		});
+	}
+	{
+		let adapter: ReturnType<typeof mysql> | undefined;
+		defineConversationStreamStoreContractTests('MySQL ConversationStreamStore', {
+			async create() {
+				adapter = mysql((await createMysqlRunner()).runner);
+				await adapter.migrate?.();
+				const stores = await adapter.connect();
+				if (!stores.conversationStreamStore) {
+					throw new Error('Expected MySQL conversation stream store.');
+				}
+				return {
+					stream: stores.conversationStreamStore,
+					executionStore: stores.executionStore,
+				};
 			},
 			async cleanup() {
 				await adapter?.close?.();
@@ -106,31 +143,7 @@ function defineContracts(): void {
 
 describeMysql('MySQL contracts', defineContracts);
 
-function sessionData(): SessionData {
-	return {
-		version: 8,
-		conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-		affinityKey: 'affinity-1',
-		entries: [],
-		leafId: null,
-		childSessions: [],
-		metadata: {},
-		createdAt: '2026-06-03T00:00:00.000Z',
-		updatedAt: '2026-06-03T00:00:00.000Z',
-	};
-}
-
 describeMysql('mysql()', () => {
-	it('persists sessions and closes idempotently when a backend is available', async () => {
-		const adapter = mysql((await createMysqlRunner()).runner);
-		await adapter.migrate?.();
-		const store = (await adapter.connect()).executionStore;
-		await store.sessions.save('session', sessionData());
-		expect(await store.sessions.load('session')).toEqual(sessionData());
-		await adapter.close?.();
-		await adapter.close?.();
-	});
-
 	it('rejects a newer schema version before changing existing schema when a backend is available', async () => {
 		const { runner } = await createMysqlRunner();
 		const adapter = mysql(runner);
@@ -145,35 +158,45 @@ describeMysql('mysql()', () => {
 		await adapter.close?.();
 	});
 
-	it('migrates schema v2 run tracing columns to v3 when a backend is available', async () => {
+	it('rejects unversioned Flue persistence without stamping it when a backend is available', async () => {
+		const { runner } = await createMysqlRunner();
+		const adapter = mysql(runner);
+		await runner.query(`CREATE TABLE flue_runs (run_id VARCHAR(255) PRIMARY KEY) ENGINE=InnoDB`);
+		await expect(adapter.migrate?.()).rejects.toThrowError(PersistedSchemaVersionError);
+		const meta = await runner.query(
+			`SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_meta'`,
+		);
+		expect(meta).toEqual([]);
+		await adapter.close?.();
+	});
+
+	it('rejects schema v2 persistence without migrating it when a backend is available', async () => {
 		const { runner } = await createMysqlRunner();
 		const adapter = mysql(runner);
 		await adapter.migrate?.();
 		await runner.query('ALTER TABLE flue_runs DROP COLUMN traceparent, DROP COLUMN tracestate');
 		await runner.query(`UPDATE flue_meta SET value = '2' WHERE \`key\` = 'schema_version'`);
-		await adapter.migrate?.();
+		await expect(adapter.migrate?.()).rejects.toThrowError(PersistedSchemaVersionError);
 		const columns = await runner.query(
-			`SELECT COLUMN_NAME AS column_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_runs' AND COLUMN_NAME IN ('traceparent', 'tracestate') ORDER BY COLUMN_NAME`,
+			`SELECT COLUMN_NAME AS column_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_runs' AND COLUMN_NAME IN ('traceparent', 'tracestate')`,
 		);
-		expect(columns).toEqual([{ column_name: 'traceparent' }, { column_name: 'tracestate' }]);
+		expect(columns).toEqual([]);
 		const versions = await runner.query(`SELECT value FROM flue_meta WHERE \`key\` = 'schema_version'`);
-		expect(versions).toEqual([{ value: '3' }]);
+		expect(versions).toEqual([{ value: '2' }]);
 		await adapter.close?.();
 	});
 
-	it('repairs schema v3 run tracing columns when a backend is available', async () => {
+	it('rejects schema v3 run tracing columns without repairing them when a backend is available', async () => {
 		const { runner } = await createMysqlRunner();
 		const adapter = mysql(runner);
 		await adapter.migrate?.();
 		await runner.query('ALTER TABLE flue_runs DROP COLUMN traceparent, DROP COLUMN tracestate');
-		await adapter.migrate?.();
+		await runner.query(`UPDATE flue_meta SET value = '3' WHERE \`key\` = 'schema_version'`);
+		await expect(adapter.migrate?.()).rejects.toThrowError(PersistedSchemaVersionError);
 		const columns = await runner.query(
-			`SELECT COLUMN_NAME AS column_name, COLUMN_TYPE AS column_type, COLLATION_NAME AS collation_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_runs' AND COLUMN_NAME IN ('traceparent', 'tracestate') ORDER BY COLUMN_NAME`,
+			`SELECT COLUMN_NAME AS column_name FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_runs' AND COLUMN_NAME IN ('traceparent', 'tracestate')`,
 		);
-		expect(columns).toEqual([
-			{ column_name: 'traceparent', column_type: 'varchar(255)', collation_name: 'ascii_bin' },
-			{ column_name: 'tracestate', column_type: 'longtext', collation_name: 'utf8mb4_bin' },
-		]);
+		expect(columns).toEqual([]);
 		await adapter.close?.();
 	});
 
@@ -204,6 +227,7 @@ describeMysql('mysql()', () => {
 			payload: { message: 'Hello' },
 			acceptedAt: '2026-06-03T00:00:00.000Z',
 		});
+		await submissions.markSubmissionCanonicalReady('concurrent-claim');
 		const claims = await Promise.all([
 			submissions.claimSubmission({
 				submissionId: 'concurrent-claim',
@@ -222,27 +246,17 @@ describeMysql('mysql()', () => {
 		await adapter.close?.();
 	});
 
-	it('reports exactly one winning concurrent stream segment insertion when a backend is available', async () => {
-		const adapter = mysql((await createMysqlRunner()).runner);
-		await adapter.migrate?.();
-		const submissions = (await adapter.connect()).executionStore.submissions;
-		const results = await Promise.all([
-			submissions.appendStreamChunkSegment('concurrent-stream', 0, 'same body'),
-			submissions.appendStreamChunkSegment('concurrent-stream', 0, 'same body'),
-		]);
-		expect(results.filter(Boolean)).toHaveLength(1);
-		expect(results.filter((result) => !result)).toHaveLength(1);
-		await adapter.close?.();
-	});
 
-	it('rejects malformed existing submissions schema without stamping when a backend is available', async () => {
+	it('rejects unversioned existing submissions schema without stamping when a backend is available', async () => {
 		const { runner } = await createMysqlRunner();
 		const adapter = mysql(runner);
 		await runner.query(
 			`CREATE TABLE flue_agent_submissions (sequence BIGINT UNSIGNED NOT NULL AUTO_INCREMENT PRIMARY KEY, submission_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, session_key VARCHAR(512) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin NOT NULL, kind VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, payload LONGTEXT NOT NULL, status VARCHAR(16) CHARACTER SET ascii COLLATE ascii_bin NOT NULL, accepted_at BIGINT NOT NULL, attempt_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, input_applied_at BIGINT, recovery_requested_at BIGINT, started_at BIGINT, settled_at BIGINT, error LONGTEXT, attempt_count INT NOT NULL DEFAULT 0, max_retry INT NOT NULL DEFAULT 10, timeout_at BIGINT NOT NULL DEFAULT 0, owner_id VARCHAR(255) CHARACTER SET utf8mb4 COLLATE utf8mb4_bin, lease_expires_at BIGINT NOT NULL DEFAULT 0, INDEX flue_agent_submissions_status_sequence_idx (status, sequence), INDEX flue_agent_submissions_session_status_sequence_idx (session_key, status, sequence)) ENGINE=InnoDB`,
 		);
-		await expect(adapter.migrate?.()).rejects.toThrowError(/submission_id/);
-		const rows = await runner.query(`SELECT value FROM flue_meta WHERE \`key\` = 'schema_version'`);
+		await expect(adapter.migrate?.()).rejects.toThrowError(PersistedSchemaVersionError);
+		const rows = await runner.query(
+			`SELECT 1 FROM information_schema.TABLES WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'flue_meta'`,
+		);
 		expect(rows).toEqual([]);
 		await adapter.close?.();
 	});

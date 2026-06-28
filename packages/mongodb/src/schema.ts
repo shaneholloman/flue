@@ -23,39 +23,17 @@ export function schema(prefix: string): MongoCollectionSpec[] {
 	return [
 		spec('meta'),
 		spec('counters'),
-		spec('guards'),
-		spec('receipts'),
 		spec('value_generations', [
 			{ name: 'owner_state_updated', key: { owner: 1, state: 1, updatedAt: 1 }, collation: simple },
 			{ name: 'state_created', key: { state: 1, createdAt: 1 } },
 		]),
 		spec('values', [{ name: 'generation_index', key: { generation: 1, index: 1 }, unique: true }]),
-		spec('sessions'),
-		spec('session_entries', [
-			{
-				name: 'session_generation_position',
-				key: { sessionId: 1, generation: 1, position: 1 },
-				unique: true,
-				collation: simple,
-			},
-		]),
 		spec('submissions', [
 			{ name: 'submission_id', key: { submissionId: 1 }, unique: true, collation: simple },
 			{ name: 'status_sequence', key: { status: 1, sequence: 1 } },
 			{
 				name: 'session_status_sequence',
 				key: { sessionKey: 1, status: 1, sequence: 1 },
-				collation: simple,
-			},
-		]),
-		spec('journals', [
-			{ name: 'submission_id', key: { submissionId: 1 }, unique: true, collation: simple },
-		]),
-		spec('stream_segments', [
-			{
-				name: 'stream_index',
-				key: { streamKey: 1, segmentIndex: 1 },
-				unique: true,
 				collation: simple,
 			},
 		]),
@@ -67,7 +45,6 @@ export function schema(prefix: string): MongoCollectionSpec[] {
 				collation: simple,
 			},
 		]),
-		spec('deletions', [{ name: 'lease', key: { leaseExpiresAt: 1 } }]),
 		spec('runs', [
 			{ name: 'run_id', key: { runId: 1 }, unique: true, collation: simple },
 			{ name: 'started_run', key: { startedAt: -1, runId: -1 }, collation: simple },
@@ -81,6 +58,20 @@ export function schema(prefix: string): MongoCollectionSpec[] {
 				key: { workflowName: 1, startedAt: -1, runId: -1 },
 				collation: simple,
 			},
+		]),
+		spec('conversation_streams'),
+		spec('conversation_batches', [
+			{ name: 'path_offset', key: { path: 1, offset: 1 }, unique: true, collation: simple },
+			{
+				name: 'producer_sequence',
+				key: { path: 1, producerId: 1, producerEpoch: 1, producerSequence: 1 },
+				unique: true,
+				collation: simple,
+			},
+		]),
+		spec('attachments', [
+			{ name: 'path_attachment', key: { path: 1, attachmentId: 1 }, unique: true, collation: simple },
+			{ name: 'path_conversation_attachment', key: { path: 1, conversationId: 1, attachmentId: 1 }, collation: simple },
 		]),
 		spec('event_streams'),
 		spec('event_entries', [

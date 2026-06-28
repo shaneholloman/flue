@@ -47,7 +47,7 @@ aws ecs create-express-gateway-service \
 | Health check    | `--health-check-path` is the ALB target-group path. Flue does not generate one — define `/health` in `app.ts`.                                                                                                                                                                                                                 |
 | Scaling         | `--scaling-target` sets `minTaskCount` / `maxTaskCount`; scaling tracks CPU. Keep `minTaskCount` ≥ 1 so a process is always up to hold sessions.                                                                                                                                                                               |
 
-For exposed workflow runs, the ALB sits in front of long-lived `GET /runs/:runId` reads (long-poll/SSE). Raise the target group's idle timeout, and retain the invocation's `runId` so clients can reconnect and resume the run stream. Run more than one task only with shared Postgres (see [Persistence](#persistence)) — Flue's in-memory coordinator is per-process. See [Workflow HTTP exports](/docs/api/workflow-api/#http-exports).
+For exposed workflow runs, the ALB sits in front of long-lived `GET /runs/:runId` reads (long-poll/SSE). Raise the target group's idle timeout, and retain the invocation's `runId` so clients can reconnect and resume the run stream. Multiple tasks need shared Postgres for durable state and workflow history, but each agent instance must still be routed to one live task; do not round-robin the same instance. See [Workflow HTTP exports](/docs/api/workflow-api/#http-exports).
 
 ## EC2 (simplest, full control)
 
@@ -89,11 +89,11 @@ When you need explicit control over networking and scaling, define the task and 
 
 In the container definition, `environment` carries plaintext vars and `secrets` (each `{ "name", "valueFrom" }`) resolves Secrets Manager ARNs or SSM parameters through the task **execution role** — that is where the provider key and `DATABASE_URL` belong. The service's `loadBalancers` block maps the container port to an ALB target group; because Fargate uses `awsvpc` networking, the target group must use the **IP** target type, and its health check path should be `/health` (defined in `app.ts`). Open the task security group to the ALB on the container port, and set `healthCheckGracePeriodSeconds` longer than the server's startup so a slow boot is not killed mid-start.
 
-Application Auto Scaling adjusts the desired task count; raise the ALB idle timeout for streamed runs, and run multiple tasks only against shared Postgres. This is the same Fargate-plus-ALB stack Express Mode builds automatically — reach for it when you need to own the pieces.
+Application Auto Scaling adjusts the desired task count; raise the ALB idle timeout for streamed runs, use shared Postgres for durable state and workflow history, and route each agent instance to one live task. This is the same Fargate-plus-ALB stack Express Mode builds automatically — reach for it when you need to own the pieces.
 
 ## Persistence
 
-Without a `db.ts` adapter, Flue keeps sessions, accepted submissions, and run records in process-local memory — lost on restart or redeploy, and not shared across tasks. For durable state, or to run more than one instance behind any of the options above, back it with [Amazon RDS for PostgreSQL](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html) reachable from the service's VPC.
+Without a `db.ts` adapter, Flue keeps canonical conversations, attachments, accepted submissions, and run records in process-local memory — lost on restart or redeploy and unavailable to replacement tasks. For durable state and shared workflow history, back it with [Amazon RDS for PostgreSQL](https://docs.aws.amazon.com/AmazonRDS/latest/UserGuide/CHAP_PostgreSQL.html) reachable from the service's VPC. Shared storage supports replacement recovery; it does not enable active-active ownership of one agent instance.
 
 Add the adapter and a `db.ts` that reads `DATABASE_URL`:
 
@@ -103,7 +103,7 @@ import { postgres } from '@flue/postgres';
 export default postgres(process.env.DATABASE_URL!);
 ```
 
-Store the RDS connection string in Secrets Manager and inject it as `DATABASE_URL` — as a task `secrets` reference on Express Mode and Fargate, or from SSM on EC2. Flue discovers `db.ts` at build time and wires it into the generated server; the adapter handles schema creation, session snapshots, and durable submission state.
+Store the RDS connection string in Secrets Manager and inject it as `DATABASE_URL` — as a task `secrets` reference on Express Mode and Fargate, or from SSM on EC2. Flue discovers `db.ts` at build time and wires it into the generated server; the adapter handles schema creation, canonical conversation streams, immutable attachments, durable submission state, and workflow history.
 
 ## Not AWS Lambda
 

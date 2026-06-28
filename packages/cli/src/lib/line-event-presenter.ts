@@ -1,4 +1,22 @@
-import type { FlueEvent } from '@flue/sdk';
+import type { ConversationStreamChunk, FlueEvent } from '@flue/sdk';
+
+const CONVERSATION_CHUNK_TYPES = new Set<ConversationStreamChunk['type']>([
+	'conversation-reset',
+	'message-appended',
+	'message-started',
+	'message-delta',
+	'tool-input',
+	'tool-output',
+	'tool-output-error',
+	'message-completed',
+	'submission-settled',
+]);
+
+function isConversationChunk(
+	event: ConversationStreamChunk | FlueEvent,
+): event is ConversationStreamChunk {
+	return CONVERSATION_CHUNK_TYPES.has(event.type as ConversationStreamChunk['type']);
+}
 
 export interface LineEventPresenterOptions {
 	write(line: string): void;
@@ -8,7 +26,7 @@ export interface LineEventPresenterOptions {
 }
 
 export interface LineEventPresenter {
-	present(event: FlueEvent): void;
+	present(event: ConversationStreamChunk | FlueEvent): void;
 	flush(): void;
 }
 
@@ -39,9 +57,56 @@ export function createLineEventPresenter(options: LineEventPresenterOptions): Li
 		flushThinking();
 	};
 
+	let streamingKind: 'text' | 'reasoning' | undefined;
+	const toolNames = new Map<string, string>();
+
 	return {
 		flush,
 		present(event) {
+			if (isConversationChunk(event)) {
+				switch (event.type) {
+					case 'message-delta':
+						if (event.kind === 'reasoning') {
+							flushText();
+							if (streamingKind !== 'reasoning') options.write(dim('thinking'));
+							streamingKind = 'reasoning';
+							thinkingBuffer = consumeCompleteLines(
+								thinkingBuffer + event.delta,
+								options.write,
+								(line) => dim(`  ${line}`),
+							);
+						} else {
+							flushThinking();
+							beginText();
+							streamingKind = 'text';
+							textBuffer = consumeCompleteLines(
+								textBuffer + event.delta,
+								options.write,
+								(line) => `${textIndent}${line}`,
+							);
+						}
+						return;
+					case 'tool-input':
+						toolNames.set(event.toolCallId, event.toolName);
+						flush();
+						streamingKind = undefined;
+						options.write(`${dim('tool')} ${event.toolName}`);
+						return;
+					case 'tool-output':
+						options.write(`${dim('tool done')} ${toolNames.get(event.toolCallId) ?? ''}`.trimEnd());
+						return;
+					case 'tool-output-error':
+						options.write(`${dim('tool error')} ${toolNames.get(event.toolCallId) ?? ''}`.trimEnd());
+						return;
+					case 'message-completed':
+					case 'submission-settled':
+						flush();
+						streamingKind = undefined;
+						return;
+					default:
+						return;
+				}
+			}
 			switch (event.type) {
 				case 'text_delta':
 					flushThinking();

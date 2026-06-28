@@ -81,11 +81,11 @@ The sandbox controls workspace and command access. It does not determine whether
 
 | Decision                                                            | Controlled by                                                         |
 | ------------------------------------------------------------------- | --------------------------------------------------------------------- |
-| Conversation history available in a later session interaction       | Session persistence via `db.ts` adapter or the target default.        |
+| Conversation history available in a later agent interaction         | Canonical conversation persistence via `db.ts` or the target default. |
 | Files, installed packages, and generated artifacts available later  | The sandbox or workspace lifecycle you choose.                        |
 | Access to repositories, APIs, credentials, and network destinations | The sandbox environment, tools, and application authorization policy. |
 
-A persisted session does not make the virtual sandbox durable. Likewise, a durable remote workspace does not by itself preserve a session conversation.
+A persisted agent conversation does not make the virtual sandbox durable. Likewise, a durable remote workspace does not by itself preserve conversation history.
 
 Choose the narrowest sandbox that supports the task. Expanding the environment expands what model-directed work can read, change, execute, and reach.
 

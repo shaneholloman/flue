@@ -55,7 +55,7 @@ Create `src/evals/harness.ts`:
 
 ```ts title="src/evals/harness.ts"
 // flue-blueprint: tooling/vitest-evals@1
-import { type AttachedAgentEvent, createFlueClient } from '@flue/sdk';
+import { createFlueClient, type AgentConversationMessage } from '@flue/sdk';
 import { createHarness, type SimpleToolCallRecord } from 'vitest-evals';
 
 export interface FlueAgentHarnessOptions {
@@ -65,30 +65,24 @@ export interface FlueAgentHarnessOptions {
   headers?: Record<string, string>;
 }
 
-function collectToolCalls(events: AttachedAgentEvent[]): SimpleToolCallRecord[] {
-  const argumentsById = new Map<string, unknown>();
-
-  for (const event of events) {
-    if (event.type !== 'message_end' || event.message.role !== 'assistant') continue;
-    if (typeof event.message.content === 'string') continue;
-    for (const content of event.message.content) {
-      if (content.type === 'toolCall') argumentsById.set(content.id, content.arguments);
-    }
-  }
-
-  return events.flatMap((event) => {
-    if (event.type !== 'tool') return [];
-
-    return [
-      {
-        id: event.toolCallId,
-        name: event.toolName,
-        arguments: argumentsById.get(event.toolCallId),
-        ...(event.isError ? { error: event.result } : { result: event.result }),
-        durationMs: event.durationMs,
-      },
-    ];
-  });
+function collectToolCalls(messages: AgentConversationMessage[]): SimpleToolCallRecord[] {
+  return messages.flatMap((message) =>
+    message.parts.flatMap((part) => {
+      if (part.type !== 'tool') return [];
+      return [
+        {
+          id: part.toolCallId,
+          name: part.toolName,
+          arguments: part.input,
+          ...(part.state === 'output-error'
+            ? { error: part.errorText }
+            : part.state === 'output-available'
+              ? { result: part.output }
+              : {}),
+        },
+      ];
+    }),
+  );
 }
 
 export function createFlueAgentHarness(options: FlueAgentHarnessOptions) {
@@ -106,19 +100,8 @@ export function createFlueAgentHarness(options: FlueAgentHarnessOptions) {
         message: input,
         signal,
       });
-      const events: AttachedAgentEvent[] = [];
-
-      for await (const event of client.agents.stream(options.agentName, instanceId, {
-        offset: invocation.offset,
-        signal,
-      })) {
-        if (event.submissionId !== invocation.submissionId) continue;
-
-        events.push(event);
-        if (event.type === 'idle') break;
-      }
-
-      const toolCalls = collectToolCalls(events);
+      const history = await client.agents.history(options.agentName, instanceId, { signal });
+      const toolCalls = collectToolCalls(history.messages);
 
       return {
         output: invocation.result.text,
@@ -129,17 +112,7 @@ export function createFlueAgentHarness(options: FlueAgentHarnessOptions) {
           inputTokens: invocation.result.usage.input,
           outputTokens: invocation.result.usage.output,
           totalTokens: invocation.result.usage.totalTokens,
-          toolCalls: toolCalls.length,
-          metadata: {
-            cacheReadTokens: invocation.result.usage.cacheRead,
-            cacheWriteTokens: invocation.result.usage.cacheWrite,
-            cost: invocation.result.usage.cost,
-          },
-        },
-        metadata: {
-          agent: options.agentName,
-          instanceId,
-          submissionId: invocation.submissionId,
+          cost: invocation.result.usage.cost.total,
         },
       };
     },
@@ -147,9 +120,9 @@ export function createFlueAgentHarness(options: FlueAgentHarnessOptions) {
 }
 ```
 
-The server-provided offset points to the prompt's event sequence. The harness live-tails from that offset, filters by `submissionId`, and stops at the matching terminal `idle` event so asynchronously persisted tool events are not missed. It creates a new agent instance for every `run(...)`; reuse an instance only inside an application-specific harness for a case that intentionally evaluates conversation memory.
+The awaited prompt settles only after its canonical conversation records are persisted, so the following `history()` snapshot contains the completed messages and tool activity for that fresh instance. The harness creates a new agent instance for every `run(...)`; reuse an instance only inside an application-specific harness for a case that intentionally evaluates conversation memory.
 
-Do not remove the abort signal, construct an offset, replace the live read with one immediate catch-up read, or collect events from other submission IDs. Preserve token, cost, tool, instance, and submission metadata unless project-specific data policy requires omitting it.
+Do not remove the abort signal or derive tool calls from runtime-internal events. Preserve output, token usage, cost, and tool activity unless project-specific data policy requires omitting them.
 
 ## Add a starter eval
 
@@ -206,7 +179,7 @@ Use the project's package-manager equivalents. Provider credentials belong to th
 1. Type-check the project and run its existing lint checks.
 2. Build the Flue target and confirm the selected agent or workflow is discovered.
 3. Start the application with provider credentials and run the starter eval.
-4. Confirm the report includes output, usage, the expected tool calls, and Flue correlation metadata.
+4. Confirm the report includes output, usage, and the expected tool calls.
 5. Intentionally break one assertion and confirm the eval command exits non-zero, then restore it.
 6. Run against `FLUE_BASE_URL` when deployed-target evaluation is required.
 7. If the target is protected, confirm the eval succeeds only with the intended authentication.

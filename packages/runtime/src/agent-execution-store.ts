@@ -7,14 +7,16 @@
  * implement it directly.
  */
 
+import type { SubmissionSettledRecord } from './conversation-records.ts';
 import type {
 	AgentSubmissionInput,
 	DirectAgentSubmissionInput,
 } from './runtime/agent-submissions.ts';
+import type { AttachmentStore } from './runtime/attachment-store.ts';
+import type { ConversationStreamStore } from './runtime/conversation-stream-store.ts';
 import type { DispatchInput } from './runtime/dispatch-queue.ts';
 import type { EventStreamStore } from './runtime/event-stream-store.ts';
 import type { RunStore } from './runtime/run-store.ts';
-import type { SessionStore } from './types.ts';
 
 // ─── Durability defaults ────────────────────────────────────────────────────
 
@@ -37,6 +39,7 @@ export interface AgentSubmission {
 	readonly input: AgentSubmissionInput;
 	readonly status: AgentSubmissionStatus;
 	readonly acceptedAt: number;
+	readonly canonicalReadyAt: number | null;
 	readonly attemptId?: string;
 	readonly inputAppliedAt?: number;
 	readonly recoveryRequestedAt?: number;
@@ -49,13 +52,12 @@ export interface AgentSubmission {
 	readonly leaseExpiresAt: number;
 }
 
-export interface SubmissionTerminalOutbox {
+export interface SubmissionSettlementObligation {
 	readonly submissionId: string;
 	readonly sessionKey: string;
 	readonly attemptId: string;
-	readonly eventKey: string;
-	readonly event: unknown;
-	readonly offset?: string;
+	readonly recordId: string;
+	readonly record: SubmissionSettledRecord;
 }
 
 export interface SubmissionAttemptRef {
@@ -98,45 +100,6 @@ export type AgentDispatchAdmission =
 	| { readonly kind: 'retained_receipt'; readonly receipt: AgentDispatchReceipt }
 	| { readonly kind: 'conflict' };
 
-// ─── Turn journal ───────────────────────────────────────────────────────────
-
-export type AgentTurnJournalPhase =
-	| 'before_provider'
-	| 'provider_started'
-	| 'tool_request_recorded'
-	| 'committed';
-
-export interface AgentTurnJournal {
-	readonly submissionId: string;
-	readonly sessionKey: string;
-	readonly kind: 'dispatch' | 'direct';
-	readonly attemptId: string;
-	readonly operationId: string;
-	readonly turnId: string;
-	readonly phase: AgentTurnJournalPhase;
-	readonly revision: number;
-	readonly createdAt: number;
-	readonly updatedAt: number;
-	readonly checkpointLeafId?: string;
-	readonly toolRequest?: unknown;
-	readonly streamKey?: string;
-	readonly streamConsumedAt?: number;
-	readonly committed: boolean;
-	readonly committedLeafId?: string;
-}
-
-export interface CreateTurnJournalInput {
-	readonly submissionId: string;
-	readonly sessionKey: string;
-	readonly kind: 'dispatch' | 'direct';
-	readonly attemptId: string;
-	readonly operationId: string;
-	readonly turnId: string;
-	readonly phase: AgentTurnJournalPhase;
-	readonly checkpointLeafId?: string;
-	readonly toolRequest?: unknown;
-}
-
 // ─── Submission store ───────────────────────────────────────────────────────
 
 /**
@@ -151,17 +114,13 @@ export interface CreateTurnJournalInput {
  * unique indexes is the adapter's choice. Verify an implementation with
  * `defineStoreContractTests` from `@flue/runtime/test-utils`.
  *
- * Stability: the turn-journal, stream-chunk, and lease method groups (and
- * the {@link AgentTurnJournalPhase} union) mirror the durable-execution
- * engine and are subject to change until 1.0. This applies to every
- * backend equally.
+ * Stability: the lease method group mirrors the durable-execution engine and
+ * is subject to change until 1.0. This applies to every backend equally.
  */
 export interface AgentSubmissionStore {
 	// Query
 	/** Return the submission, or `null` when the id is unknown. */
 	getSubmission(submissionId: string): Promise<AgentSubmission | null>;
-	/** Return the submission's turn journal, or `null` when none was ever begun. */
-	getTurnJournal(submissionId: string): Promise<AgentTurnJournal | null>;
 	/** True while any submission is queued or running. */
 	hasUnsettledSubmissions(): Promise<boolean>;
 	/**
@@ -171,86 +130,43 @@ export interface AgentSubmissionStore {
 	 * everything admitted before it has settled.
 	 */
 	listRunnableSubmissions(): Promise<AgentSubmission[]>;
+	/** All queued submissions without canonical readiness, in admission order. */
+	listUnreadySubmissions(): Promise<AgentSubmission[]>;
 	/** All running submissions, in admission order. */
 	listRunningSubmissions(): Promise<AgentSubmission[]>;
-	/** Direct terminal events reserved for durable publication but not yet finalized. */
-	listPendingTerminalOutboxes(): Promise<SubmissionTerminalOutbox[]>;
+	/** Direct settlement obligations reserved but not yet finalized. */
+	listPendingSubmissionSettlements(): Promise<SubmissionSettlementObligation[]>;
 
-	// Turn journal lifecycle. Each submission has at most ONE journal slot.
 	/**
-	 * Create the submission's journal, or replace an existing one in place:
-	 * the new turn's identity and phase are written, stream and commit state
-	 * are reset, and the revision increases. Returns whether a journal was
-	 * written.
+	 * Recovery handoff: atomically move a running submission from `attempt`
+	 * to `nextAttemptId`, increment `attemptCount`, clear any pending recovery
+	 * request, and (when given) install the new lease. Returns the updated
+	 * submission, or `null` — without writing — when the submission is not
+	 * running under `attempt`.
 	 */
-	beginTurnJournal(input: CreateTurnJournalInput): Promise<boolean>;
-	/**
-	 * Advance the phase of the uncommitted journal owned by `attempt`,
-	 * merging any provided options into the journal (absent options keep
-	 * their stored values). Returns `false` — without writing — when the
-	 * journal is missing, already committed, or owned by another attempt.
-	 */
-	updateTurnJournalPhase(
-		attempt: SubmissionAttemptRef,
-		phase: AgentTurnJournalPhase,
-		options?: {
-			checkpointLeafId?: string;
-			toolRequest?: unknown;
-			streamKey?: string;
-		},
-	): Promise<boolean>;
-	/**
-	 * Transition the journal to `committed`, recording `committedLeafId`.
-	 * Only an UNCOMMITTED journal owned by `attempt` transitions; a second
-	 * commit, a stale attempt, or a missing journal returns `false` and
-	 * leaves the stored commit untouched.
-	 */
-	commitTurnJournal(attempt: SubmissionAttemptRef, committedLeafId: string): Promise<boolean>;
-	/**
-	 * Stamp the journal's stream-consumed timestamp at most once. Succeeds
-	 * only when the uncommitted journal is owned by `attempt`, stores the
-	 * same `streamKey`, and has not been marked before; otherwise `false`.
-	 */
-	markStreamConsumed(attempt: SubmissionAttemptRef, streamKey: string): Promise<boolean>;
-	/**
-	 * Recovery handoff: atomically move a running submission and its
-	 * uncommitted journal from `attempt` to `nextAttemptId`, increment
-	 * `attemptCount`, clear any pending recovery request, and (when given)
-	 * install the new lease. Returns the updated submission, or `null` —
-	 * without writing — when the submission is not running under `attempt`.
-	 */
-	replaceTurnJournalAttempt(
+	replaceSubmissionAttempt(
 		attempt: SubmissionAttemptRef,
 		nextAttemptId: string,
 		lease?: { ownerId: string; leaseExpiresAt: number },
 	): Promise<AgentSubmission | null>;
 
-	// Stream chunks
-	/**
-	 * Insert a segment keyed by (`streamKey`, `segmentIndex`). When that key
-	 * already exists, return `false` WITHOUT overwriting the stored body.
-	 */
-	appendStreamChunkSegment(streamKey: string, segmentIndex: number, body: string): Promise<boolean>;
-	/** All segments for the stream, ordered by `segmentIndex` ascending. */
-	getStreamChunkSegments(streamKey: string): Promise<Array<{ segmentIndex: number; body: string }>>;
-	/** Remove every segment for the stream; a no-op when none exist. */
-	deleteStreamChunkSegments(streamKey: string): Promise<void>;
-
 	// Admission
 	/**
 	 * Idempotent admission keyed by dispatch id. An exact replay (same id,
 	 * same payload) returns the already-admitted submission; the same id
-	 * with a different payload returns `conflict`; an id whose settled row
-	 * was removed by session deletion returns its retained receipt. Throws
-	 * while the target session is being deleted.
+	 * with a different payload returns `conflict`.
 	 */
 	admitDispatch(input: DispatchInput): Promise<AgentDispatchAdmission>;
 	/**
 	 * Admit a direct prompt as a queued submission. Idempotent for an exact
-	 * replay of the same submission id and payload. Throws while the target
-	 * session is being deleted.
+	 * replay of the same submission id and payload.
 	 */
 	admitDirect(input: DirectAgentSubmissionInput): Promise<AgentSubmission>;
+	/**
+	 * Mark a newly admitted queued submission's canonical conversation as materialized.
+	 * Idempotent while queued; returns `null` when the submission is missing or no longer queued.
+	 */
+	markSubmissionCanonicalReady(submissionId: string): Promise<AgentSubmission | null>;
 
 	// Submission lifecycle
 	/**
@@ -286,23 +202,17 @@ export interface AgentSubmissionStore {
 	 */
 	requeueSubmissionBeforeInputApplied(attempt: SubmissionAttemptRef): Promise<boolean>;
 	/**
-	 * Atomically reserve the canonical decorated terminal event for publication.
+	 * Atomically reserve the exact canonical settlement record as an obligation.
 	 * Only a running direct submission owned by `attempt` may transition to
-	 * terminalizing. Exact retries return the existing reservation; conflicting
-	 * terminal payloads return `null`.
+	 * terminalizing. Exact retries return the existing obligation; conflicting
+	 * record identities or payloads return `null`.
 	 */
-	reserveSubmissionTerminal(
+	reserveSubmissionSettlement(
 		attempt: SubmissionAttemptRef,
-		terminal: { eventKey: string; event: unknown },
-	): Promise<SubmissionTerminalOutbox | null>;
-	/** Record the append offset for an owned terminalizing reservation. */
-	recordSubmissionTerminalOffset(
-		attempt: SubmissionAttemptRef,
-		eventKey: string,
-		offset: string,
-	): Promise<boolean>;
-	/** Finalize an owned terminalizing submission after its event was appended. */
-	finalizeSubmissionTerminal(attempt: SubmissionAttemptRef, eventKey: string): Promise<boolean>;
+		settlement: { recordId: string; record: SubmissionSettledRecord },
+	): Promise<SubmissionSettlementObligation | null>;
+	/** Finalize an owned terminalizing submission after its canonical record exists. */
+	finalizeSubmissionSettlement(attempt: SubmissionAttemptRef, recordId: string): Promise<boolean>;
 	/**
 	 * Settle the submission successfully. Gated on a running submission
 	 * owned by `attempt`: a stale attempt or an already-settled submission
@@ -340,32 +250,11 @@ export interface AgentSubmissionStore {
 	 */
 	listExpiredSubmissions(): Promise<AgentSubmission[]>;
 
-	// Deletion
-	/**
-	 * Delete all settled submission state for the session. Three phases:
-	 * (1) reject when any submission in the session is queued, running, or terminalizing,
-	 * else durably write a deletion marker that blocks new admissions;
-	 * (2) invoke `deleteSessionTree` (the runtime's snapshot deletion) —
-	 * when it throws, remove the marker so the session returns to a usable
-	 * state and rethrow; (3) retain a receipt for each settled dispatch
-	 * admitted before the marker, remove those submissions and their
-	 * journals/chunks, then remove the marker. Concurrent calls for the
-	 * same session key share one in-flight deletion.
-	 */
-	deleteSession(sessionKey: string, deleteSessionTree: () => Promise<void>): Promise<void>;
-	/**
-	 * List session keys with a durable deletion marker (deletion started but
-	 * never completed, e.g. the process crashed mid-deletion). Coordinators
-	 * resume these at startup by calling {@link deleteSession} again —
-	 * otherwise the marker blocks all admissions for the session forever.
-	 */
-	listPendingSessionDeletions(): Promise<string[]>;
 }
 
 // ─── Execution store ────────────────────────────────────────────────────────
 
 export interface AgentExecutionStore {
-	readonly sessions: SessionStore;
 	readonly submissions: AgentSubmissionStore;
 }
 
@@ -373,12 +262,16 @@ export interface AgentExecutionStore {
 
 /** The complete set of stores a {@link PersistenceAdapter} provides. */
 export interface PersistenceStores {
-	/** Agent session snapshots and durable submission lifecycle storage. */
+	/** Durable agent submission lifecycle storage. */
 	readonly executionStore: AgentExecutionStore;
 	/** Workflow run records, lookup, and listing. */
 	readonly runStore: RunStore;
 	/** Durable append-only event streams for agents and workflow runs. */
 	readonly eventStreamStore: EventStreamStore;
+	/** Canonical per-agent-instance conversation streams. */
+	readonly conversationStreamStore: ConversationStreamStore;
+	/** Immutable attachment bytes referenced by canonical conversation records. */
+	readonly attachmentStore: AttachmentStore;
 }
 
 /**

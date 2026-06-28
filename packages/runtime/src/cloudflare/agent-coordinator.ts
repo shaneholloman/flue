@@ -4,24 +4,32 @@ import type {
 	AgentSubmissionStore,
 } from '../agent-execution-store.ts';
 import type { FlueContextInternal } from '../client.ts';
+import { ConversationRecordWriter } from '../conversation-writer.ts';
 import type { FlueTraceCarrier } from '../execution-interceptor.ts';
 import {
 	createAgentSubmissionObserverRegistry,
 	type createAgentSubmissionSessionHandler,
 	createDirectAgentSubmissionInput,
+	materializeAgentSubmissionSession,
 	processSubmission,
 	reconcileInterruptedSubmission,
 	submissionSyntheticRequest,
 } from '../runtime/agent-submissions.ts';
+import type { AttachmentStore } from '../runtime/attachment-store.ts';
+import type { ConversationStreamStore } from '../runtime/conversation-stream-store.ts';
 import type { AgentInteractionStart } from '../runtime/dev-lifecycle-logger.ts';
 import { agentStreamPath } from '../runtime/event-stream-store.ts';
 import { assertAgentDispatchAdmissionInput, handleAgentRequest } from '../runtime/handle-agent.ts';
-import { handleStreamHead, handleStreamRead } from '../runtime/handle-stream-routes.ts';
-import { isStreamExcludedEvent } from '../runtime/run-store.ts';
-import { assertProductEventV3 } from '../product-event.ts';
-import { deleteSessionTree } from '../session.ts';
+import {
+	handleAgentAttachmentRead,
+	handleAgentConversationHead,
+	handleAgentConversationRead,
+} from '../runtime/handle-conversation-routes.ts';
 import type { AttachedAgentEvent, DirectAgentPayload } from '../types.ts';
-import { createSqlAgentExecutionStore } from './agent-execution-store.ts';
+import {
+	createSqlAgentExecutionStore,
+	createSqlConversationStores,
+} from './agent-execution-store.ts';
 
 export const CLOUDFLARE_AGENT_INTERNAL_DISPATCH_PATH = '/__flue/internal/dispatch';
 
@@ -65,6 +73,8 @@ interface CloudflareAgentRecoveredFiberContext {
 interface CloudflareAgentPreparedCoordinator {
 	readonly agentName: string;
 	readonly executionStore: AgentExecutionStore;
+	readonly conversationStreamStore: ConversationStreamStore;
+	readonly attachmentStore: AttachmentStore;
 }
 
 interface CloudflareAgentRuntimeOptions {
@@ -85,9 +95,6 @@ interface CloudflareAgentRuntimeOptions {
 		agentName: string,
 		callback: () => T,
 	) => T;
-	readonly createEventStreamStore: (
-		instance: CloudflareAgentInstance,
-	) => import('../runtime/event-stream-store.ts').EventStreamStore;
 	readonly onInteractionStart?: (interaction: AgentInteractionStart) => void;
 }
 
@@ -128,9 +135,12 @@ export function createCloudflareAgentRuntime(
 
 	return {
 		prepare({ storage, className, agentName }) {
+			const executionStore = createSqlAgentExecutionStore(storage, className);
+			const conversationStores = createSqlConversationStores(storage);
 			return {
 				agentName,
-				executionStore: createSqlAgentExecutionStore(storage, className),
+				executionStore,
+				...conversationStores,
 			};
 		},
 		attach(instance, prepared) {
@@ -140,7 +150,6 @@ export function createCloudflareAgentRuntime(
 					instance,
 					prepared,
 					options,
-					options.createEventStreamStore(instance),
 					observers,
 					activeAttempts,
 				),
@@ -166,45 +175,18 @@ class CloudflareAgentCoordinator {
 		private readonly instance: CloudflareAgentInstance,
 		private readonly prepared: CloudflareAgentPreparedCoordinator,
 		private readonly options: CloudflareAgentRuntimeOptions,
-		private readonly eventStreamStore: import('../runtime/event-stream-store.ts').EventStreamStore,
 		private readonly observers: ReturnType<typeof createAgentSubmissionObserverRegistry>,
 		private readonly activeAttempts: Set<string>,
 	) {}
 
+	private conversationWriter: ConversationRecordWriter | undefined;
+	private conversationWriterCreation: Promise<ConversationRecordWriter> | undefined;
+	private conversationMaterialization: Promise<void> = Promise.resolve();
+
 	async onStart(inherited: () => Promise<unknown> | unknown): Promise<void> {
 		await this.restoreSubmissionWake();
 		await inherited();
-		await this.resumePendingSessionDeletions();
 		await this.reconcileSubmissions({ driverAlreadyArmed: true });
-	}
-
-	/**
-	 * Resume session deletions interrupted by an eviction or crash. A durable
-	 * deletion marker written before the interruption blocks every admission
-	 * for that session until deletion completes, so re-run the (idempotent)
-	 * deletion to clear it. Failures are logged and left for the next start;
-	 * the marker keeps the session safely blocked meanwhile.
-	 */
-	private async resumePendingSessionDeletions(): Promise<void> {
-		for (const sessionKey of await this.submissions.listPendingSessionDeletions()) {
-			try {
-				await this.submissions.deleteSession(sessionKey, () =>
-					deleteSessionTree(this.executionStore.sessions, sessionKey),
-				);
-			} catch (error) {
-				console.error(
-					'[flue:session-deletion]',
-					{
-						agentName: this.agentName,
-						instanceId: this.instance.name,
-						sessionKey,
-						operation: 'resume_session_deletion',
-						outcome: 'failed',
-					},
-					error,
-				);
-			}
-		}
 	}
 
 	async wakeSubmissions(): Promise<void> {
@@ -216,13 +198,43 @@ class CloudflareAgentCoordinator {
 	async onRequest(request: Request): Promise<Response | null> {
 		if (isInternalDispatchRequest(request)) return this.admitDispatch(request);
 
-		// DS stream read (GET/HEAD) — served from the event stream store.
 		const method = request.method;
 		if (method === 'GET' || method === 'HEAD') {
-			const store = this.eventStreamStore;
 			const streamPath = agentStreamPath(this.agentName, this.instance.name);
-			if (method === 'HEAD') return await handleStreamHead(store, streamPath);
-			return handleStreamRead({ store, path: streamPath, request });
+			// Attachment byte download. The outer Worker has already run the
+			// opt-in `attachments` middleware and only forwards GET, so the DO —
+			// which owns the bytes — just serves from its attachment store. Match
+			// the exact `<name>/<id>/attachments/<attachmentId>` tail (not a loose
+			// `/attachments/` substring) so an agent literally named "attachments"
+			// doesn't misroute its conversation reads here.
+			const segments = new URL(request.url).pathname.split('/');
+			const attachmentId =
+				method === 'GET' &&
+				segments.length >= 4 &&
+				segments[segments.length - 2] === 'attachments' &&
+				segments[segments.length - 3] === this.instance.name &&
+				segments[segments.length - 4] === this.agentName
+					? decodeURIComponent(segments[segments.length - 1] as string)
+					: undefined;
+			if (attachmentId) {
+				return handleAgentAttachmentRead({
+					conversationStore: this.prepared.conversationStreamStore,
+					attachmentStore: this.prepared.attachmentStore,
+					path: streamPath,
+					attachmentId: decodeURIComponent(attachmentId),
+				});
+			}
+			if (method === 'HEAD') {
+				return await handleAgentConversationHead(
+					this.prepared.conversationStreamStore,
+					streamPath,
+				);
+			}
+			return handleAgentConversationRead({
+				store: this.prepared.conversationStreamStore,
+				path: streamPath,
+				request,
+			});
 		}
 
 		return this.runWithInstanceContext(() =>
@@ -230,7 +242,7 @@ class CloudflareAgentCoordinator {
 				request,
 				id: this.instance.name,
 				agentName: this.agentName,
-				eventStreamStore: this.eventStreamStore,
+				conversationStreamStore: this.prepared.conversationStreamStore,
 				admitAttachedSubmission: (payload, onEvent, waitForResult, traceCarrier) =>
 					this.admitAttachedSubmission(payload, onEvent, waitForResult, traceCarrier),
 			}),
@@ -266,6 +278,32 @@ class CloudflareAgentCoordinator {
 		return this.options.runWithInstanceContext(this.instance, this.agentName, callback);
 	}
 
+	private async ensureConversationWriter(): Promise<ConversationRecordWriter> {
+		if (this.conversationWriter && !this.conversationWriter.failed) return this.conversationWriter;
+		if (!this.conversationWriterCreation) {
+			const creation = ConversationRecordWriter.create({
+				store: this.prepared.conversationStreamStore,
+				path: agentStreamPath(this.agentName, this.instance.name),
+				identity: { agentName: this.agentName, instanceId: this.instance.name },
+				producerId: this.instance.ctx.id.toString(),
+				onFailed: (writer) => {
+					if (this.conversationWriter === writer) this.conversationWriter = undefined;
+				},
+			});
+			this.conversationWriterCreation = creation;
+			void creation.then(
+				(writer) => {
+					if (!writer.failed) this.conversationWriter = writer;
+					if (this.conversationWriterCreation === creation) this.conversationWriterCreation = undefined;
+				},
+				() => {
+					if (this.conversationWriterCreation === creation) this.conversationWriterCreation = undefined;
+				},
+			);
+		}
+		return this.conversationWriterCreation;
+	}
+
 	private createContext(
 		request: Request,
 		initialEventIndex?: number,
@@ -281,22 +319,13 @@ class CloudflareAgentCoordinator {
 		});
 	}
 
-	/**
-	 * Create a context whose events are appended to the agent's durable event
-	 * stream. Used for both submission processing and reconciliation so events
-	 * emitted on either path (including reconciliation-driven settlement)
-	 * reach detached stream readers.
-	 */
 	private createDurableContext(
 		request: Request,
 		dispatchId?: string,
 	): FlueContextInternal {
 		const ctx = this.createContext(request, undefined, dispatchId);
-		const streamPath = agentStreamPath(this.agentName, this.instance.name);
-		ctx.subscribeEvent(async (event) => {
-			if (isStreamExcludedEvent(event) || event.type === 'submission_settled') return;
-			await this.eventStreamStore.appendEvent(streamPath, event);
-		});
+		ctx.setConversationWriter?.(this.conversationWriter);
+		ctx.setAttachmentStore?.(this.prepared.attachmentStore);
 		return ctx;
 	}
 
@@ -332,30 +361,45 @@ class CloudflareAgentCoordinator {
 		if (!(await this.submissions.hasUnsettledSubmissions())) return false;
 		if (!options.driverAlreadyArmed) await this.restoreSubmissionWake();
 		try {
-			for (const terminal of await this.submissions.listPendingTerminalOutboxes()) {
-				assertProductEventV3(terminal.event);
-				const offset =
-					terminal.offset ??
-					(await this.eventStreamStore.appendEventOnce(
-						agentStreamPath(this.agentName, this.instance.name),
-						terminal.eventKey,
-						terminal.event,
-					));
-				const attempt = { submissionId: terminal.submissionId, attemptId: terminal.attemptId };
-				await this.submissions.recordSubmissionTerminalOffset(attempt, terminal.eventKey, offset);
-				if (await this.submissions.finalizeSubmissionTerminal(attempt, terminal.eventKey)) {
-					const journal = await this.submissions.getTurnJournal(terminal.submissionId);
-					if (journal?.streamKey) await this.submissions.deleteStreamChunkSegments(journal.streamKey);
-					const event = terminal.event as {
-						outcome?: 'completed' | 'failed';
-						result?: unknown;
-						error?: { message?: string };
-					};
-					if (event.outcome === 'completed') this.observers.complete(terminal.submissionId, event.result);
-					if (event.outcome === 'failed') {
+			for (const submission of await this.submissions.listUnreadySubmissions()) {
+				const agent = this.options.agents.find(
+					(record) => record.name === submission.input.agent,
+				)?.definition;
+				if (!agent || submission.input.agent !== this.agentName || submission.input.id !== this.instance.name) {
+					console.error('[flue:submission-reconciliation]', {
+						agentName: this.agentName,
+						instanceId: this.instance.name,
+						submissionId: submission.submissionId,
+						sessionKey: submission.sessionKey,
+						operation: 'materialize_submission',
+						outcome: 'agent_unavailable',
+					});
+					continue;
+				}
+				try {
+					await this.materializeSubmissionConversation(submission.input, agent);
+					await this.submissions.markSubmissionCanonicalReady(submission.submissionId);
+				} catch (error) {
+					this.logSubmissionReconciliationFailure(submission, 'materialize_submission', error);
+				}
+			}
+			for (const settlement of await this.submissions.listPendingSubmissionSettlements()) {
+				const submission = await this.submissions.getSubmission(settlement.submissionId);
+				if (!submission || this.activeAttempts.has(this.submissionAttemptLocalKey(submission))) continue;
+				const writer = await this.ensureConversationWriter();
+				const attempt = { submissionId: settlement.submissionId, attemptId: settlement.attemptId };
+				const canonical = await writer.getRecord(settlement.recordId);
+				if (!canonical) await writer.append([settlement.record], { submission: attempt });
+				else if (JSON.stringify(canonical) !== JSON.stringify(settlement.record)) {
+					throw new Error('[flue] Pending settlement does not match its canonical record. Clear incompatible beta persistence.');
+				}
+				if (await this.submissions.finalizeSubmissionSettlement(attempt, settlement.recordId)) {
+					if (settlement.record.outcome === 'completed') this.observers.complete(settlement.submissionId, settlement.record.result);
+					if (settlement.record.outcome === 'failed') {
+						const error = settlement.record.error as { message?: string } | undefined;
 						this.observers.fail(
-							terminal.submissionId,
-							new Error(event.error?.message ?? 'Agent submission failed.'),
+							settlement.submissionId,
+							new Error(error?.message ?? 'Agent submission failed.'),
 						);
 					}
 				}
@@ -431,7 +475,7 @@ class CloudflareAgentCoordinator {
 
 	private logSubmissionReconciliationFailure(
 		submission: AgentSubmission,
-		operation: 'reconcile_submission' | 'start_submission',
+		operation: 'materialize_submission' | 'reconcile_submission' | 'start_submission',
 		error: unknown,
 	): void {
 		console.error(
@@ -450,18 +494,9 @@ class CloudflareAgentCoordinator {
 	}
 
 	private async reconcileInterruptedSubmission(submission: AgentSubmission): Promise<void> {
+		const conversationWriter = await this.ensureConversationWriter();
 		const agent = this.options.agents.find((record) => record.name === this.agentName)?.definition;
 		if (!agent) throw new Error('[flue] Agent target unavailable during durable reconciliation.');
-		// Ensure the agent event stream exists (idempotent, normally created
-		// at first accepted processing) so a settlement event emitted during
-		// reconciliation lands durably even when the previous incarnation
-		// died before creating it. Best-effort: settlement must never depend
-		// on event-stream plumbing.
-		await Promise.resolve(
-			this.eventStreamStore.createStream(agentStreamPath(this.agentName, this.instance.name)),
-		).catch((error) => {
-			console.error('[flue:event-stream] createStream failed:', error);
-		});
 		const reconciled = await this.runWithInstanceContext(() =>
 			reconcileInterruptedSubmission(
 				this.submissions,
@@ -469,13 +504,8 @@ class CloudflareAgentCoordinator {
 				agent,
 				(dispatchId) =>
 					this.createDurableContext(submissionSyntheticRequest(submission.input), dispatchId),
-				(terminal) =>
-					this.eventStreamStore.appendEventOnce(
-						agentStreamPath(this.agentName, this.instance.name),
-						terminal.eventKey,
-						terminal.event,
-					),
 				{ ownerId: this.instance.ctx.id.toString(), leaseExpiresAt: 0 },
+				conversationWriter,
 			),
 		);
 		if (reconciled.disposition === 'replacement') {
@@ -574,10 +604,24 @@ class CloudflareAgentCoordinator {
 		return keys;
 	}
 
+	private materializeSubmissionConversation(
+		input: AgentSubmission['input'],
+		agent: Parameters<typeof materializeAgentSubmissionSession>[1],
+	): Promise<void> {
+		const operation = this.conversationMaterialization.then(async () => {
+			await this.ensureConversationWriter();
+			const ctx = this.createDurableContext(
+				submissionSyntheticRequest(input),
+				input.kind === 'dispatch' ? input.dispatchId : undefined,
+			);
+			await materializeAgentSubmissionSession(ctx, agent, input, this.prepared.attachmentStore);
+		});
+		this.conversationMaterialization = operation.catch(() => {});
+		return operation;
+	}
+
 	private async processSubmissionEntry(submission: AgentSubmission): Promise<void> {
-		// Ensure the agent event stream exists before processing. createStream
-		// is idempotent — safe to call on every submission.
-		await this.eventStreamStore.createStream(agentStreamPath(this.agentName, this.instance.name));
+		const conversationWriter = await this.ensureConversationWriter();
 		await processSubmission({
 			submissions: this.submissions,
 			submission,
@@ -589,12 +633,7 @@ class CloudflareAgentCoordinator {
 			createContext: (dispatchId) =>
 				this.createDurableContext(submissionSyntheticRequest(submission.input), dispatchId),
 			observers: this.observers,
-			deliverTerminalEvent: (terminal) =>
-				this.eventStreamStore.appendEventOnce(
-					agentStreamPath(this.agentName, this.instance.name),
-					terminal.eventKey,
-					terminal.event,
-				),
+			conversationWriter,
 			onInteractionStart: this.options.onInteractionStart,
 			wrapExecution: (fn) => this.runWithInstanceContext(fn),
 			onSettled: () => {
@@ -629,11 +668,18 @@ class CloudflareAgentCoordinator {
 		});
 		const attachment = this.observers.attach(input.submissionId, { onEvent });
 		try {
+			const agent = this.options.agents.find((record) => record.name === this.agentName)?.definition;
+			if (!agent) throw new Error('[flue] Agent target unavailable during durable admission.');
+			const admitted = await this.submissions.admitDirect(input);
+			if (admitted.canonicalReadyAt === null) {
+				await this.materializeSubmissionConversation(input, agent);
+				await this.submissions.markSubmissionCanonicalReady(input.submissionId);
+			}
+			const offset = (await this.ensureConversationWriter()).offset;
 			await this.armSubmissionWake();
-			await this.submissions.admitDirect(input);
 			await this.reconcileSubmissions({ driverAlreadyArmed: true });
-			if (!waitForResult) return { submissionId: input.submissionId };
-			return { submissionId: input.submissionId, result: await attachment.completion };
+			if (!waitForResult) return { submissionId: input.submissionId, offset };
+			return { submissionId: input.submissionId, offset, result: await attachment.completion };
 		} catch (error) {
 			// If admission or reconciliation fails before the claim loop
 			// could pick up this submission, fail the observer so the
@@ -651,10 +697,8 @@ class CloudflareAgentCoordinator {
 		if (input.agent !== this.agentName || input.id !== this.instance.name) {
 			return new Response('Invalid internal dispatch target.', { status: 400 });
 		}
-		if (!this.options.agents.find((record) => record.name === this.agentName)?.definition) {
-			return new Response('Dispatch target unavailable.', { status: 404 });
-		}
-		await this.armSubmissionWake();
+		const agent = this.options.agents.find((record) => record.name === this.agentName)?.definition;
+		if (!agent) return new Response('Dispatch target unavailable.', { status: 404 });
 		const admission = await this.submissions.admitDispatch(input);
 		if (admission.kind === 'retained_receipt') {
 			return Response.json({
@@ -665,6 +709,15 @@ class CloudflareAgentCoordinator {
 		if (admission.kind === 'conflict') {
 			return new Response('Conflicting internal dispatch replay.', { status: 409 });
 		}
+		if (admission.submission.canonicalReadyAt === null) {
+			await this.materializeSubmissionConversation(
+				{ ...input, kind: 'dispatch', submissionId: input.dispatchId },
+				agent,
+			);
+			const ready = await this.submissions.markSubmissionCanonicalReady(input.dispatchId);
+			if (!ready) throw new Error('[flue] Dispatch admission disappeared before canonical readiness.');
+		}
+		await this.armSubmissionWake();
 		await this.reconcileSubmissions({ driverAlreadyArmed: true });
 		return Response.json({
 			dispatchId: admission.submission.submissionId,

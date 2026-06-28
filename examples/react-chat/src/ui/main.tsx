@@ -1,6 +1,6 @@
 import {
+	type FlueConversationPart,
 	FlueProvider,
-	type UIMessagePart,
 	useFlueAgent,
 	useFlueClient,
 	useFlueWorkflow,
@@ -107,7 +107,7 @@ function App() {
 	);
 }
 
-function MessagePart({ part }: { part: UIMessagePart }) {
+function MessagePart({ part }: { part: FlueConversationPart }) {
 	if (part.type === 'text') return <p>{part.text}</p>;
 	if (part.type === 'reasoning')
 		return (
@@ -116,20 +116,24 @@ function MessagePart({ part }: { part: UIMessagePart }) {
 				{part.text}
 			</details>
 		);
-	if (part.type === 'file') return <a href={part.url}>Attachment</a>;
-	if (part.type === 'dynamic-tool')
-		return (
-			<pre>
-				{part.toolName}: {part.state}
-			</pre>
+	if (part.type === 'file') {
+		if (!part.url) return <span>Attachment ({part.mediaType})</span>;
+		return part.mediaType.startsWith('image/') ? (
+			<img src={part.url} alt={part.filename ?? 'attachment'} style={{ maxWidth: 240 }} />
+		) : (
+			<a href={part.url}>{part.filename ?? 'Attachment'}</a>
 		);
-	return <pre>{JSON.stringify(part.data, null, 2)}</pre>;
+	}
+	return (
+		<pre>
+			{part.toolName}: {part.state}
+		</pre>
+	);
 }
 
-function partKey(part: UIMessagePart): string {
+function partKey(part: FlueConversationPart): string {
 	if (part.type === 'dynamic-tool') return `tool:${part.toolCallId}`;
-	if (part.type === 'file') return `file:${part.mediaType}:${part.url}`;
-	if ('data' in part) return `${part.type}:${part.id ?? JSON.stringify(part.data)}`;
+	if (part.type === 'file') return `file:${part.id ?? part.url ?? part.mediaType}`;
 	return `${part.type}:${part.text}`;
 }
 

@@ -40,7 +40,7 @@ export default libsql({
 });
 ```
 
-Flue discovers the adapter at build time and wires it into the generated Node server. On startup, it creates or verifies the required `flue_*` tables. Agent sessions, accepted submissions, and workflow-run records then survive process restarts in hosted Turso and can be shared across replicas; application business data remains application-owned. The blueprint applies only to Node targets because Cloudflare deployments use Durable Object SQLite instead.
+Flue discovers the adapter at build time and wires it into the generated Node server. On startup, it creates or verifies the required `flue_*` tables. Canonical agent conversations, immutable attachments, accepted submissions, and workflow history then survive process replacement in hosted Turso. Replicas may share durable state and workflow history, but each agent instance still requires one live Node owner. Application business data remains application-owned. The blueprint applies only to Node targets because Cloudflare deployments use Durable Object SQLite instead.
 
 ## Configure
 
@@ -142,12 +142,13 @@ database written by a newer Flue refuses to start rather than corrupting state.
 
 A Flue database stores runtime state, not your whole application.
 
-| Stored by Flue                                          | Not stored by Flue                                             |
-| ------------------------------------------------------- | -------------------------------------------------------------- |
-| Agent session messages and compaction state             | Sandbox files and installed dependencies                       |
-| Accepted direct prompts and `dispatch(...)` submissions | External API side effects                                      |
-| Workflow-run records and persisted events               | Application-owned business data unless your own tools store it |
-| Run indexing for `/runs` lookups and `listRuns()`       | Provider credentials or secrets                                |
+| Stored by Flue                                                   | Not stored by Flue                                             |
+| ---------------------------------------------------------------- | -------------------------------------------------------------- |
+| Canonical agent conversation streams and compaction records       | Sandbox files and installed dependencies                       |
+| Immutable attachment payloads                                    | External API side effects                                      |
+| Accepted direct prompts and `dispatch(...)` submissions          | Application-owned business data unless your own tools store it |
+| Workflow-run records and persisted events                         | Provider credentials or secrets                                |
+| Run indexing for `/runs` lookups and `listRuns()`                 |                                                                |
 
 See [Durable Agents](/docs/concepts/durable-execution/) for how recovery uses
 submission state, and the [Data Persistence API](/docs/api/data-persistence-api/)
@@ -158,5 +159,4 @@ for the exact adapter contract.
 Choose Turso when you want a managed, replicated SQLite without running a
 server, and optionally embedded replicas for low-latency reads. For a local
 file or a libSQL server you operate yourself, use the same adapter via the
-[libSQL guide](/docs/ecosystem/databases/libsql/). For a multi-replica Node
-deployment on Postgres, see [`@flue/postgres`](/docs/ecosystem/databases/postgres/).
+[libSQL guide](/docs/ecosystem/databases/libsql/). For external durable storage that supports process or host replacement, see [`@flue/postgres`](/docs/ecosystem/databases/postgres/). Node still requires one live owner per agent instance.

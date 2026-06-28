@@ -110,7 +110,7 @@ These exports do not affect schedules, ambient `invoke()`, or server-side `listR
 
 ## Use the workflow harness
 
-The harness is ready when the workflow handler starts. Use its default session for related operations and its filesystem or shell for workflow-controlled setup:
+The harness is ready when the workflow handler starts. Its canonical conversation state is local to this workflow execution: another invocation receives a new run and does not continue these sessions. Use the default session for related operations and its filesystem or shell for workflow-controlled setup:
 
 ```ts
 async run({ harness, input }) {

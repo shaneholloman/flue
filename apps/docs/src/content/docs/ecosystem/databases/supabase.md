@@ -42,10 +42,7 @@ export default postgres({
 ```
 
 Flue discovers the adapter during a Node build,
-runs its migrations at server startup, and persists agent sessions, accepted
-submissions, workflow runs, and event state in Supabase so that state survives
-process restarts and can be shared across replicas. Application business data
-remains application-owned.
+runs its migrations at server startup, and persists canonical agent conversations, immutable attachments, accepted submissions, workflow runs, and event state in Supabase so that state survives process replacement. Replicas may share durable state and workflow history, but each agent instance still requires one live Node owner. Application business data remains application-owned.
 
 ## Configure
 
@@ -137,9 +134,10 @@ A Flue database stores runtime state, not the application's whole data model.
 
 | Stored by Flue                                                                 | Not stored by Flue                       |
 | ------------------------------------------------------------------------------ | ---------------------------------------- |
-| Agent session messages and compaction state                                    | Sandbox files and installed dependencies |
-| Accepted direct prompts and `dispatch(...)` submissions                        | External API side effects                |
-| Durable turn journals, workflow-run records, persisted events, and run indexes | Application-owned business data          |
+| Canonical agent conversation streams and compaction records                    | Sandbox files and installed dependencies |
+| Immutable attachment payloads                                                  | External API side effects                |
+| Accepted direct prompts and `dispatch(...)` submissions                        | Application-owned business data          |
+| Durable submission claims and leases, workflow-run records, persisted events, and run indexes | Provider credentials or secrets          |
 | Recovery state for accepted work                                               | Provider credentials or secrets          |
 
 See [Durable Agents](/docs/concepts/durable-execution/) for recovery behavior

@@ -4,25 +4,27 @@ import type {
 	AgentSubmissionStore,
 	SubmissionAttemptRef,
 	SubmissionDurability,
-	SubmissionTerminalOutbox,
 } from '../agent-execution-store.ts';
 import type { FlueContextInternal } from '../client.ts';
+import type { ConversationRecordWriter } from '../conversation-writer.ts';
 import {
 	FlueError,
 	SubmissionInterruptedError,
 	SubmissionRetryExhaustedError,
 	SubmissionTimeoutError,
 } from '../errors.ts';
-import { interceptExecution, type FlueTraceCarrier } from '../execution-interceptor.ts';
+import { type FlueTraceCarrier, interceptExecution } from '../execution-interceptor.ts';
 import { getInternalSession } from '../session.ts';
 import type {
+	AgentDefinition,
 	AttachedAgentEvent,
 	CallHandle,
-	AgentDefinition,
 	DirectAgentPayload,
 	PromptResponse,
 } from '../types.ts';
+import { type AttachmentStore, createAttachmentRef } from './attachment-store.ts';
 import type { DispatchInput } from './dispatch-queue.ts';
+import { agentStreamPath } from './event-stream-store.ts';
 import { assertAgentDispatchAdmissionInput } from './handle-agent.ts';
 
 export interface DispatchAgentSubmissionInput extends DispatchInput {
@@ -58,13 +60,6 @@ export interface AgentSubmissionInterruption {
 
 export type AgentSubmissionInspection = 'absent' | 'completed' | 'continuable' | 'uncertain';
 
-interface ProcessAgentSubmissionJournalState {
-	readonly operationId: string;
-	readonly turnId: string;
-	readonly checkpointLeafId?: string;
-	readonly streamKey?: string;
-}
-
 export interface ProcessAgentSubmissionOptions {
 	submissionAttempt?: SubmissionAttemptRef;
 	onInputApplied?: (durability: SubmissionDurability) => Promise<void> | void;
@@ -72,23 +67,6 @@ export interface ProcessAgentSubmissionOptions {
 	startedAt?: number;
 	/** Absolute timestamp (ms) after which the submission should be aborted. */
 	timeoutAt?: number;
-	journal?: {
-		beforeProvider?: (state: ProcessAgentSubmissionJournalState) => Promise<void> | void;
-		providerStarted?: (state: ProcessAgentSubmissionJournalState) => Promise<void> | void;
-		toolRequestRecorded?: (
-			state: ProcessAgentSubmissionJournalState & { toolRequest: unknown },
-		) => Promise<void> | void;
-		checkpointReady?: (
-			state: ProcessAgentSubmissionJournalState & { checkpointLeafId: string },
-		) => Promise<void> | void;
-		committed?: (
-			state: ProcessAgentSubmissionJournalState & { committedLeafId: string },
-		) => Promise<void> | void;
-	};
-}
-
-interface AgentSubmissionToolRequest {
-	readonly toolCalls: ReadonlyArray<{ type: 'toolCall'; id: string; name: string }>;
 }
 
 /**
@@ -97,17 +75,17 @@ interface AgentSubmissionToolRequest {
  * caught at compile time.
  */
 export interface AgentSubmissionSession {
-	inspectSubmissionInput(input: AgentSubmissionInput): AgentSubmissionInspection;
-	reconstructSubmissionResult(input: AgentSubmissionInput): PromptResponse | undefined;
+	readonly conversationId: string;
+	inspectSubmissionInput(input: AgentSubmissionInput): Promise<AgentSubmissionInspection> | AgentSubmissionInspection;
+	reconstructSubmissionResult(input: AgentSubmissionInput): Promise<PromptResponse | undefined> | PromptResponse | undefined;
 	processSubmissionInput(
 		input: AgentSubmissionInput,
 		options?: ProcessAgentSubmissionOptions,
 	): CallHandle<unknown>;
-	repairInterruptedToolCalls(
-		input: AgentSubmissionInput,
-		toolRequest: AgentSubmissionToolRequest,
-	): Promise<string | undefined>;
-	recoverInterruptedStream(streamKey: string, turnCheckpointLeafId?: string): Promise<boolean>;
+	recoverInterruptedStream(
+		attempt: SubmissionAttemptRef,
+		turnId?: string,
+	): Promise<boolean>;
 	recordSubmissionTerminal(input: AgentSubmissionInterruption): Promise<void>;
 }
 
@@ -129,6 +107,7 @@ interface AgentSubmissionObserverRegistry {
 
 interface AttachedAgentSubmissionReceipt {
 	readonly submissionId: string;
+	readonly offset?: string;
 	readonly result?: unknown;
 }
 
@@ -160,6 +139,34 @@ export function createDirectAgentSubmissionInput(options: {
 		acceptedAt: new Date().toISOString(),
 		...(options.traceCarrier ? { traceCarrier: options.traceCarrier } : {}),
 	};
+}
+
+export async function materializeAgentSubmissionSession(
+	ctx: FlueContextInternal,
+	agent: AgentDefinition,
+	input: AgentSubmissionInput,
+	attachmentStore?: AttachmentStore,
+): Promise<void> {
+	if (input.kind === 'direct') ctx.setSubmissionId?.(input.submissionId);
+	const session = await openAgentSubmissionSession(ctx, agent, input);
+	if (input.kind === 'direct' && attachmentStore) {
+		for (const [index, image] of (input.payload.images ?? []).entries()) {
+			const bytes = decodeBase64(image.data);
+			const attachment = await createAttachmentRef({
+				id: `att_direct_${input.submissionId}_${index}`,
+				mimeType: image.mimeType,
+				bytes,
+				...(image.filename ? { filename: image.filename } : {}),
+			});
+			const streamPath = agentStreamPath(input.agent, input.id);
+			await attachmentStore.put({
+				streamPath,
+				attachment,
+				bytes,
+				conversationId: session.conversationId,
+			});
+		}
+	}
 }
 
 export function createAgentSubmissionSessionHandler(
@@ -230,59 +237,6 @@ export function createAgentSubmissionObserverRegistry(): AgentSubmissionObserver
 }
 
 /**
- * Build the journal callback object for a submission attempt. Both the
- * Cloudflare coordinator and the Node dispatch processor use the same
- * journal phase lifecycle; this factory eliminates the duplication.
- */
-function createSubmissionJournalCallbacks(
-	submissions: Pick<
-		AgentSubmissionStore,
-		'beginTurnJournal' | 'updateTurnJournalPhase' | 'commitTurnJournal'
-	>,
-	submission: { submissionId: string; sessionKey: string; kind: 'dispatch' | 'direct' },
-	attempt: SubmissionAttemptRef,
-): NonNullable<ProcessAgentSubmissionOptions['journal']> {
-	let journalTurnId: string | undefined;
-	return {
-		beforeProvider: async (state) => {
-			if (state.turnId !== journalTurnId) {
-				journalTurnId = state.turnId;
-				await submissions.beginTurnJournal({
-					submissionId: submission.submissionId,
-					sessionKey: submission.sessionKey,
-					kind: submission.kind,
-					attemptId: attempt.attemptId,
-					operationId: state.operationId,
-					turnId: state.turnId,
-					phase: 'before_provider',
-					checkpointLeafId: state.checkpointLeafId,
-				});
-			}
-		},
-		providerStarted: async (state) => {
-			await submissions.updateTurnJournalPhase(attempt, 'provider_started', {
-				checkpointLeafId: state.checkpointLeafId,
-				streamKey: state.streamKey,
-			});
-		},
-		toolRequestRecorded: async (state) => {
-			await submissions.updateTurnJournalPhase(attempt, 'tool_request_recorded', {
-				checkpointLeafId: state.checkpointLeafId,
-				toolRequest: state.toolRequest,
-			});
-		},
-		checkpointReady: async (state) => {
-			await submissions.updateTurnJournalPhase(attempt, 'before_provider', {
-				checkpointLeafId: state.checkpointLeafId,
-			});
-		},
-		committed: async (state) => {
-			await submissions.commitTurnJournal(attempt, state.committedLeafId);
-		},
-	};
-}
-
-/**
  * Reconciliation disposition for an interrupted submission. Coordinators
  * use it for observer notification and replacement-attempt scheduling:
  *
@@ -315,8 +269,8 @@ export async function reconcileInterruptedSubmission(
 	submission: AgentSubmission,
 	agent: AgentDefinition,
 	createContext: (dispatchId: string | undefined) => FlueContextInternal,
-	deliverTerminalEvent: (terminal: SubmissionTerminalOutbox) => Promise<string>,
 	lease?: { ownerId: string; leaseExpiresAt: number },
+	conversationWriter?: ConversationRecordWriter,
 ): Promise<ReconciliationResult> {
 	const { input } = submission;
 	const attempt = submissionAttemptRef(submission);
@@ -330,34 +284,27 @@ export async function reconcileInterruptedSubmission(
 	const dispatchId = agentSubmissionDispatchId(input);
 	const ctx = createContext(dispatchId);
 	if (submission.kind === 'direct') ctx.setSubmissionId?.(submission.submissionId);
-	const inspected = (await createAgentSubmissionSessionHandler(agent, input, (s) => {
-		const state = s.inspectSubmissionInput(input);
+	const inspected = (await createAgentSubmissionSessionHandler(agent, input, async (s) => {
+		const state = await s.inspectSubmissionInput(input);
 		return {
 			state,
-			result: state === 'completed' ? s.reconstructSubmissionResult(input) : undefined,
+			result: state === 'completed' ? await s.reconstructSubmissionResult(input) : undefined,
 		};
 	})(ctx)) as { state: AgentSubmissionInspection; result: unknown };
 	const state = inspected.state;
-	// Fetch the turn journal up front: every terminal settlement below must
-	// also delete the journal's surviving chunk segments — the in-memory
-	// staging set that would normally delete them at the next durable
-	// checkpoint died with the interrupted process, and a settled submission
-	// gets no later checkpoint.
-	const journal = await submissions.getTurnJournal(submission.submissionId);
 	if (state === 'completed') {
-		const settled =
-			submission.kind === 'direct'
-				? await settleDirectSubmission(
-						submissions,
-						attempt,
-						ctx,
-						deliverTerminalEvent,
-						'completed',
-						inspected.result,
-					)
-				: await submissions.completeSubmission(attempt);
-		if (settled && journal?.streamKey) {
-			await submissions.deleteStreamChunkSegments(journal.streamKey);
+		if (submission.kind === 'direct') {
+			await settleDirectSubmission(
+				submissions,
+				attempt,
+				ctx,
+				'completed',
+				inspected.result,
+				undefined,
+				conversationWriter,
+			);
+		} else {
+			await submissions.completeSubmission(attempt);
 		}
 		return { disposition: 'completed', result: inspected.result };
 	}
@@ -388,8 +335,8 @@ export async function reconcileInterruptedSubmission(
 			'exhausted_retry_budget',
 			error,
 			createContext,
-			deliverTerminalEvent,
-			journal?.streamKey,
+			undefined,
+			conversationWriter,
 		);
 	}
 
@@ -404,153 +351,94 @@ export async function reconcileInterruptedSubmission(
 			'exceeded_timeout',
 			error,
 			createContext,
-			deliverTerminalEvent,
-			journal?.streamKey,
+			undefined,
+			conversationWriter,
 		);
 	}
 
-	// Check turn journal for pre-commit interruption that can be retried.
-	//
-	// TODO(multi-process): The stream recovery and tool repair branches below
-	// mutate session state (appending messages via recoverInterruptedStream /
-	// repairInterruptedToolCalls) *before* calling replaceTurnJournalAttempt,
-	// which is the atomic CAS that acquires ownership of the next attempt. In
-	// a multi-process Node deployment sharing Postgres, two coordinators could
-	// both observe the same expired-lease submission, both append recovery
-	// messages, and then only one wins the CAS. recoverInterruptedStream has
-	// a partial idempotency guard (alreadyRecovered check), but
-	// repairInterruptedToolCalls does not. The same pattern exists on the
-	// terminal path: failInterruptedSubmission appends the submission_interrupted
-	// advisory (recordSubmissionTerminal) and saves the session *before* the
-	// failSubmission CAS, so a reconciler that loses that CAS has already
-	// polluted session history (its in-process findSubmissionTerminal guard
-	// does not see a concurrent process's append). When multi-process is
-	// supported, either move replaceTurnJournalAttempt before the mutations
-	// or add an idempotency guard to repairInterruptedToolCalls, and move
-	// recordSubmissionTerminal after (or make it conditional on) the
-	// failSubmission CAS. This is safe today because Cloudflare DOs are
-	// single-threaded and multi-process Node is not a supported configuration.
-	if (
-		journal?.phase === 'provider_started' &&
-		journal.committed === false &&
-		journal.streamKey &&
-		journal.streamConsumedAt === undefined
-	) {
-		const streamKey = journal.streamKey;
-		const turnCheckpointLeafId = journal.checkpointLeafId;
-		const recoveryCtx = createContext(dispatchId);
-		if (submission.kind === 'direct') recoveryCtx.setSubmissionId?.(submission.submissionId);
-		const recovered = (await createAgentSubmissionSessionHandler(agent, input, (s) =>
-			s.recoverInterruptedStream(streamKey, turnCheckpointLeafId),
-		)(recoveryCtx)) as boolean;
-		if (recovered) {
-			await submissions.markStreamConsumed(attempt, journal.streamKey);
-			await submissions.deleteStreamChunkSegments(journal.streamKey);
-			const replacement = await submissions.replaceTurnJournalAttempt(
-				attempt,
-				crypto.randomUUID(),
-				lease,
-			);
-			if (replacement) return { disposition: 'replacement', submission: replacement };
-		}
-	}
-	// The journal is the authoritative record of provider work: a null
-	// journal means no attempt ever reached the beforeProvider write (the
-	// crash window between the input-application marker and the first
-	// journal row), and phase 'before_provider' means the provider call for
-	// the current turn never started. Either way a retry is safe by
-	// construction.
-	const providerUnreached = journal === null || journal.phase === 'before_provider';
-	if (
-		submission.inputAppliedAt !== undefined &&
-		(journal === null ||
-			((journal.phase === 'before_provider' || journal.phase === 'provider_started') &&
-				!journal.committed)) &&
-		// 'continuable': session has partial progress that restart processing
-		// can resume (persisted tool results — repaired first at resume when
-		// the recorded batch is incomplete, so completed calls are never
-		// re-executed — a recovered stream partial, a transient retryable
-		// error, or an aborted partial that replays from the last durable
-		// message).
-		// 'uncertain' with the provider unreached: nothing observable
-		// happened, so a retry is safe. Without this, a crash after input
-		// application but before any provider response would terminally fail
-		// the submission instead of retrying.
-		(state === 'continuable' || (state === 'uncertain' && providerUnreached))
-	) {
-		const replacement = await submissions.replaceTurnJournalAttempt(
+	// Canonical input exists but the operational input-applied marker did not
+	// land (the crash window between persisting the input and writing the
+	// marker). Re-acquire the attempt, mark the input applied, and let resume
+	// processing classify and continue from the canonical input.
+	if (submission.inputAppliedAt === undefined && state !== 'absent') {
+		const replacement = await submissions.replaceSubmissionAttempt(
 			attempt,
 			crypto.randomUUID(),
 			lease,
 		);
-		if (replacement) return { disposition: 'replacement', submission: replacement };
+		if (replacement?.attemptId) {
+			const replacementAttempt = {
+				submissionId: replacement.submissionId,
+				attemptId: replacement.attemptId,
+			};
+			if (!(await submissions.markSubmissionInputApplied(replacementAttempt, {
+				maxRetry: replacement.maxRetry,
+				timeoutAt: replacement.timeoutAt,
+			}))) {
+				return { disposition: 'stale' };
+			}
+			return { disposition: 'replacement', submission: replacement };
+		}
+		return { disposition: 'stale' };
 	}
 
-	// Check for interrupted tool calls that can be repaired.
-	if (
-		journal?.phase === 'tool_request_recorded' &&
-		journal.committed === false &&
-		journal.toolRequest
-	) {
-		const repairCtx = createContext(dispatchId);
-		if (submission.kind === 'direct') repairCtx.setSubmissionId?.(submission.submissionId);
-		const repairedLeafId = (await createAgentSubmissionSessionHandler(agent, input, (s) =>
-			s.repairInterruptedToolCalls(input, journal.toolRequest as AgentSubmissionToolRequest),
-		)(repairCtx)) as string | undefined;
-		if (repairedLeafId) {
-			await submissions.updateTurnJournalPhase(attempt, 'before_provider', {
-				checkpointLeafId: repairedLeafId,
-			});
-			const replacement = await submissions.replaceTurnJournalAttempt(
-				attempt,
-				crypto.randomUUID(),
-				lease,
-			);
-			if (replacement) return { disposition: 'replacement', submission: replacement };
-		}
-		if (state === 'continuable') {
-			const replacement = await submissions.replaceTurnJournalAttempt(
-				attempt,
-				crypto.randomUUID(),
-				lease,
-			);
-			if (replacement) return { disposition: 'replacement', submission: replacement };
-		}
-	}
-
-	// Pre-input-application interruption.
-	if (submission.inputAppliedAt === undefined) {
-		if (state === 'absent') {
-			await submissions.requeueSubmissionBeforeInputApplied(attempt);
-			return { disposition: 'requeued' };
-		}
-		const error = new SubmissionInterruptedError({ phase: 'before_input_marker' });
-		return failInterruptedSubmission(
-			submissions,
-			submission,
+	// Resumable progress, or the one accepted degraded window. Both the
+	// durable-partial-stream case and the trailing-incomplete-tool-batch case
+	// classify 'continuable'; 'uncertain' is the accepted provider-redispatch
+	// window — nothing observable was persisted, so a single retry (which may
+	// re-dispatch the provider once) is safe under the at-least-once execution
+	// contract and `store: true` response replay.
+	//
+	// Acquire the replacement attempt (the fencing CAS) BEFORE any recovery
+	// append, so a reconciler that loses the CAS never mutates session history.
+	// Resume processing then classifies the canonical state and runs the right
+	// continuation:
+	//   - a durable partial stream is materialized here by
+	//     `recoverInterruptedStream` (self-guards to a no-op when there is none);
+	//   - an incomplete tool batch — partial OR zero-result — is repaired at
+	//     resume by `repairTrailingPartialToolBatch`, which writes explicit
+	//     unknown-outcome errors and NEVER re-executes a tool.
+	//
+	// TODO(multi-process): the terminal path (`failInterruptedSubmission`)
+	// still appends the `submission_interrupted` advisory before the
+	// `failSubmission` CAS, so a reconciler that loses that CAS has already
+	// polluted session history. Safe today because Cloudflare DOs are
+	// single-threaded and multi-process Node is not a supported configuration;
+	// when it is, move `recordSubmissionTerminal` after (or condition it on)
+	// the `failSubmission` CAS. The recovery-append ordering above no longer
+	// has this hazard (the CAS now precedes the append).
+	if (state === 'continuable' || state === 'uncertain') {
+		const replacement = await submissions.replaceSubmissionAttempt(
 			attempt,
-			agent,
-			'interrupted_before_input_marker',
-			error,
-			createContext,
-			deliverTerminalEvent,
-			journal?.streamKey,
+			crypto.randomUUID(),
+			lease,
 		);
+		if (!replacement?.attemptId) return { disposition: 'stale' };
+		if (state === 'continuable') {
+			const recoveryCtx = createContext(dispatchId);
+			if (submission.kind === 'direct') recoveryCtx.setSubmissionId?.(submission.submissionId);
+			await createAgentSubmissionSessionHandler(agent, input, (s) =>
+				s.recoverInterruptedStream({
+					submissionId: replacement.submissionId,
+					attemptId: replacement.attemptId as string,
+				}),
+			)(recoveryCtx);
+		}
+		return { disposition: 'replacement', submission: replacement };
 	}
 
-	// Collect interrupted tool metadata from the journal when available.
-	const interruptedTools = journal?.toolRequest
-		? (journal.toolRequest as AgentSubmissionToolRequest).toolCalls.map((tc) => ({
-				name: tc.name,
-				id: tc.id,
-			}))
-		: undefined;
+	// Only 'absent' remains here (completed/continuable/uncertain handled
+	// above; canonical input present without the marker is repaired above).
+	if (submission.inputAppliedAt === undefined) {
+		// Crashed before any canonical input was persisted — requeue for a
+		// clean first attempt.
+		await submissions.requeueSubmissionBeforeInputApplied(attempt);
+		return { disposition: 'requeued' };
+	}
 
-	// Post-input-application interruption without completion.
-	const error = new SubmissionInterruptedError({
-		phase: 'after_input_application',
-		interruptedTools,
-	});
+	// The input-applied marker was written but the canonical input is absent
+	// (it could not be persisted before the crash): nothing to resume — fail.
+	const error = new SubmissionInterruptedError({ phase: 'after_input_application' });
 	return failInterruptedSubmission(
 		submissions,
 		submission,
@@ -559,9 +447,8 @@ export async function reconcileInterruptedSubmission(
 		'interrupted_after_input_application',
 		error,
 		createContext,
-		deliverTerminalEvent,
-		journal?.streamKey,
-		interruptedTools,
+		undefined,
+		conversationWriter,
 	);
 }
 
@@ -610,7 +497,7 @@ export interface ProcessSubmissionOptions {
 	createContext: (dispatchId: string | undefined) => FlueContextInternal;
 	/** Observer registry for direct submission events and settlement. */
 	observers: Pick<AgentSubmissionObserverRegistry, 'publish' | 'complete' | 'fail'>;
-	deliverTerminalEvent: (terminal: SubmissionTerminalOutbox) => Promise<string>;
+	conversationWriter?: ConversationRecordWriter;
 	onInteractionStart?: (interaction: {
 		agentName: string;
 		instanceId: string;
@@ -711,7 +598,6 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 						? submission.timeoutAt
 						: undefined,
 				submissionAttempt: attempt,
-				journal: createSubmissionJournalCallbacks(submissions, submission, attempt),
 			});
 			// Wire the coordinator's abort signal so shutdown can cancel
 			// in-flight work at the turn boundary.
@@ -760,10 +646,10 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 							submissions,
 							attempt,
 							ctx,
-							opts.deliverTerminalEvent,
 							'failed',
 							undefined,
 							error,
+							opts.conversationWriter,
 						)
 					: await submissions.failSubmission(attempt, error);
 			if (submission.kind === 'direct' && settled) observers.fail(submission.submissionId, error);
@@ -775,9 +661,10 @@ export async function processSubmission(opts: ProcessSubmissionOptions): Promise
 						submissions,
 						attempt,
 						ctx,
-						opts.deliverTerminalEvent,
 						'completed',
 						result,
+						undefined,
+						opts.conversationWriter,
 					)
 				: await submissions.completeSubmission(attempt);
 		if (submission.kind === 'direct' && settled) observers.complete(submission.submissionId, result);
@@ -797,9 +684,8 @@ async function failInterruptedSubmission(
 	reason: AgentSubmissionInterruption['reason'],
 	error: Error,
 	createContext: (dispatchId: string | undefined) => FlueContextInternal,
-	deliverTerminalEvent: (terminal: SubmissionTerminalOutbox) => Promise<string>,
-	journalStreamKey: string | undefined,
 	interruptedTools?: ReadonlyArray<{ readonly name: string; readonly id: string }>,
+	conversationWriter?: ConversationRecordWriter,
 ): Promise<ReconciliationResult> {
 	const { input } = submission;
 	const dispatchId = agentSubmissionDispatchId(input);
@@ -832,18 +718,13 @@ async function failInterruptedSubmission(
 					submissions,
 					attempt,
 					ctx,
-					deliverTerminalEvent,
 					'failed',
 					undefined,
 					error,
+					conversationWriter,
 				)
 			: await submissions.failSubmission(attempt, error);
 	if (!settled) return { disposition: 'stale' };
-	// Terminal settlement supersedes any chunk segments an interrupted turn
-	// left durable for recovery; no later checkpoint will delete them. Only
-	// the settlement CAS winner deletes — a lost CAS means another live
-	// attempt may still need the segments.
-	if (journalStreamKey) await submissions.deleteStreamChunkSegments(journalStreamKey);
 	return { disposition: 'failed', error };
 }
 
@@ -851,10 +732,10 @@ async function settleDirectSubmission(
 	submissions: AgentSubmissionStore,
 	attempt: SubmissionAttemptRef,
 	ctx: FlueContextInternal,
-	deliverTerminalEvent: (terminal: SubmissionTerminalOutbox) => Promise<string>,
 	outcome: 'completed' | 'failed',
 	result?: unknown,
 	error?: unknown,
+	conversationWriter?: ConversationRecordWriter,
 ): Promise<boolean> {
 	const event = ctx.createEvent({
 		type: 'submission_settled',
@@ -862,23 +743,70 @@ async function settleDirectSubmission(
 		outcome,
 		...(outcome === 'completed' ? { result } : { error: serializeSubmissionError(error) }),
 	});
-	const eventKey = `direct-submission:${attempt.submissionId}:settled`;
-	const terminal = await submissions.reserveSubmissionTerminal(attempt, { eventKey, event });
-	if (!terminal) return false;
-	try {
-		await ctx.flushEventCallbacks();
-	} catch (callbackError) {
-		console.error('[flue:event-stream] Event persistence failed before terminal settlement:', callbackError);
+	if (!conversationWriter) return false;
+	const eventKey = `record_direct-submission:${attempt.submissionId}:settled`;
+	const reduced = await conversationWriter.loadReducedState();
+	const conversation =
+		[...reduced.conversations.values()].find((candidate) =>
+			[...candidate.entries.values()].some((entry) => entry.submissionId === attempt.submissionId),
+		) ??
+		[...reduced.conversations.values()].find(
+			(candidate) => candidate.harness === 'default' && candidate.session === 'default',
+		);
+	if (!conversation) return false;
+	const pending = (await submissions.listPendingSubmissionSettlements()).find(
+		(candidate) => candidate.submissionId === attempt.submissionId,
+	);
+	const settlement =
+		pending?.record ?? {
+			v: 1 as const,
+			id: eventKey,
+			type: 'submission_settled' as const,
+			conversationId: conversation.conversationId,
+			harness: conversation.harness,
+			session: conversation.session,
+			timestamp: new Date().toISOString(),
+			submissionId: attempt.submissionId,
+			attemptId: attempt.attemptId,
+			outcome,
+			...(outcome === 'completed' ? { result } : { error: serializeSubmissionError(error) }),
+		};
+	const obligation =
+		pending ??
+		(await submissions.reserveSubmissionSettlement(attempt, {
+			recordId: eventKey,
+			record: settlement,
+		}));
+	if (!obligation) return false;
+	const existing = await conversationWriter.getRecord(eventKey);
+	if (!existing) {
+		await conversationWriter.append([obligation.record], { submission: attempt });
+	} else if (JSON.stringify(existing) !== JSON.stringify(obligation.record)) {
+		// A canonical settlement record with this submission's deterministic key
+		// already exists but its content differs from what this attempt computed.
+		// Attempt fencing makes this unreachable in normal operation (a settled
+		// submission is not re-processed); if it ever happens it is an invariant
+		// violation. The durable canonical record is the client-visible authority,
+		// so finalize the operational row against it rather than returning false —
+		// refusing would wedge reconciliation in an unterminable loop. Surface it
+		// loudly for diagnosis instead of swallowing it.
+		console.error(
+			'[flue:submission-settlement] Canonical settlement conflict; the existing durable record is authoritative.',
+			{ submissionId: attempt.submissionId, recordId: eventKey },
+		);
 	}
-	const offset = terminal.offset ?? (await deliverTerminalEvent(terminal));
-	if (!(await submissions.recordSubmissionTerminalOffset(attempt, eventKey, offset))) return false;
-	ctx.publishEvent(terminal.event as AttachedAgentEvent);
+	ctx.publishEvent(event as AttachedAgentEvent);
 	try {
 		await ctx.flushEventCallbacks();
 	} catch (callbackError) {
 		console.error('[flue:subscriber] Terminal event subscriber failed:', callbackError);
 	}
-	return submissions.finalizeSubmissionTerminal(attempt, eventKey);
+	return submissions.finalizeSubmissionSettlement(attempt, eventKey);
+}
+
+function decodeBase64(value: string): Uint8Array {
+	const binary = atob(value);
+	return Uint8Array.from(binary, (character) => character.charCodeAt(0));
 }
 
 function serializeSubmissionError(error: unknown): {

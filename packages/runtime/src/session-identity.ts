@@ -9,8 +9,20 @@ interface SessionStorageIdentity {
 	session: string;
 }
 
+export function isUuid(value: string): boolean {
+	return UUID_PATTERN.test(value);
+}
+
 function isTaskSessionName(name: string): boolean {
 	return name.startsWith(TASK_SESSION_PREFIX);
+}
+
+function isActionScopeName(name: string): boolean {
+	return name.startsWith(ACTION_SCOPE_PREFIX);
+}
+
+export function isPublicSessionName(name: string): boolean {
+	return !isTaskSessionName(name) && !isActionScopeName(name);
 }
 
 export function assertPublicSessionName(name: string): void {
@@ -19,7 +31,7 @@ export function assertPublicSessionName(name: string): void {
 			'[flue] Session names beginning with "task:" are reserved for delegated tasks.',
 		);
 	}
-	if (name.startsWith(ACTION_SCOPE_PREFIX)) {
+	if (isActionScopeName(name)) {
 		throw new Error('[flue] Session names beginning with "action:" are reserved for Actions.');
 	}
 }
@@ -40,36 +52,8 @@ export function createActionScopeName(invocationId: string): string {
 	return `${ACTION_SCOPE_PREFIX}${invocationId}`;
 }
 
-export function childSessionStorageKey(
-	parentStorageKey: string,
-	child: unknown,
-): string | undefined {
-	if (!child || typeof child !== 'object') return undefined;
-	const parent = parseSessionStorageKey(parentStorageKey);
-	if (!parent) return undefined;
-	const { type, session } = child as { type?: unknown; session?: unknown };
-	if (typeof session !== 'string') return undefined;
-	if (type === 'task') {
-		const { taskId } = child as { taskId?: unknown };
-		if (
-			typeof taskId !== 'string' ||
-			!UUID_PATTERN.test(taskId) ||
-			session !== createTaskSessionName(parent.session, taskId)
-		) {
-			return undefined;
-		}
-		return createSessionStorageKey(parent.instanceId, parent.harness, session);
-	}
-	if (type === 'action') {
-		const { invocationId } = child as { invocationId?: unknown };
-		if (typeof invocationId !== 'string' || !UUID_PATTERN.test(invocationId)) return undefined;
-		const scope = createActionScopeName(invocationId);
-		return createSessionStorageKey(parent.instanceId, `${parent.harness}:${scope}`, session);
-	}
-	return undefined;
-}
 
-function parseSessionStorageKey(storageKey: string): SessionStorageIdentity | undefined {
+export function parseSessionStorageKey(storageKey: string): SessionStorageIdentity | undefined {
 	if (!storageKey.startsWith(SESSION_STORAGE_PREFIX)) return undefined;
 	let value: unknown;
 	try {

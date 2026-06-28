@@ -73,7 +73,7 @@ Linking the secret grants the service permission to read it; the `environment` e
 
 ## Persistence
 
-On a single Fargate task, Flue's sessions and accepted submissions live in memory, so they are lost when the task restarts or redeploys, and they are not shared if you run more than one task. Back them with Postgres when state must survive restarts or be shared across instances.
+On a single Fargate task, Flue's canonical conversations, attachments, and accepted submissions live in memory, so they are lost when the task restarts or redeploys. Back them with Postgres when state must survive replacement or workflow history must be available across tasks. Shared storage does not enable active-active agent execution: route each agent instance to one live task.
 
 The `sst.aws.Postgres` component provisions an RDS Postgres instance in the VPC and exposes its connection parts as outputs (`host`, `port`, `username`, `password`, `database`). Construct a `DATABASE_URL` from those with `$interpolate` and pass it through `environment`:
 
@@ -101,7 +101,7 @@ import { postgres } from '@flue/postgres';
 export default postgres(process.env.DATABASE_URL!);
 ```
 
-Flue discovers `db.ts` at build time and wires it into the generated server. The adapter handles schema creation, session snapshots, and durable submission state. Because the Postgres instance and the service share the VPC, the service reaches the database over the private network. See [Database](/docs/guide/database/) for the adapter contract and other backends.
+Flue discovers `db.ts` at build time and wires it into the generated server. The adapter handles schema creation, canonical conversation streams, immutable attachments, durable submission state, and workflow history. Because the Postgres instance and the service share the VPC, the service reaches the database over the private network. See [Database](/docs/guide/database/) for the adapter contract and other backends.
 
 ## Health and streaming
 
@@ -122,7 +122,7 @@ Exposed workflow runs hold long-lived `GET /runs/:runId` reads open (long-poll o
 
 ## Going further
 
-SST stages give you independent environments from one config — `sst deploy --stage production` and `sst deploy --stage dev` provision separate copies, and `sst secret set` scopes values per stage. Run `sst deploy` from CI or locally; `sst remove --stage <name>` tears a stage down. See the [SST docs](https://sst.dev/docs/) for autodeploy, custom domains on the load balancer, and scaling the service to multiple tasks (where shared Postgres becomes required).
+SST stages give you independent environments from one config — `sst deploy --stage production` and `sst deploy --stage dev` provision separate copies, and `sst secret set` scopes values per stage. Run `sst deploy` from CI or locally; `sst remove --stage <name>` tears a stage down. See the [SST docs](https://sst.dev/docs/) for autodeploy, custom domains on the load balancer, and scaling the service. Multiple tasks require shared durable storage plus instance-affine routing so one live task owns each agent instance.
 
 ## References
 

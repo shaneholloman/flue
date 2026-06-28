@@ -22,13 +22,18 @@ build time and wires it into the generated Node server. The adapter's
 `migrate()` hook runs once at startup and creates its tables idempotently, so
 there is no separate migration step.
 
-This adapter persists Flue's runtime state:
+This adapter persists Flue runtime state:
 
-- agent session snapshots and compaction state;
-- accepted direct prompts and `dispatch(...)` submissions, with the durable
-  turn journals and leases that back interruption recovery;
-- workflow-run records and persisted run events;
-- run indexing for `/runs` lookups and `listRuns()`.
+- the canonical append-only conversation stream for each agent instance;
+- immutable external attachments referenced by conversation records;
+- accepted direct prompts and `dispatch(...)` submissions, with durable
+  claims and leases;
+- workflow-run records, event streams, and run indexing.
+
+The canonical stream is the sole transcript and is replayed from its beginning;
+replay acceleration and persisted-log compaction are deferred. Sessions append
+for the instance lifetime and have no per-session deletion. Whole-instance stream
+and attachment deletion methods are low-level primitives, not public orchestration.
 
 It does not store your application's business data. Keep customer records,
 tickets, and payments in your own tables.

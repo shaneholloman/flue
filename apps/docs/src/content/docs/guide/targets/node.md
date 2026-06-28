@@ -24,9 +24,11 @@ The build externalizes your application dependencies rather than bundling them. 
 
 ## State and durability
 
-Without `db.ts`, the generated Node server uses process-local in-memory SQLite for agent sessions, accepted submissions, and workflow-run records and indexing. This gives one running process ordered state handling, but a restart loses that state.
+Without `db.ts`, the generated Node server uses process-local in-memory SQLite for canonical agent conversations, accepted submissions, and workflow-run records and indexing. This gives one running process ordered state handling, but a restart loses that state.
 
-With a durable adapter, direct prompts and `dispatch(...)` inputs enter the same SQL-backed per-instance queue. Inputs for one agent instance are processed in accepted order.
+With a durable adapter, direct prompts and `dispatch(...)` inputs enter the same persisted per-instance queue. Inputs for one agent instance are processed in accepted order, and a replacement process can recover canonical conversation progress and interrupted submissions.
+
+Node requires one live process to own a given agent instance. A shared database supports process or host replacement, but does not make active-active ownership or round-robin routing for the same instance safe. Multi-replica deployments must route each instance to one owner and avoid overlapping owners during replacement.
 
 Node does not get Cloudflare's automatic Durable Object wake or Fiber recovery. A replacement process must start successfully before startup reconciliation runs, and the coordinator periodically scans expired leases so work stranded by a fast restart is eventually reclaimed.
 

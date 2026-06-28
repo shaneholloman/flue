@@ -373,6 +373,37 @@ export class StreamNotFoundError extends FlueHttpError {
 	}
 }
 
+/**
+ * The attachments endpoint exists but the agent module did not export an
+ * `attachments` middleware, so byte downloads are not exposed. Rendered as a
+ * plain 404 in production (indistinguishable from any other unmatched route);
+ * in dev the `dev` field explains how to opt in.
+ */
+export class AttachmentsNotExposedError extends FlueHttpError {
+	constructor({ method, path, agentName }: { method: string; path: string; agentName: string }) {
+		super({
+			type: 'route_not_found',
+			message: `No route matches ${method} ${path}.`,
+			details: 'Verify the request method and path are correct.',
+			dev: `Attachment downloads are opt-in. Export an \`attachments\` Hono middleware from agents/${agentName}.ts to expose GET /agents/${agentName}/:id/attachments/:attachmentId; use it to authorize and scope access. Without it this endpoint returns 404.`,
+			status: 404,
+		});
+	}
+}
+
+export class AttachmentNotFoundError extends FlueHttpError {
+	constructor({ attachmentId }: { attachmentId: string }) {
+		super({
+			type: 'attachment_not_found',
+			message: `Attachment "${attachmentId}" was not found.`,
+			details:
+				'The attachment id may be incorrect, or it belongs to a conversation other than the default one.',
+			dev: '',
+			status: 404,
+		});
+	}
+}
+
 export class RunStoreUnavailableError extends FlueHttpError {
 	constructor() {
 		super({
@@ -421,28 +452,71 @@ export class ProductEventVersionError extends FlueError {
 	}
 }
 
-export class SessionDataVersionError extends FlueError {
-	constructor({ storedVersion }: { storedVersion: string }) {
+export class ConversationRecordInvariantError extends FlueError {
+	constructor({
+		recordId,
+		recordType,
+		reason,
+	}: {
+		recordId: string;
+		recordType: string;
+		reason: string;
+	}) {
 		super({
-			type: 'session_data_version_unsupported',
-			message: `Persisted session data version ${storedVersion} is unsupported.`,
-			details: 'The persisted session cannot be read safely by this runtime.',
-			dev: 'Clear session state created by an earlier Flue beta before reopening this session.',
-			meta: { storedVersion, supportedVersion: 8 },
+			type: 'conversation_record_invariant',
+			message: 'A canonical conversation record violates the conversation stream contract.',
+			details: 'The persisted conversation cannot be reduced safely.',
+			dev: reason,
+			meta: { recordId, recordType, reason },
 		});
+		this.name = 'ConversationRecordInvariantError';
 	}
 }
 
-export class StreamChunkSegmentTooLargeError extends FlueError {
-	constructor({ serializedBytes, maximumBytes }: { serializedBytes: number; maximumBytes: number }) {
+export class ConversationStreamStoreError extends FlueError {
+	constructor({
+		operation,
+		path,
+		reason,
+	}: {
+		operation: string;
+		path: string;
+		reason: string;
+	}) {
 		super({
-			type: 'stream_chunk_segment_too_large',
-			message: `Stream recovery segment is too large to persist (${serializedBytes} bytes; maximum ${maximumBytes} bytes).`,
-			details: 'The model produced more recovery data in one flush interval than the persistence backend can store safely.',
-			dev: 'Reduce individual streamed output size or increase stream flush frequency before retrying.',
-			meta: { serializedBytes, maximumBytes },
+			type: 'conversation_stream_store_failure',
+			message: 'The canonical conversation stream operation could not be completed.',
+			details: 'The conversation stream remains unchanged when the operation was rejected.',
+			dev: reason,
+			meta: { operation, path, reason },
 		});
-		this.name = 'StreamChunkSegmentTooLargeError';
+		this.name = 'ConversationStreamStoreError';
+	}
+}
+
+export class AttachmentConflictError extends FlueError {
+	constructor({ path, attachmentId }: { path: string; attachmentId: string }) {
+		super({
+			type: 'attachment_conflict',
+			message: 'The attachment identity conflicts with persisted attachment data.',
+			details: 'Use a new attachment identity or retry with the exact original attachment.',
+			dev: `Attachment "${attachmentId}" in canonical stream "${path}" was reused with different content, metadata, or ownership.`,
+			meta: { path, attachmentId },
+		});
+		this.name = 'AttachmentConflictError';
+	}
+}
+
+export class AttachmentIntegrityError extends FlueError {
+	constructor({ attachmentId, reason }: { attachmentId: string; reason: 'size' | 'digest' | 'chunks' }) {
+		super({
+			type: 'attachment_integrity',
+			message: 'The attachment bytes failed integrity verification.',
+			details: 'The attachment cannot be used safely.',
+			dev: `Attachment "${attachmentId}" has a ${reason} mismatch.`,
+			meta: { attachmentId, reason },
+		});
+		this.name = 'AttachmentIntegrityError';
 	}
 }
 
@@ -509,7 +583,7 @@ export class SandboxOperationUnsupportedError extends FlueError {
 //
 // Non-HTTP errors thrown by the session surface: `harness.session()` /
 // `harness.sessions.*` and `session.prompt()` / `skill()` / `task()` /
-// `shell()` / `compact()` / `delete()`. Programmatic consumers (the primary
+// `shell()` / `compact()`. Programmatic consumers (the primary
 // audience of these calls) distinguish failures with `instanceof` against the
 // classes re-exported from the package root. When one of these escapes to the
 // HTTP layer (e.g. a `?wait=result` prompt), `toHttpResponse` renders its
@@ -545,21 +619,8 @@ export class SessionBusyError extends FlueError {
 		super({
 			type: 'session_busy',
 			message: `Session "${session}" is busy running ${activeOperation}.`,
-			details:
-				'Wait for the active operation to finish before starting another operation or deleting the session.',
+			details: 'Wait for the active operation to finish before starting another operation.',
 			dev: 'Sessions run one operation at a time. Start another session for parallel conversation branches.',
-		});
-	}
-}
-
-export class SessionDeletedError extends FlueError {
-	constructor({ session }: { session: string }) {
-		super({
-			type: 'session_deleted',
-			message: `Session "${session}" has been deleted.`,
-			details:
-				'The session and its stored conversation no longer exist. Use a new session to continue.',
-			dev: '',
 		});
 	}
 }
@@ -759,30 +820,6 @@ export class ActionOutputSerializationError extends FlueError {
 	}
 }
 
-export class DataPartValidationError extends FlueError {
-	constructor({ name, field, cause }: { name: unknown; field: 'name' | 'id' | 'data'; cause?: unknown }) {
-		super({
-			type: 'data_part_validation',
-			message:
-				field === 'name'
-					? 'Data part name is invalid.'
-					: field === 'id'
-						? 'Data part id is invalid.'
-						: `Data part "${String(name)}" payload is not JSON-serializable.`,
-			details: '',
-			dev:
-				field === 'name'
-					? 'Use a non-empty data part name containing only letters, numbers, ".", "_", or "-".'
-					: field === 'id'
-						? 'Pass a string id or omit it.'
-						: 'Pass a plain JSON value without raw image bytes, secrets, or unsanitized PII.',
-			meta: { name, field },
-			cause,
-		});
-		this.name = 'DataPartValidationError';
-	}
-}
-
 export class WorkflowInvocationNotConfiguredError extends FlueError {
 	constructor() {
 		super({
@@ -956,10 +993,8 @@ export class OperationFailedError extends FlueError {
  *   ran out. No provider work ever happened, so the generic retry-exhaustion
  *   error would misdescribe the failure; the shared `attemptCount`/
  *   `maxAttempts` budget itself is intentional.
- * - `'before_input_marker'` — interrupted after the submission input was
- *   persisted to the session but before the input-application marker was
- *   recorded. Recovery cannot prove the input was never applied, so it does
- *   not replay it.
+ * - `'before_input_marker'` — interrupted with inconsistent pre-marker state
+ *   that canonical replay could not safely repair.
  * - `'after_input_application'` — interrupted after input application
  *   without a completed response that recovery could safely resume. When the
  *   interruption left tool calls whose outcomes could not be confirmed,
@@ -997,13 +1032,10 @@ export class SubmissionInterruptedError extends FlueError {
 		} else if (input.phase === 'before_input_marker') {
 			super({
 				type: 'submission_interrupted',
-				message:
-					'Submission was interrupted after its input was persisted but before input application was confirmed. ' +
-					'The input was not replayed.',
+				message: 'Submission was interrupted before input application could be safely recovered.',
 				details:
-					'The attempt was interrupted after the submission input was written to the session but before the ' +
-					'input-application marker was recorded. Recovery cannot prove the input was never applied, so it ' +
-					'does not replay it.',
+					'The canonical conversation and operational marker did not provide a safe recoverable input state. ' +
+					'The input was not replayed.',
 				dev: '',
 				meta: { phase: input.phase },
 			});

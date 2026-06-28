@@ -1,11 +1,13 @@
 import { randomUUID } from 'node:crypto';
-import { PersistedSchemaVersionError, type SessionData } from '@flue/runtime/adapter';
+import { PersistedSchemaVersionError } from '@flue/runtime/adapter';
 import {
+	defineAttachmentStoreContractTests,
+	defineConversationStreamStoreContractTests,
 	defineEventStreamStoreContractTests,
 	defineRunStoreContractTests,
 	defineStoreContractTests,
 } from '@flue/runtime/test-utils';
-import { createClient } from 'redis';
+import { createClient, RESP_TYPES } from 'redis';
 import { describe, expect, it } from 'vitest';
 import { type RedisRunner, redis } from '../src/index.ts';
 
@@ -15,13 +17,18 @@ const describeRedis = redisUrl ? describe : describe.skip;
 type TestRedisClient = ReturnType<typeof createClient>;
 
 function createRunner(client: TestRedisClient): RedisRunner {
+	const argument = (value: string | number | Uint8Array) =>
+		value instanceof Uint8Array ? Buffer.from(value) : String(value);
 	return {
-		command: (command, args = []) => client.sendCommand([command, ...args.map(String)]),
-		eval: (script, keys, args = []) => client.eval(script, { keys, arguments: args.map(String) }),
+		command: (command, args = []) => client.sendCommand(
+			[command, ...args.map(argument)],
+			{ typeMapping: { [RESP_TYPES.BLOB_STRING]: Buffer } },
+		),
+		eval: (script, keys, args = []) => client.eval(script, { keys, arguments: args.map(argument) }),
 		pipeline: async (commands) => {
 			const multi = client.multi();
 			for (const item of commands)
-				multi.addCommand([item.command, ...(item.args ?? []).map(String)]);
+				multi.addCommand([item.command, ...(item.args ?? []).map(argument)]);
 			return multi.exec();
 		},
 		close: () => client.close(),
@@ -84,6 +91,25 @@ describeRedis('Redis shared contracts', () => {
 		},
 		cleanup: cleanupHarness,
 	});
+	defineAttachmentStoreContractTests('Redis AttachmentStore', {
+		async create() {
+			return (await createHarness()).attachmentStore;
+		},
+		cleanup: cleanupHarness,
+	});
+	defineConversationStreamStoreContractTests('Redis ConversationStreamStore', {
+		async create() {
+			const connected = await createHarness();
+			if (!connected.conversationStreamStore) {
+				throw new Error('Expected Redis conversation stream store.');
+			}
+			return {
+				stream: connected.conversationStreamStore,
+				executionStore: connected.executionStore,
+			};
+		},
+		cleanup: cleanupHarness,
+	});
 });
 
 function dispatchInput(dispatchId = 'dispatch-1') {
@@ -96,20 +122,6 @@ function dispatchInput(dispatchId = 'dispatch-1') {
 	};
 }
 
-function sessionData(label: string): SessionData {
-	return {
-		version: 8,
-		conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-		affinityKey: label,
-		entries: [],
-		leafId: null,
-		childSessions: [],
-		metadata: { label },
-		createdAt: '2026-06-03T00:00:00.000Z',
-		updatedAt: '2026-06-03T00:00:00.000Z',
-	};
-}
-
 describeRedis('redis() concurrency', () => {
 	it('allows one same-submission claim when independent adapters race', async () => {
 		const first = await createSharedHarness();
@@ -117,6 +129,7 @@ describeRedis('redis() concurrency', () => {
 		const firstStores = await first.adapter.connect();
 		const secondStores = await second.adapter.connect();
 		await firstStores.executionStore.submissions.admitDispatch(dispatchInput());
+		await firstStores.executionStore.submissions.markSubmissionCanonicalReady('dispatch-1');
 		const results = await Promise.all([
 			firstStores.executionStore.submissions.claimSubmission({
 				submissionId: 'dispatch-1',
@@ -133,79 +146,6 @@ describeRedis('redis() concurrency', () => {
 		]);
 		expect(results.filter(Boolean)).toHaveLength(1);
 		await cleanupPrefix(first, [second]);
-	});
-
-	it('serializes admission and deletion across independent adapters', async () => {
-		const firstHarness = await createSharedHarness();
-		const secondHarness = await createSharedHarness(firstHarness.prefix);
-		const firstStores = await firstHarness.adapter.connect();
-		const secondStores = await secondHarness.adapter.connect();
-		const admitted = await firstStores.executionStore.submissions.admitDispatch(dispatchInput());
-		if (admitted.kind !== 'submission') throw new Error('Expected submission.');
-		const claimed = await firstStores.executionStore.submissions.claimSubmission({
-			submissionId: 'dispatch-1',
-			attemptId: 'a',
-			ownerId: 'one',
-			leaseExpiresAt: Date.now() + 30_000,
-		});
-		if (!claimed) throw new Error('Expected claim.');
-		await firstStores.executionStore.submissions.completeSubmission({
-			submissionId: 'dispatch-1',
-			attemptId: 'a',
-		});
-		let release: (() => void) | undefined;
-		const deleting = firstStores.executionStore.submissions.deleteSession(
-			admitted.submission.sessionKey,
-			() =>
-				new Promise<void>((resolve) => {
-					release = resolve;
-				}),
-		);
-		while (!release) await new Promise((resolve) => setTimeout(resolve, 1));
-		await expect(
-			secondStores.executionStore.submissions.admitDispatch(dispatchInput('dispatch-2')),
-		).rejects.toThrow();
-		release();
-		await deleting;
-		await cleanupPrefix(firstHarness, [secondHarness]);
-	});
-
-	it('runs one snapshot deletion across independent adapters', async () => {
-		const first = await createSharedHarness();
-		const second = await createSharedHarness(first.prefix);
-		const firstStores = await first.adapter.connect();
-		const secondStores = await second.adapter.connect();
-		let calls = 0;
-		let release: (() => void) | undefined;
-		const snapshot = () => {
-			calls++;
-			return new Promise<void>((resolve) => {
-				release = resolve;
-			});
-		};
-		const sessionKey = 'agent-session:["agent-1","default","default"]';
-		const deletions = [
-			firstStores.executionStore.submissions.deleteSession(sessionKey, snapshot),
-			secondStores.executionStore.submissions.deleteSession(sessionKey, snapshot),
-		];
-		while (!release) await new Promise((resolve) => setTimeout(resolve, 1));
-		release();
-		await Promise.all(deletions);
-		expect(calls).toBe(1);
-		await cleanupPrefix(first, [second]);
-	});
-
-	it('inserts one stream segment when writers race', async () => {
-		const stores = await createHarness();
-		const results = await Promise.all([
-			stores.executionStore.submissions.appendStreamChunkSegment('stream', 0, 'first'),
-			stores.executionStore.submissions.appendStreamChunkSegment('stream', 0, 'second'),
-		]);
-		expect(results.filter(Boolean)).toHaveLength(1);
-		expect(await stores.executionStore.submissions.getStreamChunkSegments('stream')).toHaveLength(
-			1,
-		);
-		await cleanupHarness();
 	});
 
 	it('orders concurrent event appends from independent adapters and rejects appends after close', async () => {
@@ -236,54 +176,6 @@ describeRedis('redis() concurrency', () => {
 			{ data: { value: 'same' }, offset: second },
 		]);
 		await cleanupHarness();
-	});
-
-	it('loads only complete published session generations across independent adapters', async () => {
-		const first = await createSharedHarness();
-		const second = await createSharedHarness(first.prefix);
-		const firstSessions = (await first.adapter.connect()).executionStore.sessions;
-		const secondSessions = (await second.adapter.connect()).executionStore.sessions;
-		const saves = Array.from({ length: 10 }, (_, index) =>
-			firstSessions.save('session', sessionData(String(index))),
-		);
-		const loads = Array.from({ length: 20 }, async () => {
-			const value = await secondSessions.load('session');
-			if (value) expect(value.metadata.label).toMatch(/^\d$/);
-		});
-		await Promise.all([...saves, ...loads]);
-		expect(await secondSessions.load('session')).not.toBeNull();
-		await cleanupPrefix(first, [second]);
-	});
-
-	it('rejects staging when a pipeline command fails and keeps the published generation', async () => {
-		const target = await createSharedHarness();
-		const base = createRunner(target.client);
-		let fail = false;
-		const adapter = redis(
-			{
-				...base,
-				pipeline: async (commands) => {
-					if (fail)
-						return commands.map((_, index) =>
-							index === 1 ? new Error('injected pipeline failure') : 1,
-						);
-					const results = await base.pipeline?.(commands);
-					if (!results) throw new Error('Missing pipeline results.');
-					return results;
-				},
-				close: () => undefined,
-			},
-			{ keyPrefix: target.prefix, inspectServer: false },
-		);
-		const sessions = (await adapter.connect()).executionStore.sessions;
-		await sessions.save('session', sessionData('first'));
-		fail = true;
-		await expect(sessions.save('session', sessionData('second'))).rejects.toThrow(
-			'injected pipeline failure',
-		);
-		expect((await sessions.load('session'))?.metadata.label).toBe('first');
-		await adapter.close?.();
-		await cleanupPrefix(target);
 	});
 
 	it('converges concurrent endRun indexes from independent adapters', async () => {
@@ -321,12 +213,23 @@ describeRedis('redis() concurrency', () => {
 });
 
 describeRedis('redis() migration', () => {
-	it('migrates schema version 2 to 3', async () => {
+	it('rejects unversioned Flue persistence without stamping it', async () => {
+		if (!redisUrl) throw new TypeError('TEST_REDIS_URL is required.');
+		const client = createClient({ url: redisUrl });
+		await client.connect();
+		const prefix = `flue-test:${randomUUID()}`;
+		await client.set(`${prefix}:run:legacy`, '{}');
+		const adapter = redis(createRunner(client), { keyPrefix: prefix, inspectServer: false });
+		await expect(adapter.migrate?.()).rejects.toThrowError(PersistedSchemaVersionError);
+		expect(await client.exists(`${prefix}:meta`)).toBe(0);
+		await client.del(`${prefix}:run:legacy`);
+		await adapter.close?.();
+	});
+	it('rejects an earlier schema version', async () => {
 		const stores = await createHarness();
 		void stores;
 		await harness?.client.hSet(`${harness?.prefix}:meta`, 'schemaVersion', '2');
-		await harness?.adapter.migrate?.();
-		expect(await harness?.client.hGet(`${harness?.prefix}:meta`, 'schemaVersion')).toBe('3');
+		await expect(harness?.adapter.migrate?.()).rejects.toThrowError(PersistedSchemaVersionError);
 		await cleanupHarness();
 	});
 	it('rejects a newer schema version', async () => {

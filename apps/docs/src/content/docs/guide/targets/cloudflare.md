@@ -22,7 +22,7 @@ src/workflows/translate.ts   ->  FlueTranslateWorkflow
 
 The class name is how Cloudflare identifies the Durable Object in migrations. The binding is how your application code accesses the Durable Object namespace at runtime through `env`.
 
-Agent session state, accepted submissions, and workflow run history are stored in the owning Durable Object's SQLite storage automatically. The Cloudflare target does not use `db.ts`; a source-root `db.ts` is rejected at build time.
+Canonical agent conversation streams, immutable attachments, accepted submissions, and workflow run history are stored in the owning Durable Object's SQLite storage automatically. The Cloudflare target does not use `db.ts`; a source-root `db.ts` is rejected at build time.
 
 Do not hand-author Flue's generated `FLUE_*` bindings in `wrangler.jsonc`. Declare migrations for generated classes, and declare bindings only for application-owned resources such as your own Durable Objects, R2 buckets, Queues, Hyperdrive configs, Browser Rendering bindings, or Send Email bindings.
 
@@ -101,13 +101,13 @@ Cloudflare agents durably admit direct HTTP prompts together with `dispatch(...)
 
 ```txt
 direct HTTP prompt ─────────────────────┐
-                                        ├→ durable per-session queue → stored session history
+                                        ├→ durable per-instance queue → canonical stream
 dispatch(...) input ────────────────────┘
 ```
 
 The submitting connection observes the work but does not own it. If a client disconnects after admission, backend work can continue. Agent events are durably stored and can be replayed from any offset via the Durable Streams protocol.
 
-When a Durable Object resumes after interruption, Flue checks stored input and session history before deciding what to do next. It requeues only when it can prove the input was not applied, recognizes already-completed output, and records an interruption instead of blindly repeating uncertain model or tool work.
+When a Durable Object resumes after interruption, Flue decides what to do next from the stored input and canonical conversation progress. It requeues only when it can prove the input was not applied, recognizes already-completed output, and records an interruption instead of blindly repeating uncertain model or tool work.
 
 For the full recovery model, see [Durable Agents](/docs/concepts/durable-execution/).
 

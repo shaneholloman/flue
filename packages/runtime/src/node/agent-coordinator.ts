@@ -4,29 +4,30 @@ import type {
 	AgentSubmissionStore,
 } from '../agent-execution-store.ts';
 import { LEASE_DURATION_MS } from '../agent-execution-store.ts';
+import { ConversationRecordWriter } from '../conversation-writer.ts';
 import {
 	type AgentSubmissionInput,
 	type AttachedAgentSubmissionAdmission,
 	createAgentSubmissionObserverRegistry,
 	createDirectAgentSubmissionInput,
+	createDispatchAgentSubmissionInput,
+	materializeAgentSubmissionSession,
 	processSubmission,
 	reconcileInterruptedSubmission,
 	submissionSyntheticRequest,
 } from '../runtime/agent-submissions.ts';
+import type { AttachmentStore } from '../runtime/attachment-store.ts';
+import type { ConversationStreamStore } from '../runtime/conversation-stream-store.ts';
 import type { AgentInteractionStart } from '../runtime/dev-lifecycle-logger.ts';
 import type { DispatchInput, DispatchQueue } from '../runtime/dispatch-queue.ts';
 import { agentStreamPath } from '../runtime/event-stream-store.ts';
 import type { CreateAgentContextFn } from '../runtime/handle-agent.ts';
 import type { RuntimeActivityGate, RuntimeActivityLease } from '../runtime/runtime-activity-gate.ts';
-import { isStreamExcludedEvent } from '../runtime/run-store.ts';
-import { assertProductEventV3 } from '../product-event.ts';
-import { deleteSessionTree } from '../session.ts';
 import type {
-	AttachedAgentEvent,
 	AgentDefinition,
+	AttachedAgentEvent,
 	DirectAgentPayload,
 	DispatchReceipt,
-	SessionStore,
 } from '../types.ts';
 
 export interface NodeAgentCoordinator {
@@ -59,8 +60,8 @@ export interface NodeAgentCoordinator {
 /**
  * Create a `DispatchQueue` backed by a `NodeAgentCoordinator`.
  *
- * Dispatches go through proper SQL admission, claim, journal callbacks,
- * and settlement instead of fire-and-forget inline processing. The
+ * Dispatches go through proper SQL admission, claim, and settlement
+ * instead of fire-and-forget inline processing. The
  * coordinator also reconciles interrupted work from a previous process
  * on startup and drains queued submissions after each dispatch.
  */
@@ -93,15 +94,17 @@ export function createNodeDispatchQueue(coordinator: NodeAgentCoordinator): Disp
 
 export function createNodeAgentCoordinator(options: {
 	submissions: AgentSubmissionStore;
-	sessions: SessionStore;
 	agents: ReadonlyArray<{ name: string; definition: AgentDefinition }>;
 	createContext: CreateAgentContextFn;
-	eventStreamStore: import('../runtime/event-stream-store.ts').EventStreamStore;
+	conversationStreamStore?: ConversationStreamStore;
+	attachmentStore?: AttachmentStore;
 	onInteractionStart?: (interaction: AgentInteractionStart) => void;
 	activityGate?: RuntimeActivityGate;
 }): NodeAgentCoordinator {
-	const { submissions, sessions, agents, createContext, eventStreamStore, onInteractionStart, activityGate } = options;
+	const { submissions, agents, createContext, conversationStreamStore, attachmentStore, onInteractionStart, activityGate } = options;
 	const observers = createAgentSubmissionObserverRegistry();
+	const conversationWriters = new Map<string, Promise<ConversationRecordWriter>>();
+	const conversationMaterializations = new Map<string, Promise<void>>();
 
 	// ── Lease ownership ──────────────────────────────────────────────────
 
@@ -165,7 +168,29 @@ export function createNodeAgentCoordinator(options: {
 
 	// ── Helpers ──────────────────────────────────────────────────────────
 
-	function makeSubmissionContext(input: AgentSubmissionInput) {
+	function getConversationWriter(input: AgentSubmissionInput): Promise<ConversationRecordWriter | undefined> {
+		if (!conversationStreamStore) return Promise.resolve(undefined);
+		const path = agentStreamPath(input.agent, input.id);
+		let writer = conversationWriters.get(path);
+		if (!writer) {
+			writer = ConversationRecordWriter.create({
+				store: conversationStreamStore,
+				path,
+				identity: { agentName: input.agent, instanceId: input.id },
+				producerId: ownerId,
+				onFailed: () => {
+					if (conversationWriters.get(path) === writer) conversationWriters.delete(path);
+				},
+			});
+			conversationWriters.set(path, writer);
+			void writer.catch(() => {
+				if (conversationWriters.get(path) === writer) conversationWriters.delete(path);
+			});
+		}
+		return writer;
+	}
+
+	function makeSubmissionContext(input: AgentSubmissionInput, writer: ConversationRecordWriter | undefined) {
 		return (dispatchId: string | undefined) => {
 			const ctx = createContext({
 				id: input.id,
@@ -173,15 +198,39 @@ export function createNodeAgentCoordinator(options: {
 				request: submissionSyntheticRequest(input),
 				dispatchId,
 			});
-			// Subscribe to events for durable agent event persistence.
-			// createStream is called before processSubmission (see spawnSubmissionTask).
-			const streamPath = agentStreamPath(input.agent, input.id);
-			ctx.subscribeEvent(async (event) => {
-				if (isStreamExcludedEvent(event) || event.type === 'submission_settled') return;
-				await eventStreamStore.appendEvent(streamPath, event);
-			});
+			ctx.setConversationWriter?.(writer);
+			ctx.setAttachmentStore?.(attachmentStore);
 			return ctx;
 		};
+	}
+
+	function materializeSubmissionConversation(
+		input: AgentSubmissionInput,
+		agent: AgentDefinition,
+	): Promise<void> {
+		const path = agentStreamPath(input.agent, input.id);
+		const previous = conversationMaterializations.get(path) ?? Promise.resolve();
+		const materialized = previous.then(async () => {
+			const writer = await getConversationWriter(input);
+			const ctx = makeSubmissionContext(input, writer)(
+				input.kind === 'dispatch' ? input.dispatchId : undefined,
+			);
+			await materializeAgentSubmissionSession(ctx, agent, input, attachmentStore);
+		});
+		conversationMaterializations.set(path, materialized);
+		void materialized.then(
+			() => {
+				if (conversationMaterializations.get(path) === materialized) {
+					conversationMaterializations.delete(path);
+				}
+			},
+			() => {
+				if (conversationMaterializations.get(path) === materialized) {
+					conversationMaterializations.delete(path);
+				}
+			},
+		);
+		return materialized;
 	}
 
 	function resolveAgent(name: string): AgentDefinition {
@@ -199,23 +248,14 @@ export function createNodeAgentCoordinator(options: {
 	function spawnSubmissionTask(claimed: AgentSubmission): void {
 		const controller = new AbortController();
 		const task = (async () => {
-			// Ensure the agent event stream exists before processing.
-			// createStream is idempotent — safe to call on every submission.
-			// Must complete before processSubmission so appendEvent calls
-			// in the subscribeEvent callback don't hit a missing stream.
-			await eventStreamStore.createStream(agentStreamPath(claimed.input.agent, claimed.input.id));
+			const conversationWriter = await getConversationWriter(claimed.input);
 			return processSubmission({
 				submissions,
 				submission: claimed,
 				resolveAgent,
-				createContext: makeSubmissionContext(claimed.input),
+				createContext: makeSubmissionContext(claimed.input, conversationWriter),
 				observers,
-				deliverTerminalEvent: (terminal) =>
-					eventStreamStore.appendEventOnce(
-						agentStreamPath(claimed.input.agent, claimed.input.id),
-						terminal.eventKey,
-						terminal.event,
-					),
+				conversationWriter,
 				onInteractionStart,
 				signal: controller.signal,
 				isShutdownAbort: (error) =>
@@ -252,6 +292,7 @@ export function createNodeAgentCoordinator(options: {
 	 * Returns whether any progress was made.
 	 */
 	async function runClaimPass(): Promise<boolean> {
+		await reconcileUnreadySubmissions();
 		// Periodically scan for expired leases from other coordinators.
 		await periodicLeaseScan();
 		const runnable = await submissions.listRunnableSubmissions();
@@ -398,7 +439,7 @@ export function createNodeAgentCoordinator(options: {
 	 * `periodicLeaseScan` (started by `ensureClaimLoop` just before the
 	 * direct call) would each list the same expired submissions and run
 	 * `reconcileInterruptedSubmission` twice per submission with
-	 * independent fresh Sessions — the journal-attempt CAS picks one
+	 * independent fresh Sessions — the attempt-replacement CAS picks one
 	 * winner, and the loser can append a spurious interruption advisory
 	 * to session history before its settlement CAS is rejected.
 	 */
@@ -409,27 +450,55 @@ export function createNodeAgentCoordinator(options: {
 		return reconcilePassInFlight;
 	}
 
+	async function reconcileUnreadySubmissions(): Promise<void> {
+		for (const submission of await submissions.listUnreadySubmissions()) {
+			const agent = agents.find((record) => record.name === submission.input.agent)?.definition;
+			if (!agent) {
+				console.error('[flue:submission-reconciliation]', {
+					submissionId: submission.submissionId,
+					operation: 'materialize_submission',
+					outcome: 'agent_unavailable',
+				});
+				continue;
+			}
+			try {
+				await materializeSubmissionConversation(submission.input, agent);
+				await submissions.markSubmissionCanonicalReady(submission.submissionId);
+			} catch (error) {
+				console.error(
+					'[flue:submission-reconciliation]',
+					{
+						submissionId: submission.submissionId,
+						operation: 'materialize_submission',
+						outcome: 'failed',
+					},
+					error,
+				);
+			}
+		}
+	}
+
 	async function runReconciliationPass(): Promise<void> {
-		for (const terminal of await submissions.listPendingTerminalOutboxes()) {
-			assertProductEventV3(terminal.event);
-			const submission = await submissions.getSubmission(terminal.submissionId);
+		await reconcileUnreadySubmissions();
+		for (const settlement of await submissions.listPendingSubmissionSettlements()) {
+			const submission = await submissions.getSubmission(settlement.submissionId);
 			if (!submission || submission.kind !== 'direct') continue;
-			const streamPath = agentStreamPath(submission.input.agent, submission.input.id);
-			await eventStreamStore.createStream(streamPath);
-			const offset = terminal.offset ?? (await eventStreamStore.appendEventOnce(streamPath, terminal.eventKey, terminal.event));
-			const attempt = { submissionId: terminal.submissionId, attemptId: terminal.attemptId };
-			await submissions.recordSubmissionTerminalOffset(attempt, terminal.eventKey, offset);
-			if (await submissions.finalizeSubmissionTerminal(attempt, terminal.eventKey)) {
-				const journal = await submissions.getTurnJournal(terminal.submissionId);
-				if (journal?.streamKey) await submissions.deleteStreamChunkSegments(journal.streamKey);
-				const event = terminal.event as {
-					outcome?: 'completed' | 'failed';
-					result?: unknown;
-					error?: { message?: string };
-				};
-				if (event.outcome === 'completed') observers.complete(terminal.submissionId, event.result);
-				if (event.outcome === 'failed') {
-					observers.fail(terminal.submissionId, new Error(event.error?.message ?? 'Agent submission failed.'));
+			if (activeSubmissions.has(submission.submissionId) || submission.leaseExpiresAt > Date.now()) {
+				continue;
+			}
+			const writer = await getConversationWriter(submission.input);
+			if (!writer) continue;
+			const attempt = { submissionId: settlement.submissionId, attemptId: settlement.attemptId };
+			const canonical = await writer.getRecord(settlement.recordId);
+			if (!canonical) await writer.append([settlement.record], { submission: attempt });
+			else if (JSON.stringify(canonical) !== JSON.stringify(settlement.record)) {
+				throw new Error('[flue] Pending settlement does not match its canonical record. Clear incompatible beta persistence.');
+			}
+			if (await submissions.finalizeSubmissionSettlement(attempt, settlement.recordId)) {
+				if (settlement.record.outcome === 'completed') observers.complete(settlement.submissionId, settlement.record.result);
+				if (settlement.record.outcome === 'failed') {
+					const error = settlement.record.error as { message?: string } | undefined;
+					observers.fail(settlement.submissionId, new Error(error?.message ?? 'Agent submission failed.'));
 				}
 			}
 		}
@@ -451,28 +520,14 @@ export function createNodeAgentCoordinator(options: {
 				continue;
 			}
 			try {
-				// Ensure the agent event stream exists (idempotent, normally
-				// created at first accepted processing) so a settlement event
-				// emitted during reconciliation lands durably even when the
-				// previous process died before creating it. Best-effort:
-				// settlement must never depend on event-stream plumbing.
-				await eventStreamStore
-					.createStream(agentStreamPath(submission.input.agent, submission.input.id))
-					.catch((error) => {
-						console.error('[flue:event-stream] createStream failed:', error);
-					});
+				const conversationWriter = await getConversationWriter(submission.input);
 				const reconciled = await reconcileInterruptedSubmission(
 					submissions,
 					submission,
 					agent,
-					makeSubmissionContext(submission.input),
-					(terminal) =>
-						eventStreamStore.appendEventOnce(
-							agentStreamPath(submission.input.agent, submission.input.id),
-							terminal.eventKey,
-							terminal.event,
-						),
+					makeSubmissionContext(submission.input, conversationWriter),
 					{ ownerId, leaseExpiresAt: Date.now() + LEASE_DURATION_MS },
+					conversationWriter,
 				);
 				if (reconciled.disposition === 'replacement') {
 					spawnSubmissionTask(reconciled.submission);
@@ -500,33 +555,12 @@ export function createNodeAgentCoordinator(options: {
 		}
 	}
 
-	/**
-	 * Resume session deletions interrupted by a process crash. A durable
-	 * deletion marker written before the crash blocks every admission for
-	 * that session until deletion completes, so re-run the (idempotent)
-	 * deletion to clear it. Failures are logged and left for the next
-	 * startup; the marker keeps the session safely blocked meanwhile.
-	 */
-	async function resumePendingSessionDeletions(): Promise<void> {
-		for (const sessionKey of await submissions.listPendingSessionDeletions()) {
-			try {
-				await submissions.deleteSession(sessionKey, () => deleteSessionTree(sessions, sessionKey));
-			} catch (error) {
-				console.error(
-					'[flue:session-deletion]',
-					{ sessionKey, operation: 'resume_session_deletion', outcome: 'failed' },
-					error,
-				);
-			}
-		}
-	}
-
 	// ── Public interface ─────────────────────────────────────────────────
 
 	return {
 		async reconcileSubmissions() {
-			await resumePendingSessionDeletions();
 			if (!(await submissions.hasUnsettledSubmissions())) return;
+			await reconcileUnreadySubmissions();
 			// Start the claim loop first so that settlement wakes from
 			// reconciled submissions are properly received.
 			ensureClaimLoop();
@@ -551,11 +585,17 @@ export function createNodeAgentCoordinator(options: {
 					activityLease?.release();
 					return admission;
 				}
+				let submission = admission.submission;
+				if (submission.canonicalReadyAt === null) {
+					await materializeSubmissionConversation(createDispatchAgentSubmissionInput(input), agent);
+					submission =
+						(await submissions.markSubmissionCanonicalReady(submission.submissionId)) ?? submission;
+				}
 
-				if (activityLease) activityLeases.set(admission.submission.submissionId, activityLease);
+				if (activityLease) activityLeases.set(submission.submissionId, activityLease);
 				ensureClaimLoop();
 				wake();
-				return admission;
+				return { kind: 'submission', submission };
 			} catch (error) {
 				activityLease?.release();
 				throw error;
@@ -587,12 +627,19 @@ export function createNodeAgentCoordinator(options: {
 
 				const attachment = observers.attach(input.submissionId, { onEvent });
 				try {
-					await submissions.admitDirect(input);
+					const admitted = await submissions.admitDirect(input);
+					if (admitted.canonicalReadyAt === null) {
+						await materializeSubmissionConversation(input, agent);
+						const ready = await submissions.markSubmissionCanonicalReady(input.submissionId);
+						if (!ready) throw new Error('[flue] Direct admission disappeared before canonical readiness.');
+					}
+					const writer = await getConversationWriter(input);
+					const offset = writer?.offset ?? '-1';
 					if (activityLease) activityLeases.set(input.submissionId, activityLease);
 					ensureClaimLoop();
 					wake();
-					if (!waitForResult) return { submissionId: input.submissionId };
-					return { submissionId: input.submissionId, result: await attachment.completion };
+					if (!waitForResult) return { submissionId: input.submissionId, offset };
+					return { submissionId: input.submissionId, offset, result: await attachment.completion };
 				} catch (error) {
 					activityLease?.release();
 					observers.fail(input.submissionId, error);

@@ -8,9 +8,9 @@ You are an AI coding agent configuring MongoDB-backed persistence for a Flue
 project using the first-party `@flue/mongodb` adapter and the official `mongodb`
 driver.
 
-This stores Flue agent sessions, accepted submissions, workflow runs, event
-streams, and persisted image chunks. It does not store application business
-data.
+This stores canonical agent conversation streams, immutable attachments,
+accepted submissions, workflow runs, and event streams.
+It does not store application business data.
 
 ## Check the target and deployment
 
@@ -242,12 +242,14 @@ transaction publishes a manifest. Failed or abandoned staged generations are
 cleaned up later. Do not bypass this path by embedding large runtime values in
 custom collection documents.
 
-The adapter stores session generations and entries, permanent session guards,
-durable submissions and recovery journals, leases and deletion receipts,
-workflow runs and indexes, event streams, and persisted image chunks. It does
-not store sandbox files, external API side effects, credentials, or
-application-owned business records. Session-tree cleanup callbacks remain
-idempotent because an expired lease can cause the callback to run again.
+The adapter stores canonical conversation streams, immutable external attachments,
+durable submissions and recovery journals, workflow runs and indexes, and event
+streams. The canonical stream is the sole transcript and is replayed from its
+beginning; replay acceleration and persisted-log compaction are deferred. Sessions
+append for the agent-instance lifetime, with no per-session deletion. Whole-instance
+stream and attachment deletion methods are low-level primitives, not a promise of
+public orchestration. It does not store
+sandbox files, external API effects, credentials, or application business data.
 
 ## Verify
 

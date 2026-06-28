@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { PersistedSchemaVersionError } from '@flue/runtime/adapter';
 import {
+	defineAttachmentStoreContractTests,
+	defineConversationStreamStoreContractTests,
 	defineEventStreamStoreContractTests,
 	defineRunStoreContractTests,
 	defineStoreContractTests,
@@ -244,6 +246,25 @@ describeMongo('MongoDB shared contracts', () => {
 		},
 		cleanup,
 	});
+	defineAttachmentStoreContractTests('MongoDB AttachmentStore', {
+		async create() {
+			return (await stores()).attachmentStore;
+		},
+		cleanup,
+	});
+	defineConversationStreamStoreContractTests('MongoDB ConversationStreamStore', {
+		async create() {
+			const connected = await stores();
+			if (!connected.conversationStreamStore) {
+				throw new Error('Expected MongoDB conversation stream store.');
+			}
+			return {
+				stream: connected.conversationStreamStore,
+				executionStore: connected.executionStore,
+			};
+		},
+		cleanup,
+	});
 });
 
 describeMongo('mongodb() integration', () => {
@@ -281,19 +302,6 @@ describeMongo('mongodb() integration', () => {
 		await first.adapter.close?.();
 		await second.close?.();
 	});
-	it('keeps the first stream segment under concurrent writers', async () => {
-		const value = await stores();
-		const s = value.executionStore.submissions;
-		expect(
-			(
-				await Promise.all([
-					s.appendStreamChunkSegment('x', 0, 'a'),
-					s.appendStreamChunkSegment('x', 0, 'b'),
-				])
-			).filter(Boolean),
-		).toHaveLength(1);
-		await cleanup();
-	});
 	it('orders concurrent event appends and rejects append after close', async () => {
 		const value = await stores();
 		await value.eventStreamStore.createStream('x');
@@ -305,19 +313,19 @@ describeMongo('mongodb() integration', () => {
 		await expect(value.eventStreamStore.appendEvent('x', {})).rejects.toThrow();
 		await cleanup();
 	});
-	it('migrates schema version 2 to 3', async () => {
+	it('rejects schema version 2 without migrating it', async () => {
 		const value = await stores();
 		void value;
 		if (!harness) throw new TypeError('Harness is required.');
 		await harness.db
 			.collection<{ _id: string; value: number }>('flue_meta')
 			.updateOne({ _id: 'schema_version' }, { $set: { value: 2 } });
-		await harness.adapter.migrate?.();
+		await expect(harness.adapter.migrate?.()).rejects.toThrow(PersistedSchemaVersionError);
 		expect(
 			await harness.db
 				.collection<{ _id: string; value: number }>('flue_meta')
 				.findOne({ _id: 'schema_version' }),
-		).toMatchObject({ value: 3 });
+		).toMatchObject({ value: 2 });
 		await cleanup();
 	});
 	it('rejects a newer schema version', async () => {

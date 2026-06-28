@@ -1,24 +1,22 @@
 /**
  * libSQL / Turso persistence adapter.
  *
- * Implements {@link AgentSubmissionStore}, {@link SessionStore},
- * {@link RunStore}, and {@link EventStreamStore} against a libSQL / Turso
- * database using SQLite-dialect parameterised queries (`?` placeholders).
+ * Implements {@link AgentSubmissionStore}, {@link RunStore}, and
+ * {@link EventStreamStore} against a libSQL / Turso database using
+ * SQLite-dialect parameterised queries (`?` placeholders).
  *
  * The adapter accepts any async SQL runner conforming to {@link LibsqlRunner}
  * so that an application can supply its own configured `@libsql/client`, and
  * tests can substitute an in-memory client without pulling in a real server.
  */
 
+import type { WorkflowRunPointer } from '@flue/runtime';
 import type {
 	AgentAttemptMarker,
 	AgentDispatchAdmission,
 	AgentSubmission,
 	AgentSubmissionStore,
-	AgentTurnJournal,
-	AgentTurnJournalPhase,
 	CreateRunInput,
-	CreateTurnJournalInput,
 	DirectAgentSubmissionInput,
 	DispatchAgentSubmissionInput,
 	DispatchInput,
@@ -36,12 +34,9 @@ import type {
 	RunRecord,
 	RunStatus,
 	RunStore,
-	SessionData,
-	SessionStore,
 	SubmissionAttemptRef,
 	SubmissionClaimRef,
 } from '@flue/runtime/adapter';
-import type { WorkflowRunPointer } from '@flue/runtime';
 import {
 	assertSupportedFlueSchemaVersion,
 	clampLimit,
@@ -52,12 +47,10 @@ import {
 	DURABILITY_DEFAULT_MAX_ATTEMPTS,
 	DURABILITY_DEFAULT_TIMEOUT_MS,
 	decodeRunCursor,
-	deduplicateSessionDeletion,
 	encodeRunCursor,
 	FLUE_SCHEMA_VERSION,
 	formatOffset,
 	hydratePersistedDirectSubmission,
-	hydratePersistedSessionEntry,
 	isSubmissionPayload,
 	LEASE_DURATION_MS,
 	MAX_LIST_LIMIT,
@@ -66,13 +59,13 @@ import {
 	parseAcceptedAt,
 	parseOffset,
 	prepareDirectSubmission,
-	prepareSessionEntry,
 	SUBMISSION_HARNESS_NAME,
 	SUBMISSION_SESSION_NAME,
 	samePersistedChunks,
-	sessionEntryChunkOwner,
 	submissionChunkOwner,
 } from '@flue/runtime/adapter';
+import { LibsqlAttachmentStore } from './libsql-attachment-store.ts';
+import { createLibsqlConversationStreamStore } from './libsql-conversation-store.ts';
 
 // ─── Bring-your-own-driver runner seam ──────────────────────────────────────
 
@@ -83,7 +76,7 @@ type SqlRow = Record<string, unknown>;
  * A query over a configured libSQL driver: a SQL string with `?` placeholders
  * plus positional parameters, resolving to result rows as plain objects.
  */
-export type LibsqlParameter = string | number | boolean | null;
+export type LibsqlParameter = string | number | boolean | ArrayBuffer | null;
 export type LibsqlQuery = (text: string, params?: LibsqlParameter[]) => Promise<SqlRow[]>;
 
 /**
@@ -164,11 +157,12 @@ export function libsql(runner: LibsqlRunner): PersistenceAdapter {
 		connect() {
 			return {
 				executionStore: {
-					sessions: new LibsqlSessionStore(runner),
 					submissions: new LibsqlSubmissionStore(runner),
 				},
 				runStore: new LibsqlRunStore(runner),
 				eventStreamStore: new LibsqlEventStreamStore(runner),
+				conversationStreamStore: createLibsqlConversationStreamStore(runner),
+				attachmentStore: new LibsqlAttachmentStore(runner),
 			};
 		},
 		async close() {
@@ -195,36 +189,17 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 		`);
 		const versionRows = await tx.query(`SELECT value FROM flue_meta WHERE key = 'schema_version'`);
 		const storedVersion = versionRows[0]?.value;
-		const migratingFromV2 = String(storedVersion) === '2' && FLUE_SCHEMA_VERSION === 3;
 		if (storedVersion === undefined || storedVersion === null) {
+			const existing = await tx.query(
+				`SELECT name FROM sqlite_master WHERE type = 'table' AND name LIKE 'flue_%' AND name <> 'flue_meta' LIMIT 1`,
+			);
+			if (existing.length > 0) assertSupportedFlueSchemaVersion('unversioned');
 			await tx.query(`INSERT OR IGNORE INTO flue_meta (key, value) VALUES ('schema_version', ?)`, [
 				String(FLUE_SCHEMA_VERSION),
 			]);
-		} else if (!migratingFromV2) {
+		} else {
 			assertSupportedFlueSchemaVersion(String(storedVersion));
 		}
-
-		await tx.query(`
-			CREATE TABLE IF NOT EXISTS flue_sessions (
-				id TEXT PRIMARY KEY,
-				data TEXT NOT NULL
-			)
-		`);
-
-		await tx.query(`
-			CREATE TABLE IF NOT EXISTS flue_session_entries (
-				session_id TEXT NOT NULL,
-				entry_id TEXT NOT NULL,
-				position INTEGER NOT NULL,
-				data TEXT NOT NULL,
-				PRIMARY KEY (session_id, entry_id)
-			)
-		`);
-
-		await tx.query(`
-			CREATE INDEX IF NOT EXISTS flue_session_entries_session_position_idx
-			ON flue_session_entries (session_id, position ASC)
-		`);
 
 		await tx.query(`
 			CREATE TABLE IF NOT EXISTS flue_image_chunks (
@@ -248,6 +223,7 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 				payload TEXT NOT NULL,
 				status TEXT NOT NULL,
 				accepted_at INTEGER NOT NULL,
+				canonical_ready_at INTEGER,
 				attempt_id TEXT,
 				input_applied_at INTEGER,
 				recovery_requested_at INTEGER,
@@ -258,58 +234,12 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 				max_retry INTEGER NOT NULL DEFAULT ${DURABILITY_DEFAULT_MAX_ATTEMPTS},
 				timeout_at INTEGER NOT NULL DEFAULT 0,
 				owner_id TEXT,
-				lease_expires_at INTEGER NOT NULL DEFAULT 0
+				lease_expires_at INTEGER NOT NULL DEFAULT 0,
+				settlement_record_id TEXT,
+				settlement_record TEXT
 			)
 		`);
 
-		for (const statement of [
-			`ALTER TABLE flue_agent_submissions ADD COLUMN terminal_key TEXT`,
-			`ALTER TABLE flue_agent_submissions ADD COLUMN terminal_event TEXT`,
-			`ALTER TABLE flue_agent_submissions ADD COLUMN terminal_offset TEXT`,
-		]) {
-			try {
-				await tx.query(statement);
-			} catch (error) {
-				if (!String(error).toLowerCase().includes('duplicate column')) throw error;
-			}
-		}
-
-		await tx.query(`
-			CREATE TABLE IF NOT EXISTS flue_agent_turn_journals (
-				submission_id TEXT PRIMARY KEY,
-				session_key TEXT NOT NULL,
-				kind TEXT NOT NULL,
-				attempt_id TEXT NOT NULL,
-				operation_id TEXT NOT NULL,
-				turn_id TEXT NOT NULL,
-				phase TEXT NOT NULL,
-				revision INTEGER NOT NULL,
-				created_at INTEGER NOT NULL,
-				updated_at INTEGER NOT NULL,
-				checkpoint_leaf_id TEXT,
-				tool_request_json TEXT,
-				stream_key TEXT,
-				stream_consumed_at INTEGER,
-				committed INTEGER NOT NULL DEFAULT 0,
-				committed_leaf_id TEXT
-			)
-		`);
-
-		await tx.query(`
-			CREATE TABLE IF NOT EXISTS flue_agent_stream_chunks (
-				stream_key TEXT NOT NULL,
-				segment_index INTEGER NOT NULL,
-				body TEXT NOT NULL,
-				PRIMARY KEY (stream_key, segment_index)
-			)
-		`);
-
-		await tx.query(`
-			CREATE TABLE IF NOT EXISTS flue_agent_session_deletions (
-				session_key TEXT PRIMARY KEY,
-				started_at INTEGER NOT NULL
-			)
-		`);
 
 		await tx.query(`
 			CREATE TABLE IF NOT EXISTS flue_agent_dispatch_receipts (
@@ -364,12 +294,6 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 			}
 		}
 
-		if (migratingFromV2) {
-			await tx.query(`UPDATE flue_meta SET value = ? WHERE key = 'schema_version'`, [
-				String(FLUE_SCHEMA_VERSION),
-			]);
-		}
-
 		await tx.query(`
 			CREATE INDEX IF NOT EXISTS flue_runs_status_started_idx
 			ON flue_runs (status, started_at DESC, run_id DESC)
@@ -395,6 +319,48 @@ async function ensureTables(runner: LibsqlRunner): Promise<void> {
 				data    TEXT NOT NULL,
 				PRIMARY KEY (path, seq)
 			)
+		`);
+		await tx.query(`
+			CREATE TABLE IF NOT EXISTS flue_conversation_streams (
+				path TEXT PRIMARY KEY,
+				identity_json TEXT NOT NULL,
+				next_offset INTEGER NOT NULL DEFAULT 0,
+				producer_id TEXT,
+				producer_epoch INTEGER NOT NULL DEFAULT 0,
+				next_producer_sequence INTEGER NOT NULL DEFAULT 0,
+				incarnation TEXT NOT NULL
+			)
+		`);
+		await tx.query(`
+			CREATE TABLE IF NOT EXISTS flue_conversation_stream_batches (
+				path TEXT NOT NULL,
+				seq INTEGER NOT NULL,
+				producer_id TEXT NOT NULL,
+				producer_epoch INTEGER NOT NULL,
+				producer_sequence INTEGER NOT NULL,
+				data TEXT NOT NULL,
+				submission_id TEXT,
+				attempt_id TEXT,
+				PRIMARY KEY (path, seq),
+				UNIQUE (path, producer_id, producer_epoch, producer_sequence)
+			)
+		`);
+		await tx.query(`
+			CREATE TABLE IF NOT EXISTS flue_attachments (
+				stream_path TEXT NOT NULL,
+				attachment_id TEXT NOT NULL,
+				mime_type TEXT NOT NULL,
+				byte_size INTEGER NOT NULL CHECK (byte_size >= 0),
+				digest TEXT NOT NULL,
+				conversation_id TEXT NOT NULL,
+				bytes BLOB NOT NULL,
+				created_at INTEGER NOT NULL,
+				PRIMARY KEY (stream_path, attachment_id)
+			)
+		`);
+		await tx.query(`
+			CREATE INDEX IF NOT EXISTS flue_attachments_conversation_idx
+			ON flue_attachments (stream_path, conversation_id, attachment_id)
 		`);
 		try {
 			await tx.query(`ALTER TABLE flue_event_stream_entries ADD COLUMN event_key TEXT`);
@@ -477,97 +443,6 @@ async function deleteLibsqlChunkOwner(
 	);
 }
 
-class LibsqlSessionStore implements SessionStore {
-	constructor(private runner: LibsqlRunner) {}
-
-	async save(id: string, data: SessionData): Promise<void> {
-		const { entries: sessionEntries, ...session } = data;
-		const entries = sessionEntries.map((entry, position) => {
-			const prepared = prepareSessionEntry(entry);
-			return { entry, position, data: JSON.stringify(prepared.value), chunks: prepared.chunks };
-		});
-		await this.runner.transaction(async (tx) => {
-			const chunkStore = createLibsqlChunkStore(tx);
-			await tx.query(
-				`INSERT INTO flue_sessions (id, data) VALUES (?, ?)
-				 ON CONFLICT (id) DO UPDATE SET data = excluded.data`,
-				[id, JSON.stringify(session)],
-			);
-			const existingRows = await tx.query(
-				'SELECT entry_id, position, data FROM flue_session_entries WHERE session_id = ?',
-				[id],
-			);
-			const existing = new Map(existingRows.map((row) => [row.entry_id, row]));
-			const retained = new Set<string>();
-			for (const { entry, position, data: entryData, chunks } of entries) {
-				retained.add(entry.id);
-				const current = existing.get(entry.id);
-				const owner = sessionEntryChunkOwner(id, entry.id);
-				const currentChunks = await chunkStore.read(owner);
-				const entryChanged = Number(current?.position) !== position || current?.data !== entryData;
-				const chunksChanged = !samePersistedChunks(currentChunks, chunks);
-				if (!entryChanged && !chunksChanged) continue;
-				if (entryChanged)
-					await tx.query(
-						`INSERT INTO flue_session_entries (session_id, entry_id, position, data)
-					 VALUES (?, ?, ?, ?)
-					 ON CONFLICT (session_id, entry_id) DO UPDATE SET
-					 position = excluded.position, data = excluded.data`,
-						[id, entry.id, position, entryData],
-					);
-				if (chunksChanged) await chunkStore.replace(owner, chunks);
-			}
-			for (const row of existingRows) {
-				if (typeof row.entry_id === 'string' && !retained.has(row.entry_id)) {
-					await chunkStore.delete(sessionEntryChunkOwner(id, row.entry_id));
-					await tx.query('DELETE FROM flue_session_entries WHERE session_id = ? AND entry_id = ?', [
-						id,
-						row.entry_id,
-					]);
-				}
-			}
-		});
-	}
-
-	async load(id: string): Promise<SessionData | null> {
-		return this.runner.transaction(async (tx) => {
-			const chunkStore = createLibsqlChunkStore(tx);
-			const rows = await tx.query('SELECT data FROM flue_sessions WHERE id = ? LIMIT 1', [id]);
-			const row = rows[0];
-			if (!row) return null;
-			if (typeof row.data !== 'string') {
-				throw new Error('[flue] Persisted session row is malformed.');
-			}
-			const session = JSON.parse(row.data) as Omit<SessionData, 'entries'>;
-			const entryRows = await tx.query(
-				'SELECT entry_id, data FROM flue_session_entries WHERE session_id = ? ORDER BY position ASC',
-				[id],
-			);
-			return {
-				...session,
-				entries: await Promise.all(
-					entryRows.map(async (entryRow) => {
-						if (typeof entryRow.entry_id !== 'string' || typeof entryRow.data !== 'string') {
-							throw new Error('[flue] Persisted session entry row is malformed.');
-						}
-						return hydratePersistedSessionEntry(
-							JSON.parse(entryRow.data),
-							await chunkStore.read(sessionEntryChunkOwner(id, entryRow.entry_id)),
-						);
-					}),
-				),
-			};
-		});
-	}
-
-	async delete(id: string): Promise<void> {
-		await this.runner.transaction(async (tx) => {
-			await createLibsqlChunkStore(tx).deleteOwner('session_entry', id);
-			await tx.query('DELETE FROM flue_session_entries WHERE session_id = ?', [id]);
-			await tx.query('DELETE FROM flue_sessions WHERE id = ?', [id]);
-		});
-	}
-}
 
 // ─── Submission store ───────────────────────────────────────────────────────
 
@@ -579,6 +454,7 @@ const submissionColumns = [
 	'payload',
 	'status',
 	'accepted_at',
+	'canonical_ready_at',
 	'attempt_id',
 	'input_applied_at',
 	'recovery_requested_at',
@@ -599,8 +475,6 @@ function prefixed(table: string): string {
 }
 
 class LibsqlSubmissionStore implements AgentSubmissionStore {
-	private pendingSessionDeletions = new Map<string, Promise<void>>();
-
 	constructor(private runner: LibsqlRunner) {}
 
 	// ── Query ────────────────────────────────────────────────────────────
@@ -620,17 +494,13 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 		});
 	}
 
-	async getTurnJournal(submissionId: string): Promise<AgentTurnJournal | null> {
+	async markSubmissionCanonicalReady(submissionId: string): Promise<AgentSubmission | null> {
 		const rows = await this.runner.query(
-			`SELECT submission_id, session_key, kind, attempt_id, operation_id, turn_id,
-			        phase, revision, created_at, updated_at, checkpoint_leaf_id,
-			        tool_request_json, stream_key, stream_consumed_at, committed, committed_leaf_id
-			 FROM flue_agent_turn_journals
-			 WHERE submission_id = ?
-			 LIMIT 1`,
-			[submissionId],
+			`UPDATE flue_agent_submissions SET canonical_ready_at = COALESCE(canonical_ready_at, ?)
+			 WHERE submission_id = ? AND status = 'queued' RETURNING ${submissionColumns}`,
+			[Date.now(), submissionId],
 		);
-		return rows[0] ? parseTurnJournal(rows[0]) : null;
+		return rows[0] ? this.getSubmission(submissionId) : null;
 	}
 
 	async hasUnsettledSubmissions(): Promise<boolean> {
@@ -640,12 +510,25 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 		return rows.length > 0;
 	}
 
+	async listUnreadySubmissions(): Promise<AgentSubmission[]> {
+		return this.runner.transaction(async (tx) => {
+			const rows = await tx.query(
+				`SELECT ${submissionColumns}
+				 FROM flue_agent_submissions
+				 WHERE status = 'queued' AND canonical_ready_at IS NULL
+				 ORDER BY sequence ASC`,
+			);
+			return this.parseOperationalRows(rows, 'queued', tx);
+		});
+	}
+
 	async listRunnableSubmissions(): Promise<AgentSubmission[]> {
 		return this.runner.transaction(async (tx) => {
 			const rows = await tx.query(
 				`SELECT ${prefixed('current_sub')}
 			 FROM flue_agent_submissions AS current_sub
 			 WHERE current_sub.status = 'queued'
+			   AND current_sub.canonical_ready_at IS NOT NULL
 			   AND NOT EXISTS (
 			     SELECT 1
 			     FROM flue_agent_submissions AS earlier
@@ -671,145 +554,7 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 		});
 	}
 
-	// ── Turn journal lifecycle ───────────────────────────────────────────
-
-	async beginTurnJournal(input: CreateTurnJournalInput): Promise<boolean> {
-		const now = Date.now();
-		const toolRequestJson =
-			input.toolRequest === undefined ? null : JSON.stringify(input.toolRequest);
-		const rows = await this.runner.query(
-			`INSERT INTO flue_agent_turn_journals
-			 (submission_id, session_key, kind, attempt_id, operation_id, turn_id,
-			  phase, revision, created_at, updated_at, checkpoint_leaf_id,
-			  tool_request_json, stream_key, stream_consumed_at, committed, committed_leaf_id)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, 1, ?, ?, ?, ?, NULL, NULL, 0, NULL)
-			 ON CONFLICT (submission_id) DO UPDATE SET
-			   attempt_id = excluded.attempt_id,
-			   operation_id = excluded.operation_id,
-			   turn_id = excluded.turn_id,
-			   phase = excluded.phase,
-			   revision = flue_agent_turn_journals.revision + 1,
-			   updated_at = excluded.updated_at,
-			   checkpoint_leaf_id = excluded.checkpoint_leaf_id,
-			   tool_request_json = excluded.tool_request_json,
-			   stream_key = NULL,
-			   stream_consumed_at = NULL,
-			   committed = 0,
-			   committed_leaf_id = NULL
-			 RETURNING submission_id`,
-			[
-				input.submissionId,
-				input.sessionKey,
-				input.kind,
-				input.attemptId,
-				input.operationId,
-				input.turnId,
-				input.phase,
-				now,
-				now,
-				input.checkpointLeafId ?? null,
-				toolRequestJson,
-			],
-		);
-		return rows.length > 0;
-	}
-
-	async updateTurnJournalPhase(
-		attempt: SubmissionAttemptRef,
-		phase: AgentTurnJournalPhase,
-		options: { checkpointLeafId?: string; toolRequest?: unknown; streamKey?: string } = {},
-	): Promise<boolean> {
-		const now = Date.now();
-		const rows = await this.runner.query(
-			`UPDATE flue_agent_turn_journals
-			 SET phase = ?, revision = revision + 1, updated_at = ?,
-			     checkpoint_leaf_id = COALESCE(?, checkpoint_leaf_id),
-			     tool_request_json = COALESCE(?, tool_request_json),
-			     stream_key = COALESCE(?, stream_key)
-			 WHERE submission_id = ? AND attempt_id = ? AND committed = 0
-			 RETURNING submission_id`,
-			[
-				phase,
-				now,
-				options.checkpointLeafId ?? null,
-				options.toolRequest === undefined ? null : JSON.stringify(options.toolRequest),
-				options.streamKey ?? null,
-				attempt.submissionId,
-				attempt.attemptId,
-			],
-		);
-		return rows.length > 0;
-	}
-
-	async commitTurnJournal(
-		attempt: SubmissionAttemptRef,
-		committedLeafId: string,
-	): Promise<boolean> {
-		const now = Date.now();
-		const rows = await this.runner.query(
-			`UPDATE flue_agent_turn_journals
-			 SET phase = 'committed', revision = revision + 1, updated_at = ?,
-			     committed = 1, committed_leaf_id = ?
-			 WHERE submission_id = ? AND attempt_id = ? AND committed = 0
-			 RETURNING submission_id`,
-			[now, committedLeafId, attempt.submissionId, attempt.attemptId],
-		);
-		return rows.length > 0;
-	}
-
-	async markStreamConsumed(attempt: SubmissionAttemptRef, streamKey: string): Promise<boolean> {
-		const now = Date.now();
-		const rows = await this.runner.query(
-			`UPDATE flue_agent_turn_journals
-			 SET revision = revision + 1, updated_at = ?, stream_consumed_at = ?
-			 WHERE submission_id = ? AND attempt_id = ? AND committed = 0
-			   AND stream_key = ? AND stream_consumed_at IS NULL
-			 RETURNING submission_id`,
-			[now, now, attempt.submissionId, attempt.attemptId, streamKey],
-		);
-		return rows.length > 0;
-	}
-
-	async appendStreamChunkSegment(
-		streamKey: string,
-		segmentIndex: number,
-		body: string,
-	): Promise<boolean> {
-		const rows = await this.runner.query(
-			`INSERT OR IGNORE INTO flue_agent_stream_chunks (stream_key, segment_index, body)
-			 VALUES (?, ?, ?)
-			 RETURNING stream_key`,
-			[streamKey, segmentIndex, body],
-		);
-		return rows.length > 0;
-	}
-
-	async getStreamChunkSegments(
-		streamKey: string,
-	): Promise<Array<{ segmentIndex: number; body: string }>> {
-		const rows = await this.runner.query(
-			`SELECT segment_index, body
-			 FROM flue_agent_stream_chunks
-			 WHERE stream_key = ?
-			 ORDER BY segment_index ASC`,
-			[streamKey],
-		);
-		return rows.map((row) => {
-			const segmentIndex = Number(row.segment_index);
-			if (!Number.isInteger(segmentIndex) || typeof row.body !== 'string') {
-				throw new Error('[flue] Persisted stream chunk row is malformed.');
-			}
-			return { segmentIndex, body: row.body };
-		});
-	}
-
-	async deleteStreamChunkSegments(streamKey: string): Promise<void> {
-		await this.runner.query('DELETE FROM flue_agent_stream_chunks WHERE stream_key = ?', [
-			streamKey,
-		]);
-	}
-
-	async replaceTurnJournalAttempt(
+	async replaceSubmissionAttempt(
 		attempt: SubmissionAttemptRef,
 		nextAttemptId: string,
 		lease?: { ownerId: string; leaseExpiresAt: number },
@@ -840,12 +585,6 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 						[nextAttemptId, now, attempt.submissionId, attempt.attemptId],
 					);
 			if (!subRows[0]) return null;
-			await tx.query(
-				`UPDATE flue_agent_turn_journals
-				 SET attempt_id = ?, revision = revision + 1, updated_at = ?
-				 WHERE submission_id = ? AND attempt_id = ? AND committed = 0`,
-				[nextAttemptId, now, attempt.submissionId, attempt.attemptId],
-			);
 			return parseSubmission(
 				subRows[0],
 				await createLibsqlChunkStore(tx).read(submissionChunkOwner(attempt.submissionId)),
@@ -882,6 +621,7 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 			     max_retry = ?, timeout_at = CASE WHEN timeout_at = 0 THEN ? ELSE timeout_at END,
 			     owner_id = ?, lease_expires_at = ?
 			 WHERE current.submission_id = ? AND current.status = 'queued'
+			   AND current.canonical_ready_at IS NOT NULL
 			   AND NOT EXISTS (
 			     SELECT 1
 			     FROM flue_agent_submissions AS earlier
@@ -955,22 +695,19 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 		return rows.length > 0;
 	}
 
-	async listPendingTerminalOutboxes(): Promise<any[]> {
-		const rows = await this.runner.query(`SELECT submission_id, session_key, attempt_id, terminal_key, terminal_event, terminal_offset FROM flue_agent_submissions WHERE kind = 'direct' AND status = 'terminalizing' ORDER BY sequence ASC`);
-		return rows.map((row) => ({ submissionId: String(row.submission_id), sessionKey: String(row.session_key), attemptId: String(row.attempt_id), eventKey: String(row.terminal_key), event: JSON.parse(String(row.terminal_event)), ...(row.terminal_offset != null ? { offset: String(row.terminal_offset) } : {}) }));
+	async listPendingSubmissionSettlements(): Promise<import('@flue/runtime/adapter').SubmissionSettlementObligation[]> {
+		const rows = await this.runner.query(`SELECT submission_id, session_key, attempt_id, settlement_record_id, settlement_record FROM flue_agent_submissions WHERE kind = 'direct' AND status = 'terminalizing' ORDER BY sequence ASC`);
+		return rows.map((row) => ({ submissionId: String(row.submission_id), sessionKey: String(row.session_key), attemptId: String(row.attempt_id), recordId: String(row.settlement_record_id), record: JSON.parse(String(row.settlement_record)) }));
 	}
-	async reserveSubmissionTerminal(attempt: SubmissionAttemptRef, terminal: { eventKey: string; event: unknown }): Promise<any | null> {
-		const data = JSON.stringify(terminal.event);
-		const rows = await this.runner.query(`UPDATE flue_agent_submissions SET status = 'terminalizing', terminal_key = ?, terminal_event = ? WHERE submission_id = ? AND kind = 'direct' AND status = 'running' AND attempt_id = ? AND owner_id IS NOT NULL AND terminal_key IS NULL RETURNING submission_id, session_key, attempt_id, terminal_key, terminal_event, terminal_offset`, [terminal.eventKey, data, attempt.submissionId, attempt.attemptId]);
-		const row = rows[0] ?? (await this.runner.query(`SELECT submission_id, session_key, attempt_id, terminal_key, terminal_event, terminal_offset FROM flue_agent_submissions WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ?`, [attempt.submissionId, attempt.attemptId]))[0];
-		return row?.terminal_key === terminal.eventKey && row?.terminal_event === data ? { submissionId: String(row.submission_id), sessionKey: String(row.session_key), attemptId: String(row.attempt_id), eventKey: String(row.terminal_key), event: JSON.parse(String(row.terminal_event)), ...(row.terminal_offset != null ? { offset: String(row.terminal_offset) } : {}) } : null;
+	async reserveSubmissionSettlement(attempt: SubmissionAttemptRef, settlement: { recordId: string; record: import('@flue/runtime/adapter').SubmissionSettledRecord }): Promise<import('@flue/runtime/adapter').SubmissionSettlementObligation | null> {
+		if (settlement.record.id !== settlement.recordId) return null;
+		const data = JSON.stringify(settlement.record);
+		const rows = await this.runner.query(`UPDATE flue_agent_submissions SET status = 'terminalizing', settlement_record_id = ?, settlement_record = ? WHERE submission_id = ? AND kind = 'direct' AND status = 'running' AND attempt_id = ? AND owner_id IS NOT NULL AND settlement_record_id IS NULL RETURNING submission_id, session_key, attempt_id, settlement_record_id, settlement_record`, [settlement.recordId, data, attempt.submissionId, attempt.attemptId]);
+		const row = rows[0] ?? (await this.runner.query(`SELECT submission_id, session_key, attempt_id, settlement_record_id, settlement_record FROM flue_agent_submissions WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ?`, [attempt.submissionId, attempt.attemptId]))[0];
+		return row?.settlement_record_id === settlement.recordId && row?.settlement_record === data ? { submissionId: String(row.submission_id), sessionKey: String(row.session_key), attemptId: String(row.attempt_id), recordId: String(row.settlement_record_id), record: JSON.parse(String(row.settlement_record)) } : null;
 	}
-	async recordSubmissionTerminalOffset(attempt: SubmissionAttemptRef, eventKey: string, offset: string): Promise<boolean> {
-		const rows = await this.runner.query(`UPDATE flue_agent_submissions SET terminal_offset = COALESCE(terminal_offset, ?) WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ? AND terminal_key = ? AND (terminal_offset IS NULL OR terminal_offset = ?) RETURNING submission_id`, [offset, attempt.submissionId, attempt.attemptId, eventKey, offset]);
-		return rows.length > 0;
-	}
-	async finalizeSubmissionTerminal(attempt: SubmissionAttemptRef, eventKey: string): Promise<boolean> {
-		const rows = await this.runner.query(`UPDATE flue_agent_submissions SET status = 'settled', settled_at = ? WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ? AND terminal_key = ? AND terminal_offset IS NOT NULL RETURNING submission_id`, [Date.now(), attempt.submissionId, attempt.attemptId, eventKey]);
+	async finalizeSubmissionSettlement(attempt: SubmissionAttemptRef, recordId: string): Promise<boolean> {
+		const rows = await this.runner.query(`UPDATE flue_agent_submissions SET status = 'settled', settled_at = ? WHERE submission_id = ? AND status = 'terminalizing' AND attempt_id = ? AND settlement_record_id = ? RETURNING submission_id`, [Date.now(), attempt.submissionId, attempt.attemptId, recordId]);
 		return rows.length > 0;
 	}
 
@@ -1065,19 +802,6 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 		});
 	}
 
-	// ── Deletion ─────────────────────────────────────────────────────────
-
-	deleteSession(sessionKey: string, deleteSessionTree: () => Promise<void>): Promise<void> {
-		return deduplicateSessionDeletion(this.pendingSessionDeletions, sessionKey, () =>
-			this.runSessionDeletion(sessionKey, deleteSessionTree),
-		);
-	}
-
-	async listPendingSessionDeletions(): Promise<string[]> {
-		const rows = await this.runner.query('SELECT session_key FROM flue_agent_session_deletions');
-		return rows.map((row) => String(row.session_key));
-	}
-
 	// ── Private ──────────────────────────────────────────────────────────
 
 	private async admitSubmission(
@@ -1105,19 +829,6 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 					const receipt = parseDispatchReceipt(receiptRows[0]);
 					return { kind: 'retained_receipt' as const, receipt };
 				}
-			}
-
-			// SQLite has no advisory locks; admission and session deletion are
-			// serialized by the surrounding transaction. Reject admission while
-			// a deletion marker exists for the session.
-			const deletingRows = await tx.query(
-				'SELECT 1 FROM flue_agent_session_deletions WHERE session_key = ? LIMIT 1',
-				[sessionKey],
-			);
-			if (deletingRows.length > 0) {
-				throw new Error(
-					'[flue] Durable agent submission admission is unavailable while this session is being deleted. Retry after deletion completes.',
-				);
 			}
 
 			await tx.query(
@@ -1160,103 +871,6 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 		});
 	}
 
-	private async runSessionDeletion(
-		sessionKey: string,
-		deleteSessionTree: () => Promise<void>,
-	): Promise<void> {
-		// Phase 1: check for active submissions and mark deletion.
-		const deletionStartedAt = Date.now();
-		await this.runner.transaction(async (tx) => {
-			const active = await tx.query(
-				`SELECT 1 FROM flue_agent_submissions
-				 WHERE session_key = ? AND status IN ('queued', 'running', 'terminalizing')
-				 LIMIT 1`,
-				[sessionKey],
-			);
-			if (active.length > 0) {
-				throw new Error(
-					'[flue] Session cannot be deleted while durable agent submissions are queued or running. Wait for accepted work to settle, then retry deletion.',
-				);
-			}
-			await tx.query(
-				`INSERT OR IGNORE INTO flue_agent_session_deletions (session_key, started_at) VALUES (?, ?)`,
-				[sessionKey, deletionStartedAt],
-			);
-		});
-
-		// Phase 2: delete the session tree (async, outside transaction).
-		try {
-			await deleteSessionTree();
-		} catch (error) {
-			// Remove the deletion marker so the session returns to a usable
-			// state. A persistent deleteSessionTree failure must not leave the
-			// marker indefinitely blocking future admissions.
-			await this.runner.query('DELETE FROM flue_agent_session_deletions WHERE session_key = ?', [
-				sessionKey,
-			]);
-			throw error;
-		}
-
-		// Phase 3: clean up settled submission rows and deletion marker.
-		// Re-read the deletion marker's started_at; if the marker is gone, a
-		// concurrent deletion run already completed phase 3 — nothing to do.
-		await this.runner.transaction(async (tx) => {
-			const deletionRows = await tx.query(
-				'SELECT started_at FROM flue_agent_session_deletions WHERE session_key = ?',
-				[sessionKey],
-			);
-			const deletionRow = deletionRows[0];
-			const startedAt = deletionRow != null ? Number(deletionRow.started_at) : NaN;
-			if (!deletionRow || !Number.isFinite(startedAt)) {
-				return;
-			}
-			await tx.query(
-				`INSERT OR IGNORE INTO flue_agent_dispatch_receipts (dispatch_id, accepted_at)
-				 SELECT submission_id, accepted_at
-				 FROM flue_agent_submissions
-				 WHERE session_key = ? AND kind = 'dispatch' AND status = 'settled'
-				   AND accepted_at <= ?`,
-				[sessionKey, startedAt],
-			);
-			// Clean up orphaned stream chunks for journals belonging to deleted submissions.
-			await tx.query(
-				`DELETE FROM flue_agent_stream_chunks
-				 WHERE stream_key IN (
-				   SELECT j.stream_key FROM flue_agent_turn_journals j
-				   INNER JOIN flue_agent_submissions s ON j.submission_id = s.submission_id
-				   WHERE s.session_key = ? AND s.status = 'settled' AND s.accepted_at <= ?
-				     AND j.stream_key IS NOT NULL
-				 )`,
-				[sessionKey, startedAt],
-			);
-			// Clean up orphaned turn journals for deleted submissions.
-			await tx.query(
-				`DELETE FROM flue_agent_turn_journals
-				 WHERE submission_id IN (
-				   SELECT submission_id FROM flue_agent_submissions
-				   WHERE session_key = ? AND status = 'settled' AND accepted_at <= ?
-				 )`,
-				[sessionKey, startedAt],
-			);
-			const deletedSubmissionRows = await tx.query(
-				`SELECT submission_id FROM flue_agent_submissions
-				 WHERE session_key = ? AND status = 'settled' AND accepted_at <= ?`,
-				[sessionKey, startedAt],
-			);
-			const submissionOwners = deletedSubmissionRows.flatMap((row) =>
-				typeof row.submission_id === 'string' ? [submissionChunkOwner(row.submission_id)] : [],
-			);
-			await createLibsqlChunkStore(tx).deleteMany(submissionOwners);
-			await tx.query(
-				`DELETE FROM flue_agent_submissions
-				 WHERE session_key = ? AND status = 'settled' AND accepted_at <= ?`,
-				[sessionKey, startedAt],
-			);
-			await tx.query('DELETE FROM flue_agent_session_deletions WHERE session_key = ?', [
-				sessionKey,
-			]);
-		});
-	}
 
 	private async parseOperationalRows(
 		rows: SqlRow[],
@@ -1299,7 +913,7 @@ class LibsqlSubmissionStore implements AgentSubmissionStore {
 	}
 }
 
-// ─── Submission / turn-journal row parsers ──────────────────────────────────
+// ─── Submission row parsers ─────────────────────────────────────────────────
 
 function parseDispatchReceipt(row: SqlRow): { submissionId: string; acceptedAt: number } {
 	const acceptedAt = Number(row.accepted_at);
@@ -1315,6 +929,7 @@ function parseDispatchReceipt(row: SqlRow): { submissionId: string; acceptedAt: 
 function parseSubmission(row: SqlRow, chunks: readonly PersistedChunkRow[]): AgentSubmission {
 	const sequence = Number(row.sequence);
 	const acceptedAt = Number(row.accepted_at);
+	const canonicalReadyAt = row.canonical_ready_at != null ? Number(row.canonical_ready_at) : null;
 	const attemptCount = Number(row.attempt_count);
 	const maxRetry = Number(row.max_retry);
 	const timeoutAt = Number(row.timeout_at);
@@ -1335,6 +950,7 @@ function parseSubmission(row: SqlRow, chunks: readonly PersistedChunkRow[]): Age
 		typeof row.payload !== 'string' ||
 		(row.status !== 'queued' && row.status !== 'running' && row.status !== 'terminalizing' && row.status !== 'settled') ||
 		!Number.isFinite(acceptedAt) ||
+		(canonicalReadyAt !== null && !Number.isFinite(canonicalReadyAt)) ||
 		// Status-specific invariants: queued rows must not have running fields,
 		// running rows must have attemptId and startedAt.
 		(row.status === 'queued' &&
@@ -1377,6 +993,7 @@ function parseSubmission(row: SqlRow, chunks: readonly PersistedChunkRow[]): Age
 		input,
 		status: row.status,
 		acceptedAt,
+		canonicalReadyAt,
 		...(attemptId !== undefined ? { attemptId } : {}),
 		...(inputAppliedAt !== undefined ? { inputAppliedAt } : {}),
 		...(recoveryRequestedAt !== undefined ? { recoveryRequestedAt } : {}),
@@ -1727,61 +1344,4 @@ class LibsqlEventStreamStore implements EventStreamStore {
 	}
 }
 
-// ─── Row parsers ────────────────────────────────────────────────────────────
 
-function parseTurnJournal(row: SqlRow): AgentTurnJournal {
-	const revision = Number(row.revision);
-	const createdAt = Number(row.created_at);
-	const updatedAt = Number(row.updated_at);
-	const committed = Number(row.committed);
-	const streamConsumedAt =
-		row.stream_consumed_at != null ? Number(row.stream_consumed_at) : undefined;
-
-	if (
-		typeof row.submission_id !== 'string' ||
-		typeof row.session_key !== 'string' ||
-		(row.kind !== 'dispatch' && row.kind !== 'direct') ||
-		typeof row.attempt_id !== 'string' ||
-		typeof row.operation_id !== 'string' ||
-		typeof row.turn_id !== 'string' ||
-		(row.phase !== 'before_provider' &&
-			row.phase !== 'provider_started' &&
-			row.phase !== 'tool_request_recorded' &&
-			row.phase !== 'committed') ||
-		!Number.isFinite(revision) ||
-		!Number.isFinite(createdAt) ||
-		!Number.isFinite(updatedAt) ||
-		(row.checkpoint_leaf_id != null && typeof row.checkpoint_leaf_id !== 'string') ||
-		(row.stream_key != null && typeof row.stream_key !== 'string') ||
-		(streamConsumedAt !== undefined && !Number.isFinite(streamConsumedAt)) ||
-		(committed !== 0 && committed !== 1) ||
-		(row.committed_leaf_id != null && typeof row.committed_leaf_id !== 'string')
-	) {
-		throw new Error('[flue] Persisted turn journal row is malformed.');
-	}
-
-	return {
-		submissionId: row.submission_id,
-		sessionKey: row.session_key,
-		kind: row.kind,
-		attemptId: row.attempt_id,
-		operationId: row.operation_id,
-		turnId: row.turn_id,
-		phase: row.phase,
-		revision,
-		createdAt,
-		updatedAt,
-		...(typeof row.checkpoint_leaf_id === 'string'
-			? { checkpointLeafId: row.checkpoint_leaf_id }
-			: {}),
-		...(typeof row.tool_request_json === 'string'
-			? { toolRequest: JSON.parse(row.tool_request_json) as unknown }
-			: {}),
-		...(typeof row.stream_key === 'string' ? { streamKey: row.stream_key } : {}),
-		...(streamConsumedAt !== undefined ? { streamConsumedAt } : {}),
-		committed: committed === 1,
-		...(typeof row.committed_leaf_id === 'string'
-			? { committedLeafId: row.committed_leaf_id }
-			: {}),
-	};
-}

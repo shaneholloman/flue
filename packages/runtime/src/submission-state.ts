@@ -15,21 +15,30 @@
  * divergences, pinned by `test/submission-state.test.ts`:
  *
  * - `resume` with mode `overflow` or `input_only`: the preamble resumes
- *   these, but inspection reports `'uncertain'` — reconciliation
- *   compensates with its provider-unreached retry special case (see
- *   `reconcileInterruptedSubmission`).
+ *   these, but inspection reports `'uncertain'`. Reconciliation treats
+ *   `'uncertain'` as the one accepted provider-redispatch window and retries
+ *   it (see `reconcileInterruptedSubmission`), so the coarse mapping still
+ *   resumes correctly.
  * - `completed` with `overflow: true` (silent or truncation overflow on a
  *   stop/length response): inspection reports `'completed'`, but the
  *   preamble treats it as an overflow resume (compact and continue).
- * - `tool_use_unresolved`: inspection reports `'uncertain'`, but the
- *   preamble settles with the persisted response without resuming.
+ * - `tool_use_unresolved`: inspection reports `'uncertain'`; the preamble
+ *   repairs the trailing tool batch (every unresolved call gets an explicit
+ *   unknown-outcome error, never a re-execution) and continues — identical to
+ *   a partial batch. (Before the turn-journal removal a zero-result batch was
+ *   settled as-is; canonical recovery cannot prove a tool "never started", so
+ *   it conservatively repairs and lets the model proceed.)
  * - `advanced_past_input`: inspection reports `'uncertain'`, the preamble
  *   fails the operation.
  */
 
+import type { AgentMessage } from '@earendil-works/pi-agent-core';
 import type { AssistantMessage } from '@earendil-works/pi-ai';
 import { isContextOverflow } from './compaction.ts';
-import type { MessageEntry, SessionEntry } from './types.ts';
+
+export type CanonicalSubmissionEntry =
+	| { id: string; type: 'message'; message: AgentMessage }
+	| { id: string; type: 'compaction' };
 
 /**
  * How a `resume` state continues the interrupted submission:
@@ -47,8 +56,8 @@ import type { MessageEntry, SessionEntry } from './types.ts';
  *   result, synthesize interrupted-markers for the unresolved calls — and
  *   only then continue (see `findTrailingPartialToolBatch`).
  * - `stream_continuation` — an aborted response already recovered from
- *   persisted stream chunks (a `stream_continued` signal follows it);
- *   continue from the recovered partial.
+ *   canonical deltas (a `stream_continued` signal follows it); continue from
+ *   the recovered partial.
  * - `transient_retry` — a retryable model error; wait out the backoff and
  *   retry the turn.
  * - `overflow` — a context-overflow response; compact and retry the turn.
@@ -56,7 +65,7 @@ import type { MessageEntry, SessionEntry } from './types.ts';
  *   continuation (e.g. checkpointed when graceful shutdown aborted the
  *   turn). The partial is excluded from model context, so resuming replays
  *   the turn from the last durable user/toolResult message; the collected
- *   partial output stays preserved in history. When durable stream chunks
+ *   partial output stays preserved in history. When canonical partial deltas
  *   exist, reconciliation upgrades this state to `stream_continuation` via
  *   `recoverInterruptedStream` before processing resumes.
  */
@@ -108,17 +117,19 @@ export type SubmissionState =
  *   explicit overflow error messages are detected then).
  */
 export function classifySubmissionState(
-	following: SessionEntry[] | undefined,
+	following: readonly CanonicalSubmissionEntry[] | undefined,
 	opts: { contextWindow: number },
 ): SubmissionState {
 	if (following === undefined) return { kind: 'absent' };
 	if (following.some((entry) => entry.type === 'message' && entry.message.role === 'user')) {
 		return { kind: 'advanced_past_input' };
 	}
-	const assistant = following.findLast(
-		(entry): entry is MessageEntry =>
-			entry.type === 'message' && entry.message.role === 'assistant',
-	)?.message as AssistantMessage | undefined;
+	const assistantEntry = following.findLast(
+		(entry) => entry.type === 'message' && entry.message.role === 'assistant',
+	);
+	const assistant = assistantEntry?.type === 'message'
+		? (assistantEntry.message as AssistantMessage)
+		: undefined;
 	if (!assistant) {
 		return {
 			kind: 'resume',
@@ -231,7 +242,7 @@ export interface TrailingPartialToolBatch {
  * incomplete.
  */
 export function findTrailingPartialToolBatch(
-	following: SessionEntry[],
+	following: readonly CanonicalSubmissionEntry[],
 ): TrailingPartialToolBatch | undefined {
 	if (
 		following.some(
@@ -288,11 +299,13 @@ export function isRetryableModelError(message: AssistantMessage): boolean {
 	);
 }
 
-export function isCompletedAssistantResponse(message: AssistantMessage): boolean {
+function isCompletedAssistantResponse(message: AssistantMessage): boolean {
 	return message.stopReason === 'stop' || message.stopReason === 'length';
 }
 
-export function countConsecutiveRetryableModelErrors(entries: SessionEntry[]): number {
+export function countConsecutiveRetryableModelErrors(
+	entries: readonly CanonicalSubmissionEntry[],
+): number {
 	let count = 0;
 	for (let i = entries.length - 1; i >= 0; i--) {
 		const entry = entries[i];

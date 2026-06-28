@@ -48,11 +48,16 @@ command.
 
 This adapter persists Flue runtime state:
 
-- agent session snapshots, compaction state, and persisted image chunks;
+- the canonical append-only conversation stream for each agent instance;
+- immutable external attachments referenced by conversation records;
 - accepted direct prompts and `dispatch(...)` submissions, including durable
-  turn journals, claims, and leases;
-- workflow-run records and persisted run events;
-- run indexing for `/runs` lookups and `listRuns()`.
+  claims and leases;
+- workflow-run records, event streams, and run indexing.
+
+The canonical stream is the sole transcript and is replayed from its beginning;
+replay acceleration and persisted-log compaction are deferred. Sessions append
+for the instance lifetime and have no per-session deletion. Whole-instance stream
+and attachment deletion methods are low-level primitives, not public orchestration.
 
 It does not store application business data, external API side effects, or
 provider credentials.
@@ -80,7 +85,7 @@ query outside the transaction.
 ## Database requirements
 
 Use MySQL 8 with InnoDB for every Flue table. InnoDB provides the transactions
-and row locking required for durable admission, claims, leases, deletion, and
+and row locking required for durable admission, claims, leases, and
 event ordering. Supply `MYSQL_URL` through the application's secret system and
 configure TLS in `mysql2` when required by the database provider. Never commit a
 real connection string.

@@ -1,8 +1,14 @@
-import type { AttachedAgentEvent, FlueClient, FlueEvent, FlueEventStream } from '@flue/sdk';
+import type {
+	FlueClient,
+	FlueConversationMessage,
+	FlueEvent,
+	FlueEventStream,
+} from '@flue/sdk';
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { describe, expect, it, vi } from 'vitest';
 import { useFlueAgent } from '../src/use-agent.ts';
 import { useFlueWorkflow } from '../src/use-workflow.ts';
+import { conversation, createFakeObservation } from './fixtures/observation.ts';
 
 function eventStream<T>(events: T[], offset = 'offset-1'): FlueEventStream<T> {
 	return {
@@ -43,57 +49,49 @@ function client(overrides: Partial<FlueClient>): FlueClient {
 }
 
 describe('useFlueAgent()', () => {
-	it('reports history ready only after the atomic transcript is available', async () => {
-		let finishHistory!: () => void;
-		const history = {
-			offset: 'offset-history',
-			cancel: vi.fn(),
-			async *[Symbol.asyncIterator]() {
-				yield {
-					v: 3,
-					type: 'message_end',
-					message: { role: 'user', content: 'history' },
-					eventIndex: 0,
-					timestamp: '2026-06-12T00:00:00.000Z',
-					instanceId: 'id',
-					submissionId: 'submission-1',
-				} as AttachedAgentEvent;
-				await new Promise<void>((resolve) => {
-					finishHistory = resolve;
-				});
-			},
-		} satisfies FlueEventStream<AttachedAgentEvent>;
-		const live = pendingStream<AttachedAgentEvent>();
-		const connect = vi.fn().mockReturnValueOnce(history).mockReturnValueOnce(live);
-		const flue = client({ agents: { stream: connect } as unknown as FlueClient['agents'] });
+	const historyMessages: FlueConversationMessage[] = [
+		{
+			id: 'entry-user',
+			role: 'user',
+			submissionId: 'submission-1',
+			parts: [{ type: 'text', text: 'history', state: 'done' }],
+		},
+	];
+
+	it('reports history ready only after the observed transcript is available', async () => {
+		const observation = createFakeObservation();
+		const observe = vi.fn().mockReturnValue(observation);
+		const flue = client({ agents: { observe } as unknown as FlueClient['agents'] });
 		const { result, unmount } = renderHook(() =>
-			useFlueAgent({ name: 'agent', id: 'id', history: 'all', client: flue }),
+			useFlueAgent({ name: 'agent', id: 'id', client: flue }),
 		);
-		await waitFor(() => expect(connect).toHaveBeenCalledTimes(1));
 
 		expect(result.current.historyReady).toBe(false);
 		expect(result.current.messages).toEqual([]);
-		act(() => finishHistory());
+
+		act(() =>
+			observation.emit({
+				conversation: conversation(historyMessages),
+				offset: 'offset-history',
+				phase: 'live',
+				error: undefined,
+			}),
+		);
 		await waitFor(() => expect(result.current.historyReady).toBe(true));
-		expect(result.current.messages[0]?.id).toBe('submission:submission-1:user:0');
+		expect(result.current.messages[0]?.id).toBe('entry-user');
 		unmount();
 	});
 
-	it('forwards the configured live transport after finite history hydration', async () => {
-		const live = pendingStream<AttachedAgentEvent>();
-		const connect = vi
-			.fn()
-			.mockReturnValueOnce(eventStream<AttachedAgentEvent>([], 'offset-history'))
-			.mockReturnValueOnce(live);
-		const flue = client({ agents: { stream: connect } as unknown as FlueClient['agents'] });
+	it('forwards the configured live mode to observe()', async () => {
+		const observation = createFakeObservation();
+		const observe = vi.fn().mockReturnValue(observation);
+		const flue = client({ agents: { observe } as unknown as FlueClient['agents'] });
 		const { unmount } = renderHook(() =>
-			useFlueAgent({ name: 'agent', id: 'id', live: 'sse', client: flue }),
+			useFlueAgent({ name: 'agent', id: 'id', live: 'long-poll', client: flue }),
 		);
 
-		await waitFor(() => expect(connect).toHaveBeenCalledTimes(2));
-
-		expect(connect.mock.calls[0]?.[2]).toEqual({ live: false, offset: '-1', tail: 100 });
-		expect(connect.mock.calls[1]?.[2]).toEqual({ live: 'sse', offset: 'offset-history' });
+		await waitFor(() => expect(observe).toHaveBeenCalledTimes(1));
+		expect(observe).toHaveBeenCalledWith('agent', 'id', { live: 'long-poll' });
 		unmount();
 	});
 
@@ -106,40 +104,52 @@ describe('useFlueAgent()', () => {
 		expect(result.current.messages).toEqual([]);
 	});
 
-	it('submits optimistically and reconciles the stream echo', async () => {
-		const stream = pendingStream<AttachedAgentEvent>();
-		const connect = vi
-			.fn()
-			.mockReturnValueOnce(eventStream<AttachedAgentEvent>([], 'offset-history'))
-			.mockReturnValueOnce(stream);
+	it('submits optimistically and reconciles canonical user identity', async () => {
+		const observation = createFakeObservation();
+		const observe = vi.fn().mockReturnValue(observation);
 		const send = vi.fn().mockResolvedValue({
 			streamUrl: 'https://flue.test/agents/agent/id',
-			offset: '-1',
+			offset: 'offset-history',
 			submissionId: 'submission-1',
 		});
 		const flue = client({
-			agents: { stream: connect, send } as unknown as FlueClient['agents'],
+			agents: { observe, send } as unknown as FlueClient['agents'],
 		});
 		const { result } = renderHook(() => useFlueAgent({ name: 'agent', id: 'id', client: flue }));
+
+		act(() =>
+			observation.emit({
+				conversation: conversation(),
+				offset: 'offset-history',
+				phase: 'live',
+				error: undefined,
+			}),
+		);
 		await waitFor(() => expect(result.current.historyReady).toBe(true));
 
 		await act(async () => result.current.sendMessage('hello'));
 		expect(result.current.status).toBe('submitted');
 		expect(result.current.messages[0]?.parts[0]).toMatchObject({ type: 'text', text: 'hello' });
 
-		act(() => {
-			stream.push({
-				v: 3,
-				type: 'message_end',
-				message: { role: 'user', content: 'hello' },
-				eventIndex: 1,
-				timestamp: '2026-06-12T00:00:00.000Z',
-				instanceId: 'id',
-				submissionId: 'submission-1',
-			} as AttachedAgentEvent);
-		});
+		act(() =>
+			observation.emit({
+				conversation: conversation([
+					{
+						id: 'entry-user',
+						role: 'user',
+						submissionId: 'submission-1',
+						parts: [{ type: 'text', text: 'hello', state: 'done' }],
+					},
+				]),
+				offset: 'offset-2',
+				phase: 'live',
+				error: undefined,
+			}),
+		);
 		await waitFor(() => expect(result.current.messages).toHaveLength(1));
-		expect(result.current.messages[0]?.id).toBe('submission:submission-1:user:0');
+		// The canonical user message is re-keyed to the optimistic local id so the
+		// row stays stable across the optimistic→confirmed swap.
+		expect(result.current.messages[0]?.id).toBe('local:agent:id:1');
 	});
 });
 

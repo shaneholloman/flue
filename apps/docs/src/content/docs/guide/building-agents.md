@@ -100,7 +100,7 @@ export default defineAgent(({ id }) => ({
 }));
 ```
 
-In this example, the agent can access the ticket selected by its `id`, but its tools do not give it access to other tickets. Conversation history belongs in the session store, while durable application data should remain in your own data layer.
+In this example, the agent can access the ticket selected by its `id`, but its tools do not give it access to other tickets. Conversation history belongs in the agent instance's canonical conversation stream, while durable application data should remain in your own data layer.
 
 ## Agent profiles
 

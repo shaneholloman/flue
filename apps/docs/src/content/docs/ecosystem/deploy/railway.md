@@ -53,9 +53,9 @@ Use the variable name your provider expects, and **seal** the provider key so it
 
 ## Persistence
 
-The Node target keeps agent sessions and accepted submissions in memory by default. That state is lost on every restart and redeploy, and it is not shared across replicas — so an in-memory service that scales past one instance will route follow-up requests to processes that never saw the original session.
+The Node target keeps canonical agent conversations and accepted submissions in memory by default. That state is lost on every restart and redeploy.
 
-For durable, shared session history, add a Railway Postgres service (**+ New > Database > PostgreSQL**) to the same project. The database exposes a `DATABASE_URL`; wire it into your Flue service with a reference variable rather than copying the value:
+For durable process or host replacement, add a Railway Postgres service (**+ New > Database > PostgreSQL**) to the same project. A shared database does not enable active-active ownership of one agent instance: route each instance to one live Node process and avoid overlapping owners during replacement. The database exposes a `DATABASE_URL`; wire it into your Flue service with a reference variable rather than copying the value:
 
 ```
 DATABASE_URL=${{Postgres.DATABASE_URL}}
@@ -73,7 +73,7 @@ import { postgres } from '@flue/postgres';
 export default postgres(process.env.DATABASE_URL!);
 ```
 
-Flue discovers `db.ts` at build time and wires it into the generated server — schema creation, session snapshots, and durable submission state are handled by the adapter. See [Database](/docs/guide/database/) for the adapter contract and alternatives.
+Flue discovers `db.ts` at build time and wires it into the generated server. Schema creation, canonical streams, attachments, and durable submission state are handled by the adapter. See [Database](/docs/guide/database/) for the adapter contract and alternatives.
 
 ## Health and streaming
 

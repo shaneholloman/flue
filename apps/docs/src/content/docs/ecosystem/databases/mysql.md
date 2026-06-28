@@ -41,7 +41,7 @@ export default mysql({
 });
 ```
 
-Flue discovers the adapter at build time and wires it into the generated Node server. On startup, it creates and verifies the required MySQL 8 InnoDB tables. Agent sessions, accepted submissions, and workflow-run records then survive process restarts and can be shared across replicas; application business data remains application-owned. The blueprint applies only to Node targets because Cloudflare deployments use Durable Object SQLite instead.
+Flue discovers the adapter at build time and wires it into the generated Node server. On startup, it creates and verifies the required MySQL 8 InnoDB tables. Canonical agent conversations, immutable attachments, accepted submissions, and workflow history then survive process replacement. Replicas may share durable state and workflow history, but each agent instance still requires one live Node owner. Application business data remains application-owned. The blueprint applies only to Node targets because Cloudflare deployments use Durable Object SQLite instead.
 
 ## Configure
 
@@ -123,12 +123,13 @@ newer Flue version refuses to start rather than risking incompatible writes.
 
 A Flue database stores runtime state, not your whole application.
 
-| Stored by Flue                                                       | Not stored by Flue                       |
-| -------------------------------------------------------------------- | ---------------------------------------- |
-| Agent session messages, compaction state, and persisted image chunks | Sandbox files and installed dependencies |
-| Accepted direct prompts and `dispatch(...)` submissions              | External API side effects                |
-| Durable turn journals, claims, and leases                            | Application-owned business data          |
-| Workflow-run records, persisted events, and run indexes              | Provider credentials or secrets          |
+| Stored by Flue                                                   | Not stored by Flue                       |
+| ---------------------------------------------------------------- | ---------------------------------------- |
+| Canonical agent conversation streams and compaction records       | Sandbox files and installed dependencies |
+| Immutable attachment payloads                                    | External API side effects                |
+| Accepted direct prompts and `dispatch(...)` submissions          | Application-owned business data          |
+| Durable submission claims and leases                              | Provider credentials or secrets          |
+| Workflow-run records, persisted events, and run indexes           |                                          |
 
 See [Durable Agents](/docs/concepts/durable-execution/) for recovery behavior
 and the [Data Persistence API](/docs/api/data-persistence-api/) for the adapter
@@ -136,9 +137,7 @@ contract.
 
 ## When to choose MySQL
 
-Choose MySQL when your Node deployment already operates MySQL 8, or when
-multiple replicas need durable shared agent and workflow state in an
-InnoDB-backed database. For single-host persistence, file-backed `sqlite()` may
+Choose MySQL when your Node deployment already operates MySQL 8, or when replacement processes and multiple replicas need durable agent state and shared workflow history in an InnoDB-backed database. Preserve one live owner per agent instance. For single-host persistence, file-backed `sqlite()` may
 be simpler. Choose [`@flue/postgres`](/docs/ecosystem/databases/postgres/) when
 Postgres is your existing operational standard, or
 [`@flue/libsql`](/docs/ecosystem/databases/libsql/) for SQLite and libSQL

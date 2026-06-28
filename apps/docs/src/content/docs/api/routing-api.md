@@ -44,8 +44,8 @@ Creates a mountable Hono sub-app for Flue's public HTTP API. Routes are relative
 | Route                    | Purpose                                                                                  |
 | ------------------------ | ---------------------------------------------------------------------------------------- |
 | `POST /agents/:name/:id` | Start a prompt on an HTTP-exposed agent instance; returns `202` with stream coordinates. |
-| `GET /agents/:name/:id`  | Stream agent events via the Durable Streams protocol.                                    |
-| `HEAD /agents/:name/:id` | Return agent stream metadata (tail offset, closed status).                               |
+| `GET /agents/:name/:id`  | Read materialized history or projected updates.                                          |
+| `HEAD /agents/:name/:id` | Return canonical conversation-stream metadata.                                           |
 | `POST /workflows/:name`  | Start an HTTP-exposed workflow run.                                                      |
 | `GET /runs/:runId`       | Stream workflow-run events via the Durable Streams protocol.                             |
 | `GET /runs/:runId?meta`  | Retrieve the workflow-run record as plain JSON.                                          |
@@ -58,7 +58,7 @@ Agent routes and workflow invocation routes are available only when the correspo
 
 `POST /agents/:name/:id` returns `202 { streamUrl, offset, submissionId }` after admission, or `200 { result, streamUrl, offset, submissionId }` with `?wait=result`; agent response headers and stream-coordinate behavior are unchanged. `POST /workflows/:name` returns `202 { runId }`, or `200 { runId, result }` with `?wait=result`. Workflow invocation responses do not include `Location` or `Stream-Next-Offset` headers. Any `?wait` value other than `result` is rejected with `400 invalid_request` on both routes.
 
-For agent prompts, waiting with `?wait=result` is best-effort and scoped to the process that admitted the prompt. The prompt itself is a durable submission either way: if the admitting process is interrupted before settlement, the waiting connection is lost while recovery settles the submission in the background — the outcome then appears in session history and as a `submission_settled` event on the agent's stream instead of answering the original request. A caller that must observe the outcome across interruptions should read the agent stream from the returned coordinates rather than relying on the synchronous response.
+For agent prompts, waiting with `?wait=result` is best-effort and scoped to the process that admitted the prompt. The prompt itself is a durable submission either way: if the admitting process is interrupted before settlement, the waiting connection is lost while recovery settles the submission in the background — the outcome then appears in canonical conversation history and as a `submission_settled` record on the agent's stream instead of answering the original request. A caller that must observe the outcome across interruptions should read the agent stream from the returned coordinates rather than relying on the synchronous response.
 
 `GET /runs/:runId?meta` selects the persisted run-record view (`runId`, `workflowName`, `status`, timestamps, `input`, `result`, `error`) as plain JSON. The `?meta` response carries no Durable Streams headers, and stream parameters (`offset`, `live`) are ignored.
 

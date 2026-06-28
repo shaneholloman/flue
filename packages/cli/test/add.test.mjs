@@ -528,8 +528,8 @@ describe('flue add', () => {
 		assert.ok(result.stdout.includes('vitest.evals.config.ts'));
 		assert.ok(result.stdout.includes('createFlueClient'));
 		assert.ok(result.stdout.includes('createFlueAgentHarness'));
-		assert.ok(result.stdout.includes('offset: invocation.offset'));
-		assert.ok(result.stdout.includes('event.submissionId !== invocation.submissionId'));
+		assert.ok(result.stdout.includes('client.agents.history'));
+		assert.ok(result.stdout.includes('collectToolCalls(history.messages)'));
 		assert.ok(result.stdout.includes('crypto.randomUUID()'));
 		assert.ok(result.stdout.includes('// flue-blueprint: tooling/vitest-evals@1'));
 		assert.ok(result.stdout.includes('Do not add an unauthenticated `route` export'));

@@ -1,104 +1,81 @@
 ---
 title: Durable Agents
 description: Understand how Flue agents and workflows handle server restarts, interrupted connections, and other disruptions.
-lastReviewedAt: 2026-06-20
+lastReviewedAt: 2026-06-26
 ---
 
 Durable execution is about recovering safely when running work is disrupted by a server restart, deployment, lost connection, or unexpected failure. Flue handles that recovery differently for continuing agents and finite workflows.
 
 ## Durable Agents
 
-Agents are continuing, stateful contexts. Each agent instance is a single conversation that records history so later operations can continue from where earlier work ended. The next message may arrive immediately or months later.
+Agents are continuing, stateful contexts. Each persistent agent instance owns one canonical conversation stream. Sessions within the instance select conversations from that stream, and later operations rebuild model context from the same durable records that recovery and clients read.
 
-Direct prompts and asynchronous `dispatch(...)` inputs are operations inside the continuing agent instance. They are not workflow runs. When you need to send application-owned events such as webhooks or chat messages to an agent, see [Routing](/docs/guide/routing/) for application-owned ingress.
+Direct prompts and asynchronous `dispatch(...)` inputs are operations inside an agent instance. They are not workflow runs. For application-owned ingress such as webhooks or chat messages, see [Routing](/docs/guide/routing/).
 
 ```txt
-agent input → stored session history → operation completes
-                     ↓
-later input → reopens the same session → continues with earlier context
+agent input → canonical conversation stream → operation completes
+                         ↓
+later input → rebuilds context → continues the conversation
 ```
 
-### Persist session history
+### Persist conversations
 
-A stored session includes messages and compacted context needed to reopen the conversation later. This makes the session history the durable record that lets an agent continue working after an earlier operation has finished.
+The canonical stream records model-visible messages, assistant output, tool calls and results, compaction, topology, and recovery facts. Attachment bytes live in a separate immutable attachment store and are referenced from canonical records. Mutable submission claims and leases remain operational state rather than a second transcript.
 
-To store session history in an application-controlled database, create a `src/db.ts` (or `.flue/db.ts`) file that default-exports a `PersistenceAdapter`. See [Database](/docs/guide/database/) for setup and [Data Persistence API](/docs/api/data-persistence-api/) for the public storage contract.
+To persist this state in an application-controlled database, create a `src/db.ts` or `.flue/db.ts` file that default-exports a `PersistenceAdapter`. See [Database](/docs/guide/database/) for setup and [Data Persistence API](/docs/api/data-persistence-api/) for the storage contracts.
 
 ### Durable Agents on Cloudflare
 
-On Cloudflare, generated Durable Object-backed agents store session history in SQLite by default. They also protect accepted agent input while it is being processed. Direct HTTP prompts and asynchronous `dispatch(...)` inputs enter the same durable queue. Inputs keep their accepted order.
+Generated Cloudflare agents use one Durable Object per agent instance. Durable Object SQLite stores the canonical stream, attachment bytes, and accepted submissions. Direct HTTP prompts and asynchronous `dispatch(...)` inputs enter the same ordered queue.
 
 ```txt
 direct HTTP prompt ─────────────────────┐
-                                        ├→ durable per-instance queue → stored session history
+                                        ├→ durable queue → canonical stream
 dispatch(...) input ────────────────────┘
 ```
 
-The connection that submitted a prompt observes the work but does not own it. If an HTTP response closes after Cloudflare accepts the prompt, the backend work can continue. Agent events are durably stored and can be replayed from any offset via the Durable Streams protocol.
+The connection that submitted a prompt observes the work but does not own it. If the response closes after Cloudflare accepts the prompt, backend processing can continue. Clients can reconnect to the canonical agent stream from a durable offset.
 
-When the Cloudflare runtime is interrupted, Flue checks the stored input, session history, and turn journal before deciding what to do next. If a completed response was already stored, Flue recognizes that completion and settles the work as success — even when the interruption also exhausted the submission's retry budget or timeout, completed work is preserved rather than discarded. It starts work again when it can prove the model provider was never reached, and resumes an interrupted response from durably stored partial output when usable output was collected. A turn interrupted partway through a batch of tool calls resumes from its recorded results: tool calls that completed are never run again, and a tool call without a recorded result is surfaced to the model as interrupted with an unknown outcome — never assumed to have completed. When the outcome is genuinely uncertain, Flue records a visible interruption message in the session and settles the work as failed instead of blindly repeating model or tool activity.
+After interruption, Flue decides what to do next from the canonical conversation stream alone. It recognizes already-completed output, continues usable partial output from durable deltas, and reuses completed tool results. A tool call with no durable result is represented as interrupted with an unknown outcome rather than run again automatically. When no output was durably persisted before the interruption, recovery may re-dispatch the provider once — consistent with at-least-once execution.
 
-This recovery is intentionally conservative. Once model or tool activity may have started, repeating it could duplicate external effects such as creating a ticket, posting a reply, or sending a payment request. Use application-owned idempotency keys where repeated effects would be harmful. For dispatched input, use `dispatchId` to correlate one accepted delivery with application records.
-
-See [Deploy Agents on Cloudflare](/docs/ecosystem/deploy/cloudflare/) for Durable Object configuration, migrations, and platform-specific recovery details.
+This recovery is intentionally conservative because repeating model or tool activity can duplicate external effects. Use application-owned idempotency keys where repeated effects would be harmful. See [Deploy Agents on Cloudflare](/docs/ecosystem/deploy/cloudflare/) for platform configuration and migrations.
 
 ### Durable Agents on Node.js
 
-On Node.js, sessions and accepted input live in process memory by default. Restarting the process loses all in-flight work and session history.
+Without `db.ts`, Node uses process-local in-memory SQLite. Restarting the process loses conversations, accepted submissions, and workflow records.
 
-Both direct HTTP prompts and asynchronous `dispatch(...)` inputs go through the same ordered submission lifecycle with SQL admission, FIFO ordering, and journal tracking. Inputs keep their accepted order. The connection that submitted a direct prompt observes the work but does not own it — accepted backend work continues through the durable lifecycle regardless of transport state.
+A durable adapter persists canonical conversations and submission coordination across process or host replacement. Startup reconciliation and periodic lease scans reclaim interrupted submissions using the same conservative recovery policy as Cloudflare. Node does not receive Durable Object wake or Fiber recovery, so a replacement process must start before recovery can continue.
 
-```txt
-direct HTTP prompt ─────────────────────┐
-                                        ├→ durable per-instance queue → stored session history
-dispatch(...) input ────────────────────┘
-```
+Node requires **one live process to own a given agent instance**. A shared database supports restart or host-replacement recovery; it does not make active-active processing, round-robin routing, or concurrent ownership of the same instance safe. Deployments with multiple Node replicas must route each instance to one live owner and avoid overlapping owners during replacement.
 
-Because the default backing store is in-memory SQLite, this lifecycle tracking protects against concurrent access within a running process but does not survive a restart. To persist session history and submission state across restarts, create a `src/db.ts` that exports a `PersistenceAdapter` such as `sqlite()` (file-backed) or `postgres()`.
+On graceful shutdown, active submissions stop at a turn boundary and remain reclaimable. On restart, durable partial output and completed tool results are reused. A tool call that may have started without producing a durable result is not repeated automatically.
 
-With a durable adapter, Node can recover interrupted work with the same conservative reconciliation rules as Cloudflare: it requeues when canonical input is provably absent, retries when the model provider was provably never reached, resumes interrupted responses from recovered partial output, recognizes already-completed canonical output as success, and terminalizes genuinely uncertain work instead of replaying it blindly. Node does not get Cloudflare's automatic Durable Object wake and Fiber recovery. A replacement Node process must start successfully and run startup reconciliation before interrupted work is examined. The coordinator also scans for expired leases periodically, so submissions stranded by a fast restart are eventually reclaimed even if the replacement process started before the old lease expired.
+Waiting for `?wait=result` is best-effort and process-scoped. If that process disappears, observe the canonical conversation with `client.agents.observe()` to receive durable settlement. `history()` and `updates()` remain lower-level primitives for applications that manage their own materialized state.
 
-On graceful shutdown (SIGINT/SIGTERM), active submissions are aborted at the turn boundary and left in a reclaimable state — they are not permanently settled. Their leases expire naturally and are reclaimed on next startup, where the interrupted work resumes rather than starting over: a turn interrupted mid-response continues from its durably stored partial output when usable output was collected, or replays from the last durable checkpoint otherwise, and tool results checkpointed before the interruption are preserved either way — a turn interrupted partway through a batch of tool calls resumes from its recorded results instead of re-executing the calls that completed. A tool call that started but has no recorded result is never assumed to have completed; on resume it is marked interrupted with an unknown outcome. Delegated `task` (subagent) work follows the same rule: on restart the parent session resumes, an interrupted `task` call is surfaced with an unknown outcome, and delegating again starts a fresh child session — the interrupted child session's earlier partial work is not yet reattached. Agent events are durably stored and can be replayed from any offset via the Durable Streams protocol after a restart.
-
-When reconciliation (rather than normal processing) settles a submission — recognizing already-completed work as success or terminalizing unrecoverable work as failure — it appends a `submission_settled` event to the agent's durable stream so detached readers observe the outcome, and resolves any `?wait=result` caller still waiting in the same process with the persisted result. Waiting on a result is best-effort per process: a caller attached in one process is never resolved by settlement in another, so callers that must survive interruptions should follow the agent stream or session history instead.
-
-A file-backed SQLite adapter protects against process restart on the same host; surviving host loss requires storage outside that host, such as Postgres or another durable shared database.
-
-See [Database](/docs/guide/database/) for session persistence setup and [Deploy Agents on Node.js](/docs/ecosystem/deploy/node/) for deployment guidance.
+A file-backed SQLite adapter protects against restart on the same host. Surviving host loss requires external durable storage such as Postgres, while still preserving the single-live-owner rule. See [Database](/docs/guide/database/) and [Deploy Agents on Node.js](/docs/ecosystem/deploy/node/).
 
 ### Cloudflare and Node recovery compared
 
-A Cloudflare Durable Object reset and a Node server restart are not equivalent by default. Cloudflare stores accepted submissions in the owning Durable Object's SQLite queue, restores a wake, and reconciles interrupted work when the object resumes. Node gets comparable recovery after an application supplies durable storage via `db.ts`.
-
-| Failure case                                                | Cloudflare                                                                                          | Node without `db.ts`                              | Node with durable `db.ts`                                                                                           |
-| ----------------------------------------------------------- | --------------------------------------------------------------------------------------------------- | ------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Machine or runtime process disappears while work is running | Durable Object SQLite retains accepted direct and dispatched submissions.                           | In-memory session and submission state disappear. | Persisted session and submission rows remain available.                                                             |
-| Interrupted dispatch input                                  | Reconciled after Durable Object recovery with conservative replay rules.                            | Lost with process memory.                         | Reconciled on replacement-process startup with the same shared replay rules.                                        |
-| Interrupted direct HTTP prompt                              | Remains queued after admission; the transport may disconnect, but backend work is still reconciled. | Lost when the server process exits.               | Reconciled on replacement-process startup. The transport disconnects, but persisted submission state is recovered.  |
-| Recovery trigger                                            | Durable Object startup, scheduled wake, and recovered Fiber callbacks.                              | None after restart.                               | Startup reconciliation when the new server begins listening, plus periodic expired-lease scans.                     |
-| Multi-replica continuity                                    | Per-agent Durable Object ownership gives one durable queue per agent instance.                      | Process-local only.                               | Depends on the adapter and deployment topology; use a shared durable store when another host must recover the work. |
-
-Both targets use the same reconciliation code and conservative replay rules for durable submissions. The remaining difference is recovery ownership: Cloudflare makes accepted work durable by default inside the owning Durable Object with automatic wake and Fiber recovery, while Node requires an explicit durable adapter and relies on process startup and periodic lease scanning for recovery. In both targets, a completed or uncertain model/tool action is never assumed safe to replay, so application-owned idempotency keys remain necessary for external effects.
+| Failure case | Cloudflare | Node without `db.ts` | Node with durable `db.ts` |
+| --- | --- | --- | --- |
+| Process disappears during agent work | Durable Object storage retains accepted work and canonical records. | Process-local state is lost. | Durable stores retain work for replacement-process recovery. |
+| Recovery trigger | Object startup, scheduled wake, and Fiber callbacks. | None after restart. | Replacement-process startup and periodic expired-lease scans. |
+| Ownership | Durable Object routing provides one owner per instance. | One process-local owner. | One live Node owner per instance; shared storage supports replacement, not active-active ownership. |
+| Interrupted workflow | Recovery terminalizes the run and closes its stream. | The run is lost with memory. | The stored run remains orphaned and active. |
 
 ### Keep workspace state separate
 
-Persisting a conversation does not make sandbox files durable. The default virtual sandbox is an in-memory workspace, even when the session history is stored in a database. Likewise, a durable remote workspace does not preserve conversation history by itself.
-
-Use the [Sandboxes](/docs/guide/sandboxes/) guide to choose a workspace lifecycle separately from session persistence. Keep durable application data, such as customer records or ticket state, in your own data layer.
+Persisting a conversation does not make sandbox files durable. The default virtual sandbox is an in-memory workspace, while a durable remote workspace does not preserve conversation records by itself. Choose workspace and conversation persistence independently. See [Sandboxes](/docs/guide/sandboxes/).
 
 ## Durable Workflows
 
-Workflows are finite function invocations. Each invocation runs your authored `run(...)` function once and receives its own `runId`. A workflow may load data, call external services, initialize agents, and return a result or error.
+Workflows are finite function invocations. Each invocation runs the authored `run(...)` function once, receives its own `runId`, and owns execution-scoped canonical conversation state for its harness and sessions. That state is not a persistent agent conversation shared with another workflow run. Flue does not checkpoint arbitrary TypeScript execution and resume the function from its last completed line.
 
-Flue workflows are not resumable. If a workflow is interrupted, Flue does not checkpoint arbitrary TypeScript execution and continue the function from the last completed line or step. Your application decides whether starting the workflow again is appropriate.
-
-Interrupted-run cleanup differs by target. On Cloudflare, recovery terminalizes an interrupted run as errored — emitting `run_resume` then `run_end` — and closes its event stream so readers see the end of the stream. Node.js currently has no equivalent recovery path: a run orphaned by a crash is never terminalized and its event stream is never closed. With a file-backed adapter the run record and its events survive the restart, but the orphaned run remains listed as `active`. Live readers of that run's stream, including long-poll, SSE, and `client.runs.stream()`, wait indefinitely; use `client.runs.events()` or a raw catch-up read to inspect the events persisted before the crash.
+On Cloudflare, recovery terminalizes an interrupted workflow run and closes its event stream. Node currently has no equivalent workflow recovery path. With a durable adapter, the run record and events survive, but an interrupted run remains listed as `active` and live readers wait indefinitely. Use `client.runs.events()` or a catch-up read to inspect events persisted before the crash.
 
 ### Retry workflows explicitly
 
-Design workflows so they can be invoked again when retry is appropriate, much like CI jobs. Make repeated steps safe where practical, and use application-owned idempotency keys around external effects whose earlier outcome may be unknown.
-
-Starting a workflow again creates a new invocation. It does not continue the previous function call.
+Your application decides whether starting the workflow again is safe. A retry creates a new invocation rather than continuing the previous function call.
 
 ```txt
 workflow invocation → run(...) → result or error
@@ -107,10 +84,10 @@ interrupted invocation
   └→ start a new invocation when retry is appropriate
 ```
 
-If a job requires checkpointed steps that resume automatically after disruption, use a durable orchestration system appropriate to your deployment.
+Use application-owned idempotency keys around external effects whose earlier outcome may be unknown. If a job requires resumable checkpointed steps, use a durable orchestration system suited to that requirement.
 
 ### Inspect workflow runs
 
-Use a workflow's `runId` to inspect its recorded outcome and events independently of the connection that started it. HTTP and SDK inspection requires the owning workflow to expose and authorize its run resources; server-side inspection primitives are unaffected. This is useful for debugging, live progress, and operational tooling.
+Use a workflow's `runId` to inspect its recorded outcome and events independently of the connection that started it. HTTP and SDK inspection requires the workflow to expose and authorize its run resources.
 
-Agent prompts and dispatched agent input do not create workflow runs. Use agent operation observation for continuing agents, and reserve workflow history and SDK or raw run inspection for workflow invocations. See [Workflows](/docs/guide/workflows/) for authoring and run inspection, and [Observability](/docs/guide/observability/) for runtime events and telemetry.
+Agent prompts and dispatched inputs do not create workflow runs. See [Workflows](/docs/guide/workflows/) for workflow authoring and [Observability](/docs/guide/observability/) for runtime telemetry.

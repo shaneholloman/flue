@@ -1,3 +1,4 @@
+import { fork } from 'node:child_process';
 import { mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -6,13 +7,11 @@ import {
 	fauxAssistantMessage,
 	fauxToolCall,
 	registerFauxProvider,
-	Type,
 } from '@earendil-works/pi-ai';
 import * as v from 'valibot';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { defineAgent } from '../src/agent-definition.ts';
 import type { AgentExecutionStore } from '../src/agent-execution-store.ts';
-import { SubmissionInterruptedError } from '../src/errors.ts';
 import { createFlueContext, type DispatchInput, resolveModel } from '../src/internal.ts';
 import {
 	createNodeAgentCoordinator,
@@ -20,14 +19,13 @@ import {
 	type NodeAgentCoordinator,
 } from '../src/node/agent-coordinator.ts';
 import { sqlite } from '../src/node/agent-execution-store.ts';
+import type { ConversationStreamStore } from '../src/runtime/conversation-stream-store.ts';
 import { agentStreamPath } from '../src/runtime/event-stream-store.ts';
+import { handleAgentConversationRead } from '../src/runtime/handle-conversation-routes.ts';
 import type { CreateAgentContextFn } from '../src/runtime/handle-agent.ts';
 import { generateSessionAffinityKey } from '../src/runtime/ids.ts';
-import { createSessionStorageKey } from '../src/session-identity.ts';
 import { defineTool } from '../src/tool.ts';
-import type { SessionData } from '../src/types.ts';
 import { createNoopSessionEnv } from './fixtures/session-env.ts';
-import { createTestEventStreamStore } from './helpers/test-event-stream-store.ts';
 
 // ---------------------------------------------------------------------------
 // Env setup — load ANTHROPIC_API_KEY from the repo .env file.
@@ -77,6 +75,28 @@ function createTempDbPath(): string {
 	return join(dir, 'agent.db');
 }
 
+async function killAtDurableBoundary(
+	mode: 'input-marker' | 'stream-recovery' | 'tool-repair' | 'tool-outcome' | 'settlement',
+	dbPath: string,
+): Promise<void> {
+	const child = fork(
+		join(import.meta.dirname, 'fixtures', 'durable-boundary-child.mjs'),
+		[mode, dbPath],
+		{ stdio: ['ignore', 'ignore', 'inherit', 'ipc'] },
+	);
+	await new Promise<void>((resolve, reject) => {
+		child.once('error', reject);
+		child.once('exit', (code, signal) => {
+			if (signal !== 'SIGKILL') reject(new Error(`Boundary child exited before kill (${code}, ${signal}).`));
+		});
+		child.once('message', (message) => {
+			if (message !== 'ready') return;
+			child.kill('SIGKILL');
+			child.once('exit', () => resolve());
+		});
+	});
+}
+
 /** Open (or reopen) a file-backed execution store via the sqlite() adapter. */
 async function openExecutionStore(dbPath: string): Promise<AgentExecutionStore> {
 	const adapter = sqlite(dbPath);
@@ -86,7 +106,7 @@ async function openExecutionStore(dbPath: string): Promise<AgentExecutionStore> 
 }
 
 /** Create a context factory that uses a real LLM model. */
-function makeRealCreateContext(executionStore: AgentExecutionStore): CreateAgentContextFn {
+function makeRealCreateContext(): CreateAgentContextFn {
 	const model = resolveModel(REAL_MODEL);
 	return ({ id, request, initialEventIndex, dispatchId }) =>
 		createFlueContext({
@@ -100,15 +120,12 @@ function makeRealCreateContext(executionStore: AgentExecutionStore): CreateAgent
 				resolveModel: (m) => (m ? resolveModel(m) : model),
 			},
 			createDefaultEnv: async () => createNoopSessionEnv({ cwd: '/' }),
-			defaultStore: executionStore.sessions,
-			submissionStore: executionStore.submissions,
 		});
 }
 
 /** Create a context factory that uses a faux (mock) provider. */
 function makeFauxCreateContext(
 	provider: FauxProviderRegistration,
-	executionStore: AgentExecutionStore,
 ): CreateAgentContextFn {
 	return ({ id, request, initialEventIndex, dispatchId }) =>
 		createFlueContext({
@@ -122,8 +139,6 @@ function makeFauxCreateContext(
 				resolveModel: () => provider.getModel(),
 			},
 			createDefaultEnv: async () => createNoopSessionEnv({ cwd: '/' }),
-			defaultStore: executionStore.sessions,
-			submissionStore: executionStore.submissions,
 		});
 }
 
@@ -142,14 +157,16 @@ function makeDispatchInput(overrides: Partial<DispatchInput> = {}): DispatchInpu
 async function createRealCoordinator(
 	dbPath: string,
 ): Promise<{ coordinator: NodeAgentCoordinator; executionStore: AgentExecutionStore }> {
-	const executionStore = await openExecutionStore(dbPath);
+	const adapter = sqlite(dbPath);
+	await adapter.migrate?.();
+	const { executionStore, conversationStreamStore, attachmentStore } = await adapter.connect();
 	const agent = defineAgent(() => ({ model: REAL_MODEL }));
 	const coordinator = createNodeAgentCoordinator({
 		submissions: executionStore.submissions,
-		sessions: executionStore.sessions,
 		agents: [{ name: 'assistant', definition: agent }],
-		createContext: makeRealCreateContext(executionStore),
-		eventStreamStore: createTestEventStreamStore(),
+		createContext: makeRealCreateContext(),
+		conversationStreamStore,
+		attachmentStore,
 	});
 	return { coordinator, executionStore };
 }
@@ -160,17 +177,19 @@ async function createFauxCoordinator(
 	provider: FauxProviderRegistration,
 	durability?: { maxAttempts?: number; timeoutMs?: number },
 ): Promise<{ coordinator: NodeAgentCoordinator; executionStore: AgentExecutionStore }> {
-	const executionStore = await openExecutionStore(dbPath);
+	const adapter = sqlite(dbPath);
+	await adapter.migrate?.();
+	const { executionStore, conversationStreamStore, attachmentStore } = await adapter.connect();
 	const agent = defineAgent(() => ({
 		model: `${provider.getModel().provider}/${provider.getModel().id}`,
 		durability,
 	}));
 	const coordinator = createNodeAgentCoordinator({
 		submissions: executionStore.submissions,
-		sessions: executionStore.sessions,
 		agents: [{ name: 'assistant', definition: agent }],
-		createContext: makeFauxCreateContext(provider, executionStore),
-		eventStreamStore: createTestEventStreamStore(),
+		createContext: makeFauxCreateContext(provider),
+		conversationStreamStore,
+		attachmentStore,
 	});
 	return { coordinator, executionStore };
 }
@@ -181,7 +200,83 @@ async function createFauxCoordinator(
 
 describe('NodeAgentCoordinator', () => {
 	describe('basic lifecycle', () => {
-		it('processes a dispatch through the full submission lifecycle with file persistence', async () => {
+		it('writes canonical input and assistant output when processing a dispatch', async () => {
+		const dbPath = createTempDbPath();
+		const provider = createFauxProvider();
+		const providerMessages: string[][] = [];
+		provider.setResponses([(context) => {
+			providerMessages.push(context.messages.map((message) =>
+				typeof message.content === 'string'
+					? message.content
+					: message.content.map((block) => ('text' in block ? block.text : block.type)).join('\n'),
+			));
+			return fauxAssistantMessage('Hello back');
+		}]);
+		const { coordinator } = await createFauxCoordinator(dbPath, provider);
+		const input = makeDispatchInput({
+			dispatchId: 'dispatch-semantic-input',
+			input: { z: '<later>', a: { value: '&first' } },
+			acceptedAt: '2026-06-26T12:00:00.000Z',
+		});
+
+		await coordinator.admitDispatch(input);
+		await coordinator.waitForIdle();
+
+		const adapter = sqlite(dbPath);
+		await adapter.migrate?.();
+		const { conversationStreamStore } = await adapter.connect();
+		const read = await conversationStreamStore.read(agentStreamPath('assistant', 'instance-1'));
+		const records = read.batches.flatMap((batch) => batch.records);
+		expect(records.map((record) => record.type)).toEqual(expect.arrayContaining([
+			'conversation_created',
+			'signal',
+			'assistant_message_started',
+			'assistant_text_delta',
+			'assistant_text_completed',
+			'assistant_message_completed',
+		]));
+		const inputRecord = records.find((record) => record.type === 'signal');
+		const assistantRecord = records.find((record) => record.type === 'assistant_message_started');
+		expect(inputRecord).toMatchObject({
+			dispatchId: input.dispatchId,
+			signalType: 'dispatch_input',
+			tagName: 'dispatch',
+			content: '{\n  "a": {\n    "value": "&first"\n  },\n  "z": "<later>"\n}',
+			attributes: {
+				agent: 'assistant',
+				id: 'instance-1',
+				session: 'default',
+				dispatchId: 'dispatch-semantic-input',
+				acceptedAt: '2026-06-26T12:00:00.000Z',
+			},
+		});
+		expect(providerMessages).toEqual([[
+			'<dispatch type="dispatch_input" agent="assistant" id="instance-1" session="default" dispatchId="dispatch-semantic-input" acceptedAt="2026-06-26T12:00:00.000Z">\n{\n  "a": {\n    "value": "&amp;first"\n  },\n  "z": "&lt;later&gt;"\n}\n</dispatch>',
+		]]);
+		expect(assistantRecord).toMatchObject({ parentId: inputRecord?.type === 'signal' ? inputRecord.messageId : undefined });
+
+		await coordinator.shutdown();
+	});
+
+	it('rebuilds canonical state without an automatic full-log snapshot', async () => {
+		const dbPath = createTempDbPath();
+		const provider = createFauxProvider();
+		provider.setResponses([fauxAssistantMessage('Snapshot reply')]);
+		const { coordinator } = await createFauxCoordinator(dbPath, provider);
+		const input = makeDispatchInput();
+		await coordinator.admitDispatch(input);
+		await coordinator.waitForIdle();
+		await coordinator.shutdown();
+
+		const adapter = sqlite(dbPath);
+		await adapter.migrate?.();
+		const { conversationStreamStore } = await adapter.connect();
+		const path = agentStreamPath('assistant', 'instance-1');
+		const read = await conversationStreamStore.read(path);
+		expect(read.batches.flatMap((batch) => batch.records).map((record) => record.type)).toContain('assistant_message_completed');
+	});
+
+	it('processes a dispatch through the full submission lifecycle with file persistence', async () => {
 			const dbPath = createTempDbPath();
 			const provider = createFauxProvider();
 			provider.setResponses([fauxAssistantMessage('Done.')]);
@@ -194,6 +289,72 @@ describe('NodeAgentCoordinator', () => {
 			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
 			expect(submission).toMatchObject({ status: 'settled', kind: 'dispatch' });
 			expect(submission?.error).toBeUndefined();
+		});
+
+		it('recovers on the same coordinator after a terminal append generation fails', async () => {
+			const dbPath = createTempDbPath();
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { executionStore, conversationStreamStore, attachmentStore } = await adapter.connect();
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Recovered admission.')]);
+			const append = conversationStreamStore.append.bind(conversationStreamStore);
+			let remainingFailures = 2;
+			const failingStore: ConversationStreamStore = {
+				...conversationStreamStore,
+				createStream: conversationStreamStore.createStream.bind(conversationStreamStore),
+				acquireProducer: conversationStreamStore.acquireProducer.bind(conversationStreamStore),
+				append: async (input) => {
+					if (remainingFailures-- > 0) throw new Error('transient append failure');
+					return append(input);
+				},
+				read: conversationStreamStore.read.bind(conversationStreamStore),
+				getMeta: conversationStreamStore.getMeta.bind(conversationStreamStore),
+				delete: conversationStreamStore.delete.bind(conversationStreamStore),
+				subscribe: conversationStreamStore.subscribe.bind(conversationStreamStore),
+			};
+			const coordinator = createNodeAgentCoordinator({
+				submissions: executionStore.submissions,
+				agents: [{
+					name: 'assistant',
+					definition: defineAgent(() => ({
+						model: `${provider.getModel().provider}/${provider.getModel().id}`,
+					})),
+				}],
+				createContext: makeFauxCreateContext(provider),
+				conversationStreamStore: failingStore,
+				attachmentStore,
+			});
+			const input = makeDispatchInput({ dispatchId: 'dispatch-writer-recovery' });
+
+			await expect(coordinator.admitDispatch(input)).rejects.toThrow('transient append failure');
+			await coordinator.reconcileSubmissions();
+
+			expect(await executionStore.submissions.getSubmission(input.dispatchId)).toMatchObject({
+				status: 'settled',
+				canonicalReadyAt: expect.any(Number),
+			});
+			const records = (await conversationStreamStore.read(agentStreamPath('assistant', 'instance-1')))
+				.batches.flatMap((batch) => batch.records);
+			expect(records.filter((record) => record.type === 'conversation_created')).toHaveLength(1);
+			expect(records.filter((record) => record.type === 'signal')).toHaveLength(1);
+		});
+
+		it('recovers an admitted submission whose canonical readiness was not marked', async () => {
+			const dbPath = createTempDbPath();
+			const store = await openExecutionStore(dbPath);
+			const input = makeDispatchInput();
+			await store.submissions.admitDispatch(input);
+
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Recovered admission.')]);
+			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
+			await coordinator.reconcileSubmissions();
+
+			expect(await executionStore.submissions.getSubmission(input.dispatchId)).toMatchObject({
+				status: 'settled',
+				canonicalReadyAt: expect.any(Number),
+			});
 		});
 
 		it('persists settled submission across store reopens', async () => {
@@ -216,12 +377,281 @@ describe('NodeAgentCoordinator', () => {
 	});
 
 	describe('interrupt and recover', () => {
+		it('repairs canonical input after a real process kill before the input marker', async () => {
+			const dbPath = createTempDbPath();
+			await killAtDurableBoundary('input-marker', dbPath);
+			let providerCalls = 0;
+			const provider = createFauxProvider();
+			provider.setResponses([() => {
+				providerCalls += 1;
+				return fauxAssistantMessage('Recovered after kill.');
+			}]);
+			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
+
+			await coordinator.reconcileSubmissions();
+
+			expect(providerCalls).toBe(1);
+			expect(await executionStore.submissions.getSubmission('dispatch-input-marker')).toMatchObject({
+				status: 'settled',
+				inputAppliedAt: expect.any(Number),
+			});
+		});
+
+		// Kill matrix scenario 3: killed after acknowledged partial deltas,
+		// before completion. Recovery must materialize the durable partial
+		// exactly once (never re-stream committed text) and resume with at most
+		// one replacement provider call.
+		it('materializes a durable partial stream once and resumes after a real process kill', async () => {
+			const dbPath = createTempDbPath();
+			await killAtDurableBoundary('stream-recovery', dbPath);
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { executionStore, conversationStreamStore, attachmentStore } = await adapter.connect();
+			let providerCalls = 0;
+			const provider = createFauxProvider();
+			provider.setResponses([() => {
+				providerCalls += 1;
+				return fauxAssistantMessage('Continued after recovery.');
+			}]);
+			const coordinator = createNodeAgentCoordinator({
+				submissions: executionStore.submissions,
+				agents: [{
+					name: 'assistant',
+					definition: defineAgent(() => ({
+						model: `${provider.getModel().provider}/${provider.getModel().id}`,
+					})),
+				}],
+				createContext: makeFauxCreateContext(provider),
+				conversationStreamStore,
+				attachmentStore,
+			});
+
+			await coordinator.reconcileSubmissions();
+			await coordinator.waitForIdle();
+
+			// Recovery itself dispatches no provider work; only the resumed
+			// continuation calls the provider.
+			expect(providerCalls).toBe(1);
+			const records = (await conversationStreamStore.read(agentStreamPath('assistant', 'instance-1')))
+				.batches.flatMap((batch) => batch.records);
+			// The committed partial text is materialized exactly once — never re-streamed.
+			expect(records.filter(
+				(record) => record.type === 'assistant_text_delta' && record.delta === 'Durable partial',
+			)).toHaveLength(1);
+			expect(await executionStore.submissions.getSubmission('dispatch-stream-recovery')).toMatchObject({
+				status: 'settled',
+			});
+		});
+
+		it('reuses a completed parallel tool outcome after a real process kill before graph materialization', async () => {
+			const dbPath = createTempDbPath();
+			await killAtDurableBoundary('tool-outcome', dbPath);
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { executionStore, conversationStreamStore, attachmentStore } = await adapter.connect();
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Continued after repair.')]);
+			let toolCalls = 0;
+			const lookup = defineTool({
+				name: 'lookup',
+				description: 'Look up.',
+				input: v.object({}),
+				run: async () => {
+					toolCalls += 1;
+					return 'must not run';
+				},
+			});
+			const coordinator = createNodeAgentCoordinator({
+				submissions: executionStore.submissions,
+				agents: [{
+					name: 'assistant',
+					definition: defineAgent(() => ({
+						model: `${provider.getModel().provider}/${provider.getModel().id}`,
+						tools: [lookup],
+					})),
+				}],
+				createContext: makeFauxCreateContext(provider),
+				conversationStreamStore,
+						attachmentStore,
+			});
+
+			await coordinator.reconcileSubmissions();
+			await coordinator.waitForIdle();
+
+			expect(toolCalls).toBe(0);
+			const records = (await conversationStreamStore.read(agentStreamPath('assistant', 'instance-1')))
+				.batches.flatMap((batch) => batch.records);
+			const outcomes = records.filter((record) => record.type === 'tool_outcome');
+			expect(outcomes).toHaveLength(2);
+			expect(outcomes[0]).toMatchObject({
+				toolCallId: 'tool-call-1',
+				isError: false,
+				content: [{ type: 'text', text: 'Known completed result' }],
+			});
+			expect(outcomes[1]).toMatchObject({
+				toolCallId: 'tool-call-2',
+				isError: true,
+			});
+			expect(records.filter((record) => record.type === 'tool_results_committed')).toHaveLength(1);
+		});
+
+		// Kill matrix scenario 1 (the most important): killed after a tool turn
+		// was made durable but before ANY tool outcome was recorded. Recovery
+		// must write one explicit unknown-outcome error, commit the batch, and
+		// NEVER re-run the tool.
+		it('writes one unknown-outcome error and never re-runs a tool interrupted before any outcome', async () => {
+			const dbPath = createTempDbPath();
+			await killAtDurableBoundary('tool-repair', dbPath);
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { executionStore, conversationStreamStore, attachmentStore } = await adapter.connect();
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Continued after repair.')]);
+			let toolCalls = 0;
+			const lookup = defineTool({
+				name: 'lookup',
+				description: 'Look up.',
+				input: v.object({}),
+				run: async () => {
+					toolCalls += 1;
+					return 'must not run';
+				},
+			});
+			const coordinator = createNodeAgentCoordinator({
+				submissions: executionStore.submissions,
+				agents: [{
+					name: 'assistant',
+					definition: defineAgent(() => ({
+						model: `${provider.getModel().provider}/${provider.getModel().id}`,
+						tools: [lookup],
+					})),
+				}],
+				createContext: makeFauxCreateContext(provider),
+				conversationStreamStore,
+				attachmentStore,
+			});
+
+			await coordinator.reconcileSubmissions();
+			await coordinator.waitForIdle();
+
+			expect(toolCalls).toBe(0);
+			const records = (await conversationStreamStore.read(agentStreamPath('assistant', 'instance-1')))
+				.batches.flatMap((batch) => batch.records);
+			const outcomes = records.filter(
+				(record) => record.type === 'tool_outcome' && record.toolCallId === 'tool-call-1',
+			);
+			expect(outcomes).toHaveLength(1);
+			expect(outcomes[0]).toMatchObject({ toolCallId: 'tool-call-1', isError: true });
+			expect(records.filter((record) => record.type === 'tool_results_committed')).toHaveLength(1);
+		});
+
+		it('finalizes canonical settlement after a real process kill before operational finalization', async () => {
+			const dbPath = createTempDbPath();
+			await killAtDurableBoundary('settlement', dbPath);
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { executionStore, conversationStreamStore } = await adapter.connect();
+			const obligations = await executionStore.submissions.listPendingSubmissionSettlements();
+			expect(obligations).toHaveLength(1);
+			const obligation = obligations[0];
+			if (!obligation) throw new Error('Expected settlement obligation.');
+			expect(await executionStore.submissions.finalizeSubmissionSettlement(
+				{ submissionId: obligation.submissionId, attemptId: obligation.attemptId },
+				obligation.recordId,
+			)).toBe(true);
+			const records = (await conversationStreamStore.read(agentStreamPath('assistant', 'instance-1')))
+				.batches.flatMap((batch) => batch.records);
+			expect(records.filter((record) => record.id === obligation.recordId)).toHaveLength(1);
+		});
+
+		it('repairs the input marker when canonical input committed before the marker', async () => {
+			const dbPath = createTempDbPath();
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { executionStore, conversationStreamStore } = await adapter.connect();
+			const input = makeDispatchInput({ dispatchId: 'dispatch-input-marker' });
+			await executionStore.submissions.admitDispatch(input);
+			await executionStore.submissions.markSubmissionCanonicalReady(input.dispatchId);
+			await executionStore.submissions.claimSubmission({
+				submissionId: input.dispatchId,
+				attemptId: 'attempt-before-marker',
+				ownerId: 'test-owner',
+				leaseExpiresAt: 1,
+			});
+			const path = agentStreamPath(input.agent, input.id);
+			await conversationStreamStore.createStream(path, { agentName: input.agent, instanceId: input.id });
+			const claim = await conversationStreamStore.acquireProducer(path, 'crashed-owner');
+			const timestamp = new Date().toISOString();
+			await conversationStreamStore.append({
+				path,
+				producerId: claim.producerId,
+				producerEpoch: claim.producerEpoch,
+				incarnation: claim.incarnation,
+				producerSequence: claim.nextProducerSequence,
+				submission: { submissionId: input.dispatchId, attemptId: 'attempt-before-marker' },
+				records: [
+					{
+						v: 1,
+						id: 'record-conversation-created',
+						type: 'conversation_created',
+						kind: 'root',
+						conversationId: 'conversation-input-marker',
+						harness: 'default',
+						session: 'default',
+						timestamp,
+						affinityKey: generateSessionAffinityKey(),
+						createdAt: timestamp,
+					},
+					{
+						v: 1,
+						id: `record_dispatch_input_${input.dispatchId}`,
+						type: 'signal',
+						conversationId: 'conversation-input-marker',
+						harness: 'default',
+						session: 'default',
+						timestamp,
+						submissionId: input.dispatchId,
+						attemptId: 'attempt-before-marker',
+						dispatchId: input.dispatchId,
+						messageId: 'entry_dispatch_ZGlzcGF0Y2gtaW5wdXQtbWFya2Vy',
+						parentId: null,
+						signalType: 'dispatch_input',
+						tagName: 'dispatch',
+						content: '{\n  "message": "Hello"\n}',
+						attributes: {
+							agent: input.agent,
+							id: input.id,
+							session: 'default',
+							dispatchId: input.dispatchId,
+							acceptedAt: input.acceptedAt,
+						},
+					},
+				],
+			});
+
+			let providerCalls = 0;
+			const provider = createFauxProvider();
+			provider.setResponses([() => {
+				providerCalls += 1;
+				return fauxAssistantMessage('Recovered reply.');
+			}]);
+			const { coordinator, executionStore: recoveredStore } = await createFauxCoordinator(dbPath, provider);
+			await coordinator.reconcileSubmissions();
+
+			expect(providerCalls).toBe(1);
+			expect(await recoveredStore.submissions.getSubmission(input.dispatchId)).toMatchObject({
+				status: 'settled',
+				inputAppliedAt: expect.any(Number),
+			});
+		});
+
 		it('reconciles an interrupted submission by requeuing when canonical input is absent', async () => {
 			const dbPath = createTempDbPath();
 			// First process will be "interrupted" — we manually admit+claim without processing.
 			const store1 = await openExecutionStore(dbPath);
 			const input = makeDispatchInput();
 			await store1.submissions.admitDispatch(input);
+			await store1.submissions.markSubmissionCanonicalReady(input.dispatchId);
 			await store1.submissions.claimSubmission({
 				submissionId: input.dispatchId,
 				attemptId: 'attempt-interrupted',
@@ -247,6 +677,7 @@ describe('NodeAgentCoordinator', () => {
 			const store1 = await openExecutionStore(dbPath);
 			const input = makeDispatchInput();
 			await store1.submissions.admitDispatch(input);
+			await store1.submissions.markSubmissionCanonicalReady(input.dispatchId);
 			await store1.submissions.claimSubmission({
 				submissionId: input.dispatchId,
 				attemptId: 'attempt-interrupted',
@@ -314,1238 +745,14 @@ describe('NodeAgentCoordinator', () => {
 			expect(submission?.error).toBeDefined();
 		});
 
-		it('retries a submission whose input was applied but whose journal was never created', async () => {
+	describe('tool-use turns', () => {
+		it('records each tool outcome before committing the batch during a tool-use turn', async () => {
 			const dbPath = createTempDbPath();
-			const store = await openExecutionStore(dbPath);
-
-			// Crash window between the input-application marker and the first
-			// turn-journal write: the canonical input is persisted, the marker
-			// fired, but no journal row exists — the provider was provably
-			// never reached, so reconciliation must retry instead of
-			// terminalizing.
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-			await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-no-journal',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			await store.submissions.markSubmissionInputApplied({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-no-journal',
-			});
-			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-			const now = new Date().toISOString();
-			await store.sessions.save(storageKey, {
-				version: 8,
-				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-				childSessions: [],
-				entries: [
-					{
-						type: 'message',
-						id: 'e1',
-						parentId: null,
-						timestamp: now,
-						message: { role: 'user', content: 'Hello', timestamp: Date.now() } as any,
-						dispatch: { dispatchId: input.dispatchId },
-					},
-				],
-				leafId: 'e1',
-				metadata: {},
-				createdAt: now,
-				updatedAt: now,
-			});
-
-			// "Restart": reconciliation replays the turn from the persisted input.
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { executionStore, conversationStreamStore, attachmentStore } = await adapter.connect();
 			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Recovered from persisted input.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toBeUndefined();
-			const session = await executionStore.sessions.load(storageKey);
-			const entries = session?.entries ?? [];
-			const assistants = entries.filter(
-				(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-			);
-			expect(assistants.at(-1)).toMatchObject({
-				message: { content: [{ type: 'text', text: 'Recovered from persisted input.' }] },
-			});
-			const advisories = entries.filter(
-				(entry) =>
-					entry.type === 'message' &&
-					entry.message.role === 'signal' &&
-					(entry.message as any).type === 'submission_interrupted',
-			);
-			expect(advisories).toEqual([]);
-		});
-
-		it('resumes a submission interrupted during transient-retry backoff after restart', async () => {
-			const dbPath = createTempDbPath();
-			const store = await openExecutionStore(dbPath);
-
-			// Crash during the transient-retry backoff: the provider returned a
-			// retryable error which was checkpointed WITHOUT committing the
-			// journal, and the process died waiting to retry. Restart must
-			// resume the retry rather than terminally failing the submission.
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-			const claimed = await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-backoff',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			expect(claimed).toBeTruthy();
-			if (!claimed) throw new Error('Expected claimed submission.');
-			await store.submissions.markSubmissionInputApplied({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-backoff',
-			});
-			await store.submissions.beginTurnJournal({
-				submissionId: input.dispatchId,
-				sessionKey: claimed.sessionKey,
-				kind: 'dispatch',
-				attemptId: 'attempt-backoff',
-				operationId: 'op-1',
-				turnId: 'turn-1',
-				phase: 'before_provider',
-			});
-			await store.submissions.updateTurnJournalPhase(
-				{ submissionId: input.dispatchId, attemptId: 'attempt-backoff' },
-				'provider_started',
-			);
-			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-			const now = new Date().toISOString();
-			await store.sessions.save(storageKey, {
-				version: 8,
-				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-				childSessions: [],
-				entries: [
-					{
-						type: 'message',
-						id: 'e1',
-						parentId: null,
-						timestamp: now,
-						message: { role: 'user', content: 'Hello', timestamp: Date.now() } as any,
-						dispatch: { dispatchId: input.dispatchId },
-					},
-					{
-						type: 'message',
-						id: 'e2',
-						parentId: 'e1',
-						timestamp: now,
-						message: {
-							role: 'assistant',
-							content: [],
-							stopReason: 'error',
-							errorMessage: '429 Too Many Requests',
-							api: 'test',
-							provider: 'test',
-							model: 'test',
-							usage: {
-								input: 0,
-								output: 0,
-								totalTokens: 0,
-								cost: { input: 0, output: 0, total: 0 },
-							},
-							timestamp: Date.now(),
-						} as any,
-					},
-				],
-				leafId: 'e2',
-				metadata: {},
-				createdAt: now,
-				updatedAt: now,
-			});
-
-			// "Restart": reconciliation resumes the retry (waiting out the
-			// backoff) and completes the submission.
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Recovered after backoff.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toBeUndefined();
-			const session = await executionStore.sessions.load(storageKey);
-			const entries = session?.entries ?? [];
-			const assistants = entries.filter(
-				(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-			);
-			expect(assistants.at(-1)).toMatchObject({
-				message: { content: [{ type: 'text', text: 'Recovered after backoff.' }] },
-			});
-			const advisories = entries.filter(
-				(entry) =>
-					entry.type === 'message' &&
-					entry.message.role === 'signal' &&
-					(entry.message as any).type === 'submission_interrupted',
-			);
-			expect(advisories).toEqual([]);
-		}, 15_000);
-	});
-
-	describe('graceful shutdown and resume', () => {
-		it('resumes from recovered stream chunks after shutdown aborts a streaming turn', async () => {
-			const dbPath = createTempDbPath();
-			// Slow streaming so shutdown deterministically lands mid-turn with
-			// partial output already persisted to durable chunk segments.
-			const provider = registerFauxProvider({
-				provider: `node-coordinator-test-${crypto.randomUUID()}`,
-				tokensPerSecond: 50,
-			});
-			providers.push(provider);
-			provider.setResponses([
-				fauxAssistantMessage(
-					`The full answer that never finishes. ${'lorem ipsum dolor '.repeat(250)}`,
-				),
-			]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-
-			const input = makeDispatchInput();
-			await coordinator.admitDispatch(input);
-			// Wait until the streaming turn has flushed at least one durable
-			// chunk segment, then shut down mid-stream.
-			let streamKey: string | undefined;
-			await vi.waitFor(
-				async () => {
-					const journal = await executionStore.submissions.getTurnJournal(input.dispatchId);
-					streamKey = journal?.streamKey;
-					if (!streamKey) throw new Error('Stream has not started yet.');
-					const segments = await executionStore.submissions.getStreamChunkSegments(streamKey);
-					expect(segments.length).toBeGreaterThan(0);
-				},
-				{ timeout: 10_000, interval: 50 },
-			);
-			await coordinator.shutdown();
-
-			// Shutdown leaves recoverable state behind: the submission stays
-			// running, the journal stays uncommitted, and the partial-stream
-			// chunks survive the aborted turn's checkpoint.
-			expect(await executionStore.submissions.getSubmission(input.dispatchId)).toMatchObject({
-				status: 'running',
-			});
-			const journal = await executionStore.submissions.getTurnJournal(input.dispatchId);
-			expect(journal?.committed).toBe(false);
-			if (!journal?.streamKey) throw new Error('Expected a stream key in the journal.');
-			const segments = await executionStore.submissions.getStreamChunkSegments(journal.streamKey);
-			expect(segments.length).toBeGreaterThan(0);
-
-			// "Restart": advance the clock past the shut-down coordinator's
-			// lease so reconciliation picks the submission up.
-			const realNow = Date.now.bind(Date);
-			const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60_000);
-			try {
-				provider.setResponses([fauxAssistantMessage('Recovered completion.')]);
-				const { coordinator: restarted, executionStore: store2 } = await createFauxCoordinator(
-					dbPath,
-					provider,
-				);
-				await restarted.reconcileSubmissions();
-
-				const submission = await store2.submissions.getSubmission(input.dispatchId);
-				expect(submission).toMatchObject({ status: 'settled' });
-				expect(submission?.error).toBeUndefined();
-				const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-				const session = await store2.sessions.load(storageKey);
-				const entries = session?.entries ?? [];
-				// The aborted turn's checkpoint preserves the output collected
-				// before the abort, the continuation signal marks the resume,
-				// and recovery appends no second copy of the partial: durable
-				// history holds exactly one aborted partial assistant.
-				const abortedPartials = entries.filter(
-					(entry) =>
-						entry.type === 'message' &&
-						entry.message.role === 'assistant' &&
-						(entry.message as any).stopReason === 'aborted',
-				);
-				expect(abortedPartials).toHaveLength(1);
-				expect(JSON.stringify((abortedPartials[0] as any).message.content)).toContain(
-					'lorem ipsum',
-				);
-				const continued = entries.filter(
-					(entry) =>
-						entry.type === 'message' &&
-						entry.message.role === 'signal' &&
-						(entry.message as any).type === 'stream_continued',
-				);
-				expect(continued).toHaveLength(1);
-				const assistants = entries.filter(
-					(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-				);
-				expect(assistants.at(-1)).toMatchObject({
-					message: { content: [{ type: 'text', text: 'Recovered completion.' }] },
-				});
-				const advisories = entries.filter(
-					(entry) =>
-						entry.type === 'message' &&
-						entry.message.role === 'signal' &&
-						(entry.message as any).type === 'submission_interrupted',
-				);
-				expect(advisories).toEqual([]);
-			} finally {
-				nowSpy.mockRestore();
-			}
-		}, 30_000);
-
-		it('recovers a submission interrupted by shutdown during a task tool call', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			// Gate the child task session's model turn so shutdown
-			// deterministically arrives while the subagent is mid-prompt.
-			let releaseChild!: () => void;
-			const childBlocked = new Promise<void>((resolve) => {
-				releaseChild = resolve;
-			});
-			let childReachedResolve!: () => void;
-			const childReached = new Promise<void>((resolve) => {
-				childReachedResolve = resolve;
-			});
-			provider.setResponses([
-				fauxAssistantMessage([fauxToolCall('task', { prompt: 'Delegated work' })], {
-					stopReason: 'toolUse',
-				}),
-				async () => {
-					childReachedResolve();
-					await childBlocked;
-					return fauxAssistantMessage('Child reply that never completes.');
-				},
-				// Consumed by the parent's post-tool turn, which aborts before
-				// any content is delivered.
-				fauxAssistantMessage('Aborted before delivery.'),
-			]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-
-			const input = makeDispatchInput();
-			await coordinator.admitDispatch(input);
-			await childReached;
-			const shutdownPromise = coordinator.shutdown();
-			releaseChild();
-			await shutdownPromise;
-
-			expect(await executionStore.submissions.getSubmission(input.dispatchId)).toMatchObject({
-				status: 'running',
-			});
-			const journal = await executionStore.submissions.getTurnJournal(input.dispatchId);
-			expect(journal?.committed).toBe(false);
-
-			// "Restart": advance the clock past the shut-down coordinator's lease.
-			const realNow = Date.now.bind(Date);
-			const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60_000);
-			try {
-				provider.setResponses([fauxAssistantMessage('Recovered after task interruption.')]);
-				const { coordinator: restarted, executionStore: store2 } = await createFauxCoordinator(
-					dbPath,
-					provider,
-				);
-				await restarted.reconcileSubmissions();
-
-				const submission = await store2.submissions.getSubmission(input.dispatchId);
-				expect(submission).toMatchObject({ status: 'settled' });
-				expect(submission?.error).toBeUndefined();
-				const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-				const session = await store2.sessions.load(storageKey);
-				const entries = session?.entries ?? [];
-				// The interrupted task's tool result is preserved exactly as
-				// collected — an error result, never a fabricated success.
-				const toolResults = entries.filter(
-					(entry) => entry.type === 'message' && entry.message.role === 'toolResult',
-				);
-				expect(toolResults).toHaveLength(1);
-				expect((toolResults[0] as any).message.isError).toBe(true);
-				const assistants = entries.filter(
-					(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-				);
-				expect(assistants.at(-1)).toMatchObject({
-					message: { content: [{ type: 'text', text: 'Recovered after task interruption.' }] },
-				});
-				// The child task session is its own session: its record survives
-				// and its history keeps the aborted partial untouched.
-				expect(session?.childSessions).toHaveLength(1);
-				const childSessionName = session?.childSessions[0]?.session;
-				if (!childSessionName) throw new Error('Expected a recorded task session.');
-				const childData = await store2.sessions.load(
-					createSessionStorageKey('instance-1', 'default', childSessionName),
-				);
-				const childAssistants = (childData?.entries ?? []).filter(
-					(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-				);
-				expect((childAssistants.at(-1) as any)?.message.stopReason).toBe('aborted');
-			} finally {
-				nowSpy.mockRestore();
-			}
-		}, 30_000);
-
-		it('does not re-execute completed tool calls when shutdown aborts a turn mid-batch', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			const alphaCallId = `tool:alpha-${crypto.randomUUID()}`;
-			const bravoCallId = `tool:bravo-${crypto.randomUUID()}`;
-			const charlieCallId = `tool:charlie-${crypto.randomUUID()}`;
-			provider.setResponses([
-				fauxAssistantMessage(
-					[
-						fauxToolCall('alpha', {}, { id: alphaCallId }),
-						fauxToolCall('bravo', {}, { id: bravoCallId }),
-						fauxToolCall('charlie', {}, { id: charlieCallId }),
-					],
-					{ stopReason: 'toolUse' },
-				),
-				// Consumed by the post-batch turn, which aborts before delivery.
-				fauxAssistantMessage('Aborted before delivery.'),
-			]);
-
-			// Adapter tools run sequentially, so the shutdown abort breaks the
-			// tool loop mid-batch: alpha completes with a real (externally
-			// effectful) result, bravo is interrupted in flight, charlie never
-			// starts — a PARTIAL tool-result batch in durable history.
-			let bravoReachedResolve!: () => void;
-			const bravoReached = new Promise<void>((resolve) => {
-				bravoReachedResolve = resolve;
-			});
-			type ToolExecute = (
-				id: string,
-				args: unknown,
-				signal?: AbortSignal,
-			) => Promise<{ content: Array<{ type: 'text'; text: string }>; details: object }>;
-			const makeAgentWithSequentialTools = (
-				counts: Record<string, number>,
-				bravoExecute: ToolExecute,
-			) =>
-				defineAgent(() => ({
-					model: `${provider.getModel().provider}/${provider.getModel().id}`,
-					sandbox: {
-						createSessionEnv: async () => createNoopSessionEnv({ cwd: '/' }),
-						tools: () => [
-							{
-								name: 'alpha',
-								label: 'alpha',
-								description: 'Completes before the abort.',
-								parameters: Type.Object({}),
-								executionMode: 'sequential' as const,
-								execute: async () => {
-									counts.alpha = (counts.alpha ?? 0) + 1;
-									return {
-										content: [{ type: 'text' as const, text: 'alpha result' }],
-										details: {},
-									};
-								},
-							},
-							{
-								name: 'bravo',
-								label: 'bravo',
-								description: 'In flight when the abort lands.',
-								parameters: Type.Object({}),
-								executionMode: 'sequential' as const,
-								execute: (async (id, args, signal) => {
-									counts.bravo = (counts.bravo ?? 0) + 1;
-									return bravoExecute(id, args, signal);
-								}) satisfies ToolExecute,
-							},
-							{
-								name: 'charlie',
-								label: 'charlie',
-								description: 'Never starts before the abort.',
-								parameters: Type.Object({}),
-								executionMode: 'sequential' as const,
-								execute: async () => {
-									counts.charlie = (counts.charlie ?? 0) + 1;
-									return {
-										content: [{ type: 'text' as const, text: 'charlie result' }],
-										details: {},
-									};
-								},
-							},
-						],
-					},
-				}));
-
-			const firstRunCounts: Record<string, number> = {};
-			const executionStore = await openExecutionStore(dbPath);
-			const coordinator = createNodeAgentCoordinator({
-				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
-				agents: [
-					{
-						name: 'assistant',
-						definition: makeAgentWithSequentialTools(firstRunCounts, async (_id, _args, signal) => {
-							bravoReachedResolve();
-							await new Promise<never>((_, reject) => {
-								if (signal?.aborted) reject(new Error('bravo aborted by shutdown'));
-								signal?.addEventListener(
-									'abort',
-									() => reject(new Error('bravo aborted by shutdown')),
-									{ once: true },
-								);
-							});
-							throw new Error('unreachable');
-						}),
-					},
-				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore: createTestEventStreamStore(),
-			});
-
-			const input = makeDispatchInput();
-			await coordinator.admitDispatch(input);
-			await bravoReached;
-			await coordinator.shutdown();
-
-			// Shutdown left the partial-batch shape behind: the submission is
-			// reclaimable, the journal is uncommitted, alpha's completed result
-			// and bravo's interruption error are recorded, charlie has no result.
-			expect(firstRunCounts).toEqual({ alpha: 1, bravo: 1 });
-			expect(await executionStore.submissions.getSubmission(input.dispatchId)).toMatchObject({
-				status: 'running',
-			});
-			const journal = await executionStore.submissions.getTurnJournal(input.dispatchId);
-			expect(journal?.committed).toBe(false);
-			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-			const interrupted = await executionStore.sessions.load(storageKey);
-			const interruptedResults = (interrupted?.entries ?? []).filter(
-				(entry) => entry.type === 'message' && entry.message.role === 'toolResult',
-			);
-			expect(interruptedResults.map((entry) => (entry as any).message.toolCallId)).toEqual([
-				alphaCallId,
-				bravoCallId,
-			]);
-
-			// "Restart": advance the clock past the shut-down coordinator's lease.
-			const realNow = Date.now.bind(Date);
-			const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60_000);
-			try {
-				// The restarted "model" behaves like a real one: shown a context
-				// that still holds the turn's tool results it completes, but shown
-				// a replayed context with the batch dropped it re-issues the tool
-				// calls — which is exactly the duplicate external effect the
-				// repair must prevent.
-				provider.setResponses([
-					(context) =>
-						context.messages.some((message) => message.role === 'toolResult')
-							? fauxAssistantMessage('Completed after batch repair.')
-							: fauxAssistantMessage(
-									[
-										fauxToolCall('alpha', {}, { id: `${alphaCallId}-replayed` }),
-										fauxToolCall('bravo', {}, { id: `${bravoCallId}-replayed` }),
-										fauxToolCall('charlie', {}, { id: `${charlieCallId}-replayed` }),
-									],
-									{ stopReason: 'toolUse' },
-								),
-					fauxAssistantMessage('Completed after replayed tools.'),
-				]);
-				const restartCounts: Record<string, number> = {};
-				const store2 = await openExecutionStore(dbPath);
-				const restarted = createNodeAgentCoordinator({
-					submissions: store2.submissions,
-					sessions: store2.sessions,
-					agents: [
-						{
-							name: 'assistant',
-							definition: makeAgentWithSequentialTools(restartCounts, async () => ({
-								content: [{ type: 'text' as const, text: 'bravo result (rerun)' }],
-								details: {},
-							})),
-						},
-					],
-					createContext: makeFauxCreateContext(provider, store2),
-					eventStreamStore: createTestEventStreamStore(),
-				});
-				await restarted.reconcileSubmissions();
-
-				// No tool ran again: alpha's completed call is never re-executed,
-				// and the unresolved calls are repaired, not retried.
-				expect(restartCounts).toEqual({});
-
-				const submission = await store2.submissions.getSubmission(input.dispatchId);
-				expect(submission).toMatchObject({ status: 'settled' });
-				expect(submission?.error).toBeUndefined();
-
-				// The active path holds the repaired batch in original call order:
-				// alpha's real result preserved, bravo's collected interruption
-				// error preserved as recorded, charlie marked interrupted with an
-				// unknown outcome — never a fabricated result.
-				const session = await store2.sessions.load(storageKey);
-				if (!session) throw new Error('Expected the session to persist.');
-				const activePath: typeof session.entries = [];
-				for (
-					let entry = session.entries.find((candidate) => candidate.id === session.leafId);
-					entry;
-					entry = session.entries.find((candidate) => candidate.id === entry?.parentId)
-				) {
-					activePath.unshift(entry);
-				}
-				const activeResults = activePath.filter(
-					(entry) => entry.type === 'message' && entry.message.role === 'toolResult',
-				) as any[];
-				expect(activeResults.map((entry) => entry.message.toolCallId)).toEqual([
-					alphaCallId,
-					bravoCallId,
-					charlieCallId,
-				]);
-				expect(activeResults[0].message.isError).toBe(false);
-				expect(activeResults[0].message.content[0]).toMatchObject({ text: 'alpha result' });
-				expect(activeResults[1].message.isError).toBe(true);
-				expect(activeResults[1].message.content[0].text).toContain('bravo aborted by shutdown');
-				expect(activeResults[2].message.isError).toBe(true);
-				expect(JSON.parse(activeResults[2].message.content[0].text)).toMatchObject({
-					type: 'interrupted',
-				});
-				const activeAssistants = activePath.filter(
-					(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-				) as any[];
-				expect(activeAssistants.at(-1)?.message.content).toEqual([
-					{ type: 'text', text: 'Completed after batch repair.' },
-				]);
-				const advisories = session.entries.filter(
-					(entry) =>
-						entry.type === 'message' &&
-						entry.message.role === 'signal' &&
-						(entry.message as any).type === 'submission_interrupted',
-				);
-				expect(advisories).toEqual([]);
-			} finally {
-				nowSpy.mockRestore();
-			}
-		}, 30_000);
-
-		it('deletes the interrupted turn chunk segments when reconciliation terminalizes the submission', async () => {
-			const dbPath = createTempDbPath();
-			// Slow streaming so shutdown deterministically lands mid-turn with
-			// partial output already persisted to durable chunk segments.
-			const provider = registerFauxProvider({
-				provider: `node-coordinator-test-${crypto.randomUUID()}`,
-				tokensPerSecond: 50,
-			});
-			providers.push(provider);
-			provider.setResponses([
-				fauxAssistantMessage(
-					`The full answer that never finishes. ${'lorem ipsum dolor '.repeat(250)}`,
-				),
-			]);
-			// A timeout shorter than the restart's clock advance, so the
-			// reconciliation terminalizes instead of resuming.
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider, {
-				timeoutMs: 30_000,
-			});
-
-			const input = makeDispatchInput();
-			await coordinator.admitDispatch(input);
-			let streamKey: string | undefined;
-			await vi.waitFor(
-				async () => {
-					const journal = await executionStore.submissions.getTurnJournal(input.dispatchId);
-					streamKey = journal?.streamKey;
-					if (!streamKey) throw new Error('Stream has not started yet.');
-					const segments = await executionStore.submissions.getStreamChunkSegments(streamKey);
-					expect(segments.length).toBeGreaterThan(0);
-				},
-				{ timeout: 10_000, interval: 50 },
-			);
-			await coordinator.shutdown();
-			if (!streamKey) throw new Error('Expected a stream key.');
-			expect(
-				(await executionStore.submissions.getStreamChunkSegments(streamKey)).length,
-			).toBeGreaterThan(0);
-
-			// "Restart": advance the clock past both the lease and the timeout.
-			const realNow = Date.now.bind(Date);
-			const nowSpy = vi.spyOn(Date, 'now').mockImplementation(() => realNow() + 60_000);
-			try {
-				const { coordinator: restarted, executionStore: store2 } = await createFauxCoordinator(
-					dbPath,
-					provider,
-					{ timeoutMs: 30_000 },
-				);
-				await restarted.reconcileSubmissions();
-
-				const submission = await store2.submissions.getSubmission(input.dispatchId);
-				expect(submission).toMatchObject({ status: 'settled' });
-				expect(submission?.error).toContain('exceeded the configured timeout');
-				// Terminal settlement leaves no orphaned chunk segments behind:
-				// nothing will ever recover or supersede them after this point.
-				expect(await store2.submissions.getStreamChunkSegments(streamKey)).toEqual([]);
-			} finally {
-				nowSpy.mockRestore();
-			}
-		}, 30_000);
-	});
-
-	describe('attempt exhaustion', () => {
-		it('terminalizes a submission after exceeding the retry budget', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			const store = await openExecutionStore(dbPath);
-
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-
-			// Simulate repeated interruptions until retry budget is exhausted.
-			// Default maxRetry is 10. We claim, then replace the attempt to increment count.
-			const claimed = await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-0',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			expect(claimed).toBeTruthy();
-			if (!claimed) throw new Error('Expected claimed submission.');
-
-			// Mark input applied: journal-attempt replacement only happens after
-			// input application, and pre-input exhaustion settles with its own
-			// interrupted-before-input error instead of this message.
-			await store.submissions.markSubmissionInputApplied({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-0',
-			});
-
-			// Create a journal so replaceTurnJournalAttempt can work.
-			await store.submissions.beginTurnJournal({
-				submissionId: input.dispatchId,
-				sessionKey: claimed.sessionKey,
-				kind: 'dispatch',
-				attemptId: 'attempt-0',
-				operationId: 'op-1',
-				turnId: 'turn-1',
-				phase: 'before_provider',
-			});
-
-			// Increment attempt count by repeatedly replacing the journal attempt.
-			let currentAttemptId = 'attempt-0';
-			for (let i = 1; i <= 10; i++) {
-				const nextAttemptId = `attempt-${i}`;
-				const replacement = await store.submissions.replaceTurnJournalAttempt(
-					{ submissionId: input.dispatchId, attemptId: currentAttemptId },
-					nextAttemptId,
-				);
-				if (!replacement) break;
-				currentAttemptId = nextAttemptId;
-				// Re-create the journal for the new attempt so the next replace works.
-				if (i < 10) {
-					await store.submissions.beginTurnJournal({
-						submissionId: input.dispatchId,
-						sessionKey: claimed.sessionKey,
-						kind: 'dispatch',
-						attemptId: currentAttemptId,
-						operationId: 'op-1',
-						turnId: `turn-${i + 1}`,
-						phase: 'before_provider',
-					});
-				}
-			}
-
-			// Now attemptCount should be >= maxRetry.
-			const exhausted = await store.submissions.getSubmission(input.dispatchId);
-			expect(exhausted?.attemptCount).toBeGreaterThanOrEqual(exhausted?.maxRetry ?? 0);
-
-			// "Restart": reconciliation should terminalize.
-			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toContain('exceeded maximum recovery attempts');
-		});
-
-		it('terminalizes with an interrupted-before-input error when repeated pre-input requeue cycles exhaust the budget', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			const store = await openExecutionStore(dbPath);
-
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-
-			// Simulate repeated pre-input interruption cycles: each restart
-			// claims the submission (incrementing attemptCount), is interrupted
-			// before input application, and reconciliation requeues it. Default
-			// maxAttempts is 10 — nine full cycles plus a final interrupted
-			// claim exhaust the budget without input ever being applied.
-			for (let i = 0; i < 9; i++) {
-				const attemptId = `attempt-preinput-${i}`;
-				const claimed = await store.submissions.claimSubmission({
-					submissionId: input.dispatchId,
-					attemptId,
-					ownerId: 'test-owner',
-					leaseExpiresAt: 1,
-				});
-				expect(claimed).toBeTruthy();
-				const requeued = await store.submissions.requeueSubmissionBeforeInputApplied({
-					submissionId: input.dispatchId,
-					attemptId,
-				});
-				expect(requeued).toBe(true);
-			}
-			const finalClaim = await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-preinput-final',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			expect(finalClaim?.attemptCount).toBeGreaterThanOrEqual(finalClaim?.maxRetry ?? 0);
-
-			// "Restart": reconciliation terminalizes — and the terminal error
-			// must say the submission was interrupted before input application,
-			// not that recovery attempts were exhausted (no provider work ever
-			// started, so there was nothing to recover).
-			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toContain('interrupted before input application');
-			expect(submission?.error).not.toContain('exceeded maximum recovery attempts');
-		});
-
-		it('settles a completed canonical response as success when the retry budget is exhausted', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			const store = await openExecutionStore(dbPath);
-
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-			// Claiming increments attemptCount to 1; persisting maxRetry of 1
-			// exhausts the budget while the canonical response is completed.
-			await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-exhausted-completed',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			await store.submissions.markSubmissionInputApplied(
-				{ submissionId: input.dispatchId, attemptId: 'attempt-exhausted-completed' },
-				{ maxRetry: 1, timeoutAt: 0 },
-			);
-
-			// Persist a session where the dispatched input already has a
-			// completed canonical response — the crash happened after the
-			// response was checkpointed but before the submission settled.
-			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-			const now = new Date().toISOString();
-			await store.sessions.save(storageKey, {
-				version: 8,
-				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-				childSessions: [],
-				entries: [
-					{
-						type: 'message',
-						id: 'e1',
-						parentId: null,
-						timestamp: now,
-						message: { role: 'user', content: 'Hello', timestamp: Date.now() } as any,
-						dispatch: { dispatchId: input.dispatchId },
-					},
-					{
-						type: 'message',
-						id: 'e2',
-						parentId: 'e1',
-						timestamp: now,
-						message: {
-							role: 'assistant',
-							content: [{ type: 'text', text: 'Completed canonical response.' }],
-							stopReason: 'stop',
-							api: 'test',
-							provider: 'test',
-							model: 'test',
-							usage: {
-								input: 0,
-								output: 0,
-								totalTokens: 0,
-								cost: { input: 0, output: 0, total: 0 },
-							},
-							timestamp: Date.now(),
-						} as any,
-					},
-				],
-				leafId: 'e2',
-				metadata: {},
-				createdAt: now,
-				updatedAt: now,
-			});
-
-			// "Restart": reconciliation must preserve the completed work —
-			// settle success, no terminalization, no interruption advisory.
-			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toBeUndefined();
-			const session = await executionStore.sessions.load(storageKey);
-			const advisories = (session?.entries ?? []).filter(
-				(entry) =>
-					entry.type === 'message' &&
-					entry.message.role === 'signal' &&
-					(entry.message as any).type === 'submission_interrupted',
-			);
-			expect(advisories).toEqual([]);
-		});
-	});
-
-	describe('timeout', () => {
-		it('persists configured durability when input is applied', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Done.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider, {
-				maxAttempts: 3,
-				timeoutMs: 7_200_000,
-			});
-
-			const input = makeDispatchInput();
-			await coordinator.admitDispatch(input);
-			await coordinator.waitForIdle();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission?.maxRetry).toBe(3);
-			expect(submission?.timeoutAt).toBeGreaterThanOrEqual(
-				(submission?.startedAt ?? 0) + 7_200_000,
-			);
-		});
-
-		it('terminalizes a submission after the configured timeout expires', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			const store = await openExecutionStore(dbPath);
-
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-
-			// Claim with a timeout that's already expired.
-			const pastTimeout = Date.now() - 1000;
-			await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-timeout',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			await store.submissions.markSubmissionInputApplied(
-				{ submissionId: input.dispatchId, attemptId: 'attempt-timeout' },
-				{ maxRetry: 10, timeoutAt: pastTimeout },
-			);
-
-			// "Restart": reconciliation should terminalize due to timeout.
-			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toContain('exceeded the configured timeout');
-		});
-
-		it('settles a completed canonical response as success when the configured timeout has expired', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			const store = await openExecutionStore(dbPath);
-
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-			await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-timeout-completed',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			await store.submissions.markSubmissionInputApplied(
-				{ submissionId: input.dispatchId, attemptId: 'attempt-timeout-completed' },
-				{ maxRetry: 10, timeoutAt: Date.now() - 1000 },
-			);
-
-			// Persist a session where the dispatched input already has a
-			// completed canonical response — the crash happened after the
-			// response was checkpointed but before the submission settled.
-			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-			const now = new Date().toISOString();
-			await store.sessions.save(storageKey, {
-				version: 8,
-				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-				childSessions: [],
-				entries: [
-					{
-						type: 'message',
-						id: 'e1',
-						parentId: null,
-						timestamp: now,
-						message: { role: 'user', content: 'Hello', timestamp: Date.now() } as any,
-						dispatch: { dispatchId: input.dispatchId },
-					},
-					{
-						type: 'message',
-						id: 'e2',
-						parentId: 'e1',
-						timestamp: now,
-						message: {
-							role: 'assistant',
-							content: [{ type: 'text', text: 'Completed canonical response.' }],
-							stopReason: 'stop',
-							api: 'test',
-							provider: 'test',
-							model: 'test',
-							usage: {
-								input: 0,
-								output: 0,
-								totalTokens: 0,
-								cost: { input: 0, output: 0, total: 0 },
-							},
-							timestamp: Date.now(),
-						} as any,
-					},
-				],
-				leafId: 'e2',
-				metadata: {},
-				createdAt: now,
-				updatedAt: now,
-			});
-
-			// "Restart": reconciliation must preserve the completed work —
-			// settle success, no terminalization, no interruption advisory.
-			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toBeUndefined();
-			const session = await executionStore.sessions.load(storageKey);
-			const advisories = (session?.entries ?? []).filter(
-				(entry) =>
-					entry.type === 'message' &&
-					entry.message.role === 'signal' &&
-					(entry.message as any).type === 'submission_interrupted',
-			);
-			expect(advisories).toEqual([]);
-		});
-	});
-
-	describe('tool repair across restart', () => {
-		it('continues from canonical tool results when the journal is still tool_request_recorded after restart', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Completed after preserved tool result.')]);
-			const store = await openExecutionStore(dbPath);
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-			const claimed = await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-tool-result',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			expect(claimed).toBeTruthy();
-			if (!claimed) throw new Error('Expected claimed submission.');
-			await store.submissions.markSubmissionInputApplied({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-tool-result',
-			});
-			await store.submissions.beginTurnJournal({
-				submissionId: input.dispatchId,
-				sessionKey: claimed.sessionKey,
-				kind: 'dispatch',
-				attemptId: 'attempt-tool-result',
-				operationId: 'op-1',
-				turnId: 'turn-1',
-				phase: 'before_provider',
-			});
-			await store.submissions.updateTurnJournalPhase(
-				{ submissionId: input.dispatchId, attemptId: 'attempt-tool-result' },
-				'tool_request_recorded',
-				{
-					toolRequest: {
-						toolCalls: [{ type: 'toolCall', id: 'tc-1', name: 'lookup' }],
-					},
-				},
-			);
-			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-			const now = new Date().toISOString();
-			await store.sessions.save(storageKey, {
-				version: 8,
-				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-				childSessions: [],
-				entries: [
-					{
-						type: 'message',
-						id: 'e1',
-						parentId: null,
-						timestamp: now,
-						message: { role: 'user', content: 'Run the tool.', timestamp: Date.now() } as any,
-						dispatch: { dispatchId: input.dispatchId },
-					},
-					{
-						type: 'message',
-						id: 'e2',
-						parentId: 'e1',
-						timestamp: now,
-						message: {
-							role: 'assistant',
-							content: [{ type: 'toolCall', id: 'tc-1', name: 'lookup', arguments: {} }],
-							stopReason: 'toolUse',
-							api: 'test',
-							provider: 'test',
-							model: 'test',
-							usage: {
-								input: 0,
-								output: 0,
-								totalTokens: 0,
-								cost: { input: 0, output: 0, total: 0 },
-							},
-							timestamp: Date.now(),
-						} as any,
-					},
-					{
-						type: 'message',
-						id: 'e3',
-						parentId: 'e2',
-						timestamp: now,
-						message: {
-							role: 'toolResult',
-							toolCallId: 'tc-1',
-							toolName: 'lookup',
-							content: [{ type: 'text', text: 'found it' }],
-							isError: false,
-							timestamp: Date.now(),
-						} as any,
-					},
-				],
-				leafId: 'e3',
-				metadata: {},
-				createdAt: now,
-				updatedAt: now,
-			});
-
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toBeUndefined();
-		});
-
-		it('repairs interrupted tool calls and completes the submission after restart', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-
-			// Set up: two tool calls, process will be interrupted mid-execution.
-			const toolCalls = [
-				{ id: 'tc-1', name: 'get_weather' },
-				{ id: 'tc-2', name: 'get_time' },
-			];
-
-			// Manually build the interrupted session state in the store.
-			const store = await openExecutionStore(dbPath);
-			const input = makeDispatchInput();
-			await store.submissions.admitDispatch(input);
-			const claimed = await store.submissions.claimSubmission({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-tool-repair',
-				ownerId: 'test-owner',
-				leaseExpiresAt: 1,
-			});
-			expect(claimed).toBeTruthy();
-			if (!claimed) throw new Error('Expected claimed submission.');
-
-			// Mark input applied (the submission got past input application).
-			await store.submissions.markSubmissionInputApplied({
-				submissionId: input.dispatchId,
-				attemptId: 'attempt-tool-repair',
-			});
-
-			// Create a journal at tool_request_recorded phase (interrupted during tool execution).
-			await store.submissions.beginTurnJournal({
-				submissionId: input.dispatchId,
-				sessionKey: claimed.sessionKey,
-				kind: 'dispatch',
-				attemptId: 'attempt-tool-repair',
-				operationId: 'op-1',
-				turnId: 'turn-1',
-				phase: 'before_provider',
-			});
-			await store.submissions.updateTurnJournalPhase(
-				{ submissionId: input.dispatchId, attemptId: 'attempt-tool-repair' },
-				'tool_request_recorded',
-				{
-					toolRequest: { toolCalls: toolCalls.map((tc) => ({ type: 'toolCall' as const, ...tc })) },
-				},
-			);
-
-			// Also persist the session history up to the tool calls (user msg + assistant msg).
-			const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-			const now = new Date().toISOString();
-			await store.sessions.save(storageKey, {
-				version: 8,
-				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-				childSessions: [],
-				entries: [
-					{
-						type: 'message',
-						id: 'e1',
-						parentId: null,
-						timestamp: now,
-						message: { role: 'user', content: 'Run the tools.', timestamp: Date.now() } as any,
-						dispatch: { dispatchId: input.dispatchId },
-					},
-					{
-						type: 'message',
-						id: 'e2',
-						parentId: 'e1',
-						timestamp: now,
-						message: {
-							role: 'assistant',
-							content: toolCalls.map((tc) => ({
-								type: 'toolCall',
-								id: tc.id,
-								name: tc.name,
-								arguments: {},
-							})),
-							stopReason: 'toolUse',
-							api: 'test',
-							provider: 'test',
-							model: 'test',
-							usage: {
-								input: 0,
-								output: 0,
-								totalTokens: 0,
-								cost: { input: 0, output: 0, total: 0 },
-							},
-							timestamp: Date.now(),
-						} as any,
-					},
-				],
-				leafId: 'e2',
-				metadata: {},
-				createdAt: now,
-				updatedAt: now,
-			});
-
-			// "Restart": The new coordinator should repair the interrupted tools and re-process.
-			// After repair, the provider will be called again with the repaired context.
-			provider.setResponses([fauxAssistantMessage('Completed after tool repair.')]);
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			const submission = await executionStore.submissions.getSubmission(input.dispatchId);
-			expect(submission).toMatchObject({ status: 'settled' });
-			expect(submission?.error).toBeUndefined();
-		});
-	});
-
-	describe('turn journal during tool-use turns', () => {
-		it('persists assistant tool request before recording tool_request_recorded when a turn invokes a tool', async () => {
-			const executionStore = await openExecutionStore(createTempDbPath());
-			const provider = createFauxProvider();
-			const toolCallId = `tool:journal-order-${crypto.randomUUID()}`;
+			const toolCallId = `tool:outcome-${crypto.randomUUID()}`;
 			provider.setResponses([
 				fauxAssistantMessage(fauxToolCall('lookup', { q: 'x' }, { id: toolCallId }), {
 					stopReason: 'toolUse',
@@ -1558,16 +765,8 @@ describe('NodeAgentCoordinator', () => {
 				input: v.object({ q: v.string() }),
 				run: async () => 'found it',
 			});
-			const events: Array<{ type: 'save'; data: SessionData } | { type: 'phase'; phase: string }> =
-				[];
-			const originalSave = executionStore.sessions.save.bind(executionStore.sessions);
-			executionStore.sessions.save = async (id, data) => {
-				events.push({ type: 'save', data });
-				return originalSave(id, data);
-			};
 			const coordinator = createNodeAgentCoordinator({
 				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
 				agents: [
 					{
 						name: 'assistant',
@@ -1577,90 +776,26 @@ describe('NodeAgentCoordinator', () => {
 						})),
 					},
 				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore: createTestEventStreamStore(),
-			});
-			const originalUpdate = executionStore.submissions.updateTurnJournalPhase.bind(
-				executionStore.submissions,
-			);
-			executionStore.submissions.updateTurnJournalPhase = async (attempt, phase, options) => {
-				events.push({ type: 'phase', phase });
-				return originalUpdate(attempt, phase, options);
-			};
-
-			await coordinator.admitDispatch(makeDispatchInput({ dispatchId: 'dispatch:journal-order' }));
-			await coordinator.waitForIdle();
-
-			const toolRequestIndex = events.findIndex(
-				(event) => event.type === 'phase' && event.phase === 'tool_request_recorded',
-			);
-			expect(toolRequestIndex).toBeGreaterThan(0);
-			const precedingSave = events
-				.slice(0, toolRequestIndex)
-				.reverse()
-				.find((event): event is { type: 'save'; data: SessionData } => event.type === 'save');
-			expect(
-				precedingSave?.data.entries.some(
-					(entry) =>
-						entry.type === 'message' &&
-						entry.message.role === 'assistant' &&
-						entry.message.content.some(
-							(content) => content.type === 'toolCall' && content.id === toolCallId,
-						),
-				),
-			).toBe(true);
-		});
-
-		it('records journal phase transitions through tool_request_recorded during a tool-use turn', async () => {
-			const executionStore = await openExecutionStore(createTempDbPath());
-			const provider = createFauxProvider();
-			const toolCallId = `tool:journal-${crypto.randomUUID()}`;
-			provider.setResponses([
-				fauxAssistantMessage(fauxToolCall('lookup', { q: 'x' }, { id: toolCallId }), {
-					stopReason: 'toolUse',
-				}),
-				fauxAssistantMessage('Done.'),
-			]);
-			const lookup = defineTool({
-				name: 'lookup',
-				description: 'Look up.',
-				input: v.object({ q: v.string() }),
-				run: async () => 'found it',
-			});
-			const phases: string[] = [];
-			const coordinator = createNodeAgentCoordinator({
-				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
-				agents: [
-					{
-						name: 'assistant',
-						definition: defineAgent(() => ({
-							model: `${provider.getModel().provider}/${provider.getModel().id}`,
-							tools: [lookup],
-						})),
-					},
-				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore: createTestEventStreamStore(),
+				createContext: makeFauxCreateContext(provider),
+				conversationStreamStore,
+				attachmentStore,
 			});
 
-			const originalUpdate = executionStore.submissions.updateTurnJournalPhase.bind(
-				executionStore.submissions,
-			);
-			executionStore.submissions.updateTurnJournalPhase = async (attempt, phase, options) => {
-				phases.push(phase);
-				return originalUpdate(attempt, phase, options);
-			};
-
-			const input = makeDispatchInput({ dispatchId: 'dispatch:journal-phases' });
+			const input = makeDispatchInput({ dispatchId: 'dispatch:tool-outcome-order' });
 			await coordinator.admitDispatch(input);
 			await coordinator.waitForIdle();
 
-			expect(phases).toContain('provider_started');
-			expect(phases).toContain('tool_request_recorded');
-			expect(phases.filter((p) => p === 'before_provider').length).toBeGreaterThanOrEqual(1);
-			const journal = await executionStore.submissions.getTurnJournal(input.dispatchId);
-			expect(journal?.committed).toBe(true);
+			const records = (await conversationStreamStore.read(
+				agentStreamPath(input.agent, input.id),
+			)).batches.flatMap((batch) => batch.records);
+			const outcomeIndex = records.findIndex(
+				(record) => record.type === 'tool_outcome' && record.toolCallId === toolCallId,
+			);
+			const commitIndex = records.findIndex(
+				(record) => record.type === 'tool_results_committed' && record.assistantMessageId,
+			);
+			expect(outcomeIndex).toBeGreaterThanOrEqual(0);
+			expect(commitIndex).toBeGreaterThan(outcomeIndex);
 		});
 	});
 
@@ -1673,7 +808,9 @@ describe('NodeAgentCoordinator', () => {
 			const inputA = makeDispatchInput({ dispatchId: 'dispatch-A' });
 			const inputB = makeDispatchInput({ dispatchId: 'dispatch-B' });
 			await store.submissions.admitDispatch(inputA);
+			await store.submissions.markSubmissionCanonicalReady(inputA.dispatchId);
 			await store.submissions.admitDispatch(inputB);
+			await store.submissions.markSubmissionCanonicalReady(inputB.dispatchId);
 
 			// Claim A (the session head), leave B queued.
 			await store.submissions.claimSubmission({
@@ -1737,6 +874,7 @@ describe('NodeAgentCoordinator', () => {
 			// Pre-queue a submission from a "previous process" that was never claimed.
 			const inputOld = makeDispatchInput({ dispatchId: 'dispatch-old' });
 			await store.submissions.admitDispatch(inputOld);
+			await store.submissions.markSubmissionCanonicalReady(inputOld.dispatchId);
 
 			// Now create a fresh coordinator and dispatch a new submission.
 			const provider = createFauxProvider();
@@ -1796,50 +934,33 @@ describe('NodeAgentCoordinator', () => {
 		});
 	});
 
-	describe('session deletion resume across restart', () => {
-		it('completes a crash-interrupted session deletion during reconciliation and unblocks admissions', async () => {
-			const dbPath = createTempDbPath();
-			const store = await openExecutionStore(dbPath);
-			const sessionKey = createSessionStorageKey('instance-1', 'default', 'default');
-			await store.sessions.save(sessionKey, {
-				version: 8,
-				conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-				childSessions: [],
-				entries: [],
-				leafId: null,
-				metadata: {},
-				createdAt: new Date().toISOString(),
-				updatedAt: new Date().toISOString(),
-			});
-
-			// Simulate a crash mid-deletion: phase 1 durably writes the deletion
-			// marker, then the process dies before the session tree is deleted.
-			void store.submissions.deleteSession(sessionKey, () => new Promise<never>(() => {}));
-			await new Promise((r) => setTimeout(r, 50));
-			expect(await store.submissions.listPendingSessionDeletions()).toEqual([sessionKey]);
-			// The orphaned marker blocks every admission for this session.
-			await expect(store.submissions.admitDispatch(makeDispatchInput())).rejects.toThrow(
-				'admission is unavailable while this session is being deleted',
-			);
-
-			// "Restart": a fresh coordinator resumes the deletion on reconcile.
-			const provider = createFauxProvider();
-			const { coordinator, executionStore } = await createFauxCoordinator(dbPath, provider);
-			await coordinator.reconcileSubmissions();
-
-			expect(await executionStore.submissions.listPendingSessionDeletions()).toEqual([]);
-			expect(await executionStore.sessions.load(sessionKey)).toBeNull();
-			expect(await executionStore.submissions.admitDispatch(makeDispatchInput())).toMatchObject({
-				kind: 'submission',
-				submission: { status: 'queued' },
-			});
-		});
-	});
-
 	// ─── Direct prompt admission ────────────────────────────────────────────
 
-	describe('direct prompt admission', () => {
+		describe('direct prompt admission', () => {
+		it('materializes the canonical conversation before detached admission returns', async () => {
+			const dbPath = createTempDbPath();
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Later reply.')]);
+			const { coordinator } = await createFauxCoordinator(dbPath, provider);
+
+			const receipt = await coordinator
+				.createAdmission('assistant', 'instance-1')({ message: 'Hello' }, undefined, false);
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { conversationStreamStore } = await adapter.connect();
+			const read = await conversationStreamStore.read(agentStreamPath('assistant', 'instance-1'));
+			const records = read.batches.flatMap((batch) => batch.records);
+
+			expect(receipt.submissionId).toEqual(expect.any(String));
+			expect(records).toEqual([
+				expect.objectContaining({
+					type: 'conversation_created',
+					harness: 'default',
+					session: 'default',
+				}),
+			]);
+		});
+
 		it('processes a direct prompt through the durable submission lifecycle', async () => {
 			const dbPath = createTempDbPath();
 			const provider = createFauxProvider();
@@ -1855,150 +976,6 @@ describe('NodeAgentCoordinator', () => {
 			expect(await executionStore.submissions.hasUnsettledSubmissions()).toBe(false);
 		});
 
-		it('appends the direct user message before assistant output', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Durable reply.')]);
-			const executionStore = await openExecutionStore(dbPath);
-			const eventStreamStore = createTestEventStreamStore();
-			const coordinator = createNodeAgentCoordinator({
-				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
-				agents: [
-					{
-						name: 'assistant',
-						definition: defineAgent(() => ({
-							model: `${provider.getModel().provider}/${provider.getModel().id}`,
-						})),
-					},
-				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore,
-			});
-
-			const receipt = await coordinator
-				.createAdmission('assistant', 'instance-1')({ message: 'Hello durable history' });
-			const stream = await eventStreamStore.readEvents(agentStreamPath('assistant', 'instance-1'), {
-				offset: '-1',
-			});
-			const events = stream.events.map((event) => event.data as Record<string, unknown>);
-			const userIndex = events.findIndex(
-				(event) => event.type === 'message_end' && (event.message as { role?: string }).role === 'user',
-			);
-			const assistantIndex = events.findIndex(
-				(event) => event.type === 'message_end' && (event.message as { role?: string }).role === 'assistant',
-			);
-
-			expect(events[userIndex]).toMatchObject({
-				type: 'message_end',
-				submissionId: receipt.submissionId,
-				message: {
-					role: 'user',
-					content: [{ type: 'text', text: 'Hello durable history' }],
-				},
-			});
-			expect(userIndex).toBeGreaterThanOrEqual(0);
-			expect(assistantIndex).toBeGreaterThan(userIndex);
-		});
-
-		it('continues a direct prompt when user event persistence fails', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Best-effort reply.')]);
-			const executionStore = await openExecutionStore(dbPath);
-			const eventStreamStore = createTestEventStreamStore();
-			const originalAppend = eventStreamStore.appendEvent.bind(eventStreamStore);
-			let failedUserAppend = false;
-			eventStreamStore.appendEvent = async (path, event) => {
-				if (
-					!failedUserAppend &&
-					(event as { type?: string; message?: { role?: string } }).type === 'message_end' &&
-					(event as { message?: { role?: string } }).message?.role === 'user'
-				) {
-					failedUserAppend = true;
-					throw new Error('event store unavailable');
-				}
-				return originalAppend(path, event);
-			};
-			const consoleError = vi.spyOn(console, 'error').mockImplementation(() => undefined);
-			const coordinator = createNodeAgentCoordinator({
-				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
-				agents: [
-					{
-						name: 'assistant',
-						definition: defineAgent(() => ({
-							model: `${provider.getModel().provider}/${provider.getModel().id}`,
-						})),
-					},
-				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore,
-			});
-
-			try {
-				const receipt = await coordinator
-					.createAdmission('assistant', 'instance-1')({ message: 'Hello best effort' });
-
-				expect(receipt.result).toMatchObject({ text: 'Best-effort reply.' });
-				expect(failedUserAppend).toBe(true);
-				expect(consoleError).toHaveBeenCalledWith(
-					'[flue:event-stream] Direct user event persistence failed before provider execution:',
-					expect.any(Error),
-				);
-			} finally {
-				consoleError.mockRestore();
-			}
-		});
-
-		it('appends the terminal result before settling a direct prompt', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Terminal reply.')]);
-			const executionStore = await openExecutionStore(dbPath);
-			const eventStreamStore = createTestEventStreamStore();
-			let terminalAppended = false;
-			const originalAppend = eventStreamStore.appendEvent.bind(eventStreamStore);
-			eventStreamStore.appendEvent = async (path, event) => {
-				if ((event as { type?: string }).type === 'submission_settled') terminalAppended = true;
-				return originalAppend(path, event);
-			};
-			const originalComplete = executionStore.submissions.completeSubmission.bind(
-				executionStore.submissions,
-			);
-			executionStore.submissions.completeSubmission = async (attempt) => {
-				expect(terminalAppended).toBe(true);
-				return originalComplete(attempt);
-			};
-			const coordinator = createNodeAgentCoordinator({
-				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
-				agents: [
-					{
-						name: 'assistant',
-						definition: defineAgent(() => ({
-							model: `${provider.getModel().provider}/${provider.getModel().id}`,
-						})),
-					},
-				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore,
-			});
-
-			const receipt = await coordinator
-				.createAdmission('assistant', 'instance-1')({ message: 'Hello terminal event' });
-			const stream = await eventStreamStore.readEvents(agentStreamPath('assistant', 'instance-1'));
-			const terminal = stream.events
-				.map((event) => event.data as Record<string, unknown>)
-				.find((event) => event.type === 'submission_settled');
-
-			expect(terminal).toMatchObject({
-				outcome: 'completed',
-				submissionId: receipt.submissionId,
-				result: { text: 'Terminal reply.' },
-			});
-		});
-
 		it('persists direct prompt submission across store reopens', async () => {
 			const dbPath = createTempDbPath();
 			const provider = createFauxProvider();
@@ -2011,6 +988,40 @@ describe('NodeAgentCoordinator', () => {
 			// "Restart": open the same file with a fresh store and verify settled.
 			const reopened = await openExecutionStore(dbPath);
 			expect(await reopened.submissions.hasUnsettledSubmissions()).toBe(false);
+		});
+
+		it('replays the direct prompt user message through the public conversation history', async () => {
+			// Regression for the durable-stream contract (#368/#307): a direct
+			// prompt's user message must survive in the materialized history read —
+			// what a client rebuilds from after a page refresh — and carry the
+			// submission id so an optimistic local message can be reconciled.
+			const dbPath = createTempDbPath();
+			const provider = createFauxProvider();
+			provider.setResponses([fauxAssistantMessage('Direct reply.')]);
+			const { coordinator } = await createFauxCoordinator(dbPath, provider);
+
+			const receipt = await coordinator.createAdmission('assistant', 'instance-1')({
+				message: 'Hello from direct prompt',
+			});
+
+			const adapter = sqlite(dbPath);
+			await adapter.migrate?.();
+			const { conversationStreamStore } = await adapter.connect();
+			const response = await handleAgentConversationRead({
+				store: conversationStreamStore,
+				path: agentStreamPath('assistant', 'instance-1'),
+				request: new Request('https://flue.test/agents/assistant/instance-1?view=history'),
+			});
+			const snapshot = (await response.json()) as {
+				messages: { role: string; submissionId?: string; parts: unknown[] }[];
+			};
+
+			const userMessage = snapshot.messages.find((message) => message.role === 'user');
+			expect(userMessage).toMatchObject({
+				role: 'user',
+				submissionId: receipt.submissionId,
+				parts: [{ type: 'text', text: 'Hello from direct prompt', state: 'done' }],
+			});
 		});
 
 		it('forwards events to the attached observer during processing', async () => {
@@ -2098,6 +1109,7 @@ describe('NodeAgentCoordinator', () => {
 				payload: { message: 'Hello interrupted' },
 				acceptedAt: new Date().toISOString(),
 			});
+			await store.submissions.markSubmissionCanonicalReady('direct-interrupted');
 			await store.submissions.claimSubmission({
 				submissionId: 'direct-interrupted',
 				attemptId: 'attempt-crashed',
@@ -2130,6 +1142,7 @@ describe('NodeAgentCoordinator', () => {
 				payload: { message: 'Hello terminalized' },
 				acceptedAt: new Date().toISOString(),
 			});
+			await store.submissions.markSubmissionCanonicalReady('direct-terminalized');
 			await store.submissions.claimSubmission({
 				submissionId: 'direct-terminalized',
 				attemptId: 'attempt-applied',
@@ -2150,195 +1163,6 @@ describe('NodeAgentCoordinator', () => {
 			expect(submission?.error).toBeUndefined();
 		});
 
-		it('resolves a waiting direct prompt with the persisted result when reconciliation settles completed work', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
-			const executionStore = await openExecutionStore(dbPath);
-			const eventStreamStore = createTestEventStreamStore();
-			const coordinator = createNodeAgentCoordinator({
-				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
-				agents: [
-					{
-						name: 'assistant',
-						definition: defineAgent(() => ({
-							model: `${provider.getModel().provider}/${provider.getModel().id}`,
-						})),
-					},
-				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore,
-			});
-
-			// Simulate an attempt that checkpointed a completed canonical
-			// response and lost its lease before the settlement CAS: intercept
-			// admission to claim with an already-expired lease and persist the
-			// completed session, so this coordinator's expired-lease
-			// reconciliation — not normal processing — settles the submission
-			// while the caller is still awaiting completion.
-			const originalAdmit = executionStore.submissions.admitDirect.bind(executionStore.submissions);
-			executionStore.submissions.admitDirect = async (input) => {
-				const admitted = await originalAdmit(input);
-				await executionStore.submissions.claimSubmission({
-					submissionId: input.submissionId,
-					attemptId: 'attempt-lease-expired',
-					ownerId: 'previous-owner',
-					leaseExpiresAt: 1,
-				});
-				await executionStore.submissions.markSubmissionInputApplied({
-					submissionId: input.submissionId,
-					attemptId: 'attempt-lease-expired',
-				});
-				const storageKey = createSessionStorageKey('instance-1', 'default', 'default');
-				const now = new Date().toISOString();
-				await executionStore.sessions.save(storageKey, {
-					version: 8,
-					conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-				affinityKey: generateSessionAffinityKey(),
-					childSessions: [],
-					entries: [
-						{
-							type: 'message',
-							id: 'e1',
-							parentId: null,
-							timestamp: now,
-							message: {
-								role: 'user',
-								content: [{ type: 'text', text: 'Hello reconciled' }],
-								timestamp: Date.now(),
-							} as any,
-							directSubmissionId: input.submissionId,
-						},
-						{
-							type: 'message',
-							id: 'e2',
-							parentId: 'e1',
-							timestamp: now,
-							message: {
-								role: 'assistant',
-								content: [{ type: 'text', text: 'Completed canonical response.' }],
-								stopReason: 'stop',
-								api: 'test',
-								provider: 'test',
-								model: 'test-model',
-								usage: {
-									input: 0,
-									output: 0,
-									totalTokens: 0,
-									cost: { input: 0, output: 0, total: 0 },
-								},
-								timestamp: Date.now(),
-							} as any,
-						},
-					],
-					leafId: 'e2',
-					metadata: {},
-					createdAt: now,
-					updatedAt: now,
-				});
-				return admitted;
-			};
-
-			const admit = coordinator.createAdmission('assistant', 'instance-1');
-			const receipt = await admit({ message: 'Hello reconciled' });
-
-			expect(receipt.result).toMatchObject({
-				text: 'Completed canonical response.',
-				model: { provider: 'test', id: 'test-model' },
-			});
-			expect(await executionStore.submissions.hasUnsettledSubmissions()).toBe(false);
-			// Reconciliation-driven settlement appends a durable event so
-			// detached stream readers also observe the outcome.
-			const stream = await eventStreamStore.readEvents(agentStreamPath('assistant', 'instance-1'));
-			const settledEvents = stream.events
-				.map((event) => event.data as Record<string, unknown>)
-				.filter((event) => event.type === 'submission_settled');
-			expect(settledEvents).toMatchObject([
-				{
-					outcome: 'completed',
-					submissionId: receipt.submissionId,
-					result: { text: 'Completed canonical response.' },
-				},
-			]);
-		});
-
-		it('rejects a waiting direct prompt with a typed interrupted error when reconciliation terminalizes it', async () => {
-			const dbPath = createTempDbPath();
-			const provider = createFauxProvider();
-			provider.setResponses([fauxAssistantMessage('Should not be called.')]);
-			const executionStore = await openExecutionStore(dbPath);
-			const eventStreamStore = createTestEventStreamStore();
-			const coordinator = createNodeAgentCoordinator({
-				submissions: executionStore.submissions,
-				sessions: executionStore.sessions,
-				agents: [
-					{
-						name: 'assistant',
-						definition: defineAgent(() => ({
-							model: `${provider.getModel().provider}/${provider.getModel().id}`,
-						})),
-					},
-				],
-				createContext: makeFauxCreateContext(provider, executionStore),
-				eventStreamStore,
-			});
-
-			// Simulate an attempt that lost its lease after recording input
-			// application but before persisting any canonical work: intercept
-			// admission to claim with an already-expired lease and mark input
-			// applied, so this coordinator's expired-lease reconciliation —
-			// not normal processing — terminalizes the submission while the
-			// caller is still awaiting completion.
-			const originalAdmit = executionStore.submissions.admitDirect.bind(executionStore.submissions);
-			executionStore.submissions.admitDirect = async (input) => {
-				const admitted = await originalAdmit(input);
-				await executionStore.submissions.claimSubmission({
-					submissionId: input.submissionId,
-					attemptId: 'attempt-lease-expired',
-					ownerId: 'previous-owner',
-					leaseExpiresAt: 1,
-				});
-				await executionStore.submissions.markSubmissionInputApplied({
-					submissionId: input.submissionId,
-					attemptId: 'attempt-lease-expired',
-				});
-				return admitted;
-			};
-
-			const admit = coordinator.createAdmission('assistant', 'instance-1');
-			// The waiting caller rejects with the typed interrupted error —
-			// the settled-submission error vocabulary is structured, not a
-			// raw message string.
-			const rejection = await admit({ message: 'Hello terminalized' }).then(
-				() => undefined,
-				(error: unknown) => error,
-			);
-			expect(rejection).toBeInstanceOf(SubmissionInterruptedError);
-			expect(rejection).toMatchObject({
-				type: 'submission_interrupted',
-				meta: { phase: 'after_input_application' },
-			});
-
-			// Reconciliation-driven failure also appends a durable settlement
-			// event so detached stream readers observe the outcome.
-			const stream = await eventStreamStore.readEvents(agentStreamPath('assistant', 'instance-1'));
-			const settledEvents = stream.events
-				.map((event) => event.data as Record<string, unknown>)
-				.filter((event) => event.type === 'submission_settled');
-			expect(settledEvents).toMatchObject([
-				{
-					outcome: 'failed',
-					submissionId: expect.any(String),
-					error: {
-						type: 'submission_interrupted',
-						message: expect.any(String),
-					},
-				},
-			]);
-			expect(settledEvents[0]).toHaveProperty('submissionId');
-		});
-
 		it('silently recovers a direct prompt after restart with no attached observer', async () => {
 			const dbPath = createTempDbPath();
 			const provider = createFauxProvider();
@@ -2354,6 +1178,7 @@ describe('NodeAgentCoordinator', () => {
 				payload: { message: 'Hello silent' },
 				acceptedAt: new Date().toISOString(),
 			});
+			await store.submissions.markSubmissionCanonicalReady('direct-no-observer');
 			await store.submissions.claimSubmission({
 				submissionId: 'direct-no-observer',
 				attemptId: 'attempt-silent',
@@ -2410,6 +1235,7 @@ describe('NodeAgentCoordinator', () => {
 				payload: { message: 'Direct first' },
 				acceptedAt: new Date().toISOString(),
 			});
+			await store.submissions.markSubmissionCanonicalReady('direct-head');
 			await store.submissions.claimSubmission({
 				submissionId: 'direct-head',
 				attemptId: 'attempt-running',
@@ -2431,5 +1257,6 @@ describe('NodeAgentCoordinator', () => {
 			const runnable = await store.submissions.listRunnableSubmissions();
 			expect(runnable.find((s) => s.submissionId === 'dispatch-queued-behind')).toBeUndefined();
 		});
+	});
 	});
 });

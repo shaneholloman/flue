@@ -8,18 +8,18 @@ import {
 } from '@earendil-works/pi-ai';
 import * as v from 'valibot';
 import { afterEach, describe, expect, it, vi } from 'vitest';
+import { projectConversationUi } from '../src/conversation-projections.ts';
+import { ConversationRecordWriter } from '../src/conversation-writer.ts';
 import {
 	defineAgent,
-	defineAgentProfile,
 	defineTool,
 	ModelNotConfiguredError,
 	observe,
 	SessionBusyError,
-	SubagentNotDeclaredError,
 } from '../src/index.ts';
-import { createFlueContext, InMemorySessionStore } from '../src/internal.ts';
-import { MAX_IMAGE_DATA_LENGTH } from '../src/persisted-images.ts';
-import type { SessionData, SessionEnv, SessionStore } from '../src/types.ts';
+import { createFlueContext, InMemoryAttachmentStore, InMemoryConversationStreamStore } from '../src/internal.ts';
+import { getInternalSession } from '../src/session.ts';
+import type { SessionEnv } from '../src/types.ts';
 import { createNoopSessionEnv } from './fixtures/session-env.ts';
 
 const providers: FauxProviderRegistration[] = [];
@@ -39,7 +39,7 @@ function createProvider(models?: FauxModelDefinition[]): FauxProviderRegistratio
 
 function createContext(
 	provider: FauxProviderRegistration,
-	options: { env?: SessionEnv; store?: SessionStore } = {},
+	options: { env?: SessionEnv } = {},
 ) {
 	return createFlueContext({
 		id: 'session-operations-instance',
@@ -51,141 +51,13 @@ function createContext(
 			},
 		},
 		createDefaultEnv: async () => options.env ?? createNoopSessionEnv(),
-		defaultStore: options.store ?? new InMemorySessionStore(),
 	});
-}
-
-class RecordingSessionStore implements SessionStore {
-	readonly records = new Map<string, SessionData>();
-
-	async save(id: string, data: SessionData): Promise<void> {
-		this.records.set(id, structuredClone(data));
-	}
-
-	async load(id: string): Promise<SessionData | null> {
-		return structuredClone(this.records.get(id) ?? null);
-	}
-
-	async delete(id: string): Promise<void> {
-		this.records.delete(id);
-	}
 }
 
 describe('session.prompt()', () => {
-	it('persists user input before provider inference begins when prompt() starts', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const store = new RecordingSessionStore();
-		provider.setResponses([
-			(context) => {
-				const data = [...store.records.values()][0];
-				expect(data?.entries).toEqual([
-					expect.objectContaining({
-						message: expect.objectContaining({ role: 'user' }),
-					}),
-				]);
-				expect(context.messages).toEqual([expect.objectContaining({ role: 'user' })]);
-				return fauxAssistantMessage('Reviewed workspace.');
-			},
-		]);
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
 
-		await session.prompt('Review this workspace.');
-	});
 
-	it('does not invoke the provider when persisting the user checkpoint fails', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const store = new RecordingSessionStore();
-		const save = store.save.bind(store);
-		store.save = async (id, data) => {
-			if (data.entries.some((entry) => entry.type === 'message' && entry.message.role === 'user')) {
-				throw new Error('persist failed');
-			}
-			await save(id, data);
-		};
-		provider.setResponses([fauxAssistantMessage('Should not be requested.')]);
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
 
-		await expect(session.prompt('Review this workspace.')).rejects.toThrow('persist failed');
-		expect(provider.state.callCount).toBe(0);
-	});
-
-	it('rejects an oversized image without invoking the provider or poisoning the session when prompt() receives image data over the persistence limit', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const store = new RecordingSessionStore();
-		provider.setResponses([fauxAssistantMessage('Reviewed workspace.')]);
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await expect(
-			session.prompt('Describe this image.', {
-				images: [
-					{
-						type: 'image',
-						data: 'a'.repeat(MAX_IMAGE_DATA_LENGTH + 1),
-						mimeType: 'image/png',
-					},
-				],
-			}),
-		).rejects.toThrow(`Image data exceeds the ${MAX_IMAGE_DATA_LENGTH} character limit.`);
-		expect(provider.state.callCount).toBe(0);
-
-		const response = await session.prompt('Review this workspace.');
-		expect(response.text).toBe('Reviewed workspace.');
-		const data = [...store.records.values()].at(-1);
-		expect(data?.entries).not.toContainEqual(
-			expect.objectContaining({
-				message: expect.objectContaining({
-					content: expect.arrayContaining([expect.objectContaining({ type: 'image' })]),
-				}),
-			}),
-		);
-	});
-
-	it('does not duplicate a user checkpoint when the first save fails and the failure turn saves later', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const store = new RecordingSessionStore();
-		const save = store.save.bind(store);
-		let failed = false;
-		store.save = async (id, data) => {
-			if (
-				!failed &&
-				data.entries.some((entry) => entry.type === 'message' && entry.message.role === 'user')
-			) {
-				failed = true;
-				throw new Error('persist failed');
-			}
-			await save(id, data);
-		};
-		provider.setResponses([fauxAssistantMessage('Should not be requested.')]);
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await expect(session.prompt('Review this workspace.')).rejects.toThrow('persist failed');
-		const data = [...store.records.values()][0];
-		expect(
-			data?.entries.filter((entry) => entry.type === 'message' && entry.message.role === 'user'),
-		).toHaveLength(1);
-		expect(
-			data?.entries.filter(
-				(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-			),
-		).toHaveLength(1);
-		expect(provider.state.callCount).toBe(0);
-	});
 
 	it('emits streaming deltas and final messages without public message updates when a prompt streams text and thinking', async () => {
 		const provider = createProvider([{ id: 'reviewer' }]);
@@ -249,32 +121,6 @@ describe('session.prompt()', () => {
 		);
 	});
 
-	it('persists completed assistant output before the agent reaches idle when a prompt returns no tool calls', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const store = new RecordingSessionStore();
-		const events: string[] = [];
-		provider.setResponses([fauxAssistantMessage('Reviewed workspace.')]);
-		const ctx = createContext(provider, { store });
-		ctx.subscribeEvent((event) => {
-			if (event.type === 'agent_end') {
-				events.push('agent_end');
-				const data = [...store.records.values()][0];
-				expect(data?.entries).toEqual([
-					expect.objectContaining({ message: expect.objectContaining({ role: 'user' }) }),
-					expect.objectContaining({ message: expect.objectContaining({ role: 'assistant' }) }),
-				]);
-			}
-			if (event.type === 'idle') events.push('idle');
-		});
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await session.prompt('Review this workspace.');
-
-		expect(events).toEqual(['agent_end', 'idle']);
-	});
 
 	it('returns assistant text usage and model identity when a prompt completes', async () => {
 		const provider = createProvider([{ id: 'reviewer' }]);
@@ -324,9 +170,8 @@ describe('session.prompt()', () => {
 					return fauxAssistantMessage('Recovered response.');
 				},
 			]);
-			const store = new RecordingSessionStore();
 			const events: unknown[] = [];
-			const ctx = createContext(provider, { store });
+			const ctx = createContext(provider);
 			ctx.subscribeEvent((event) => {
 				events.push(event);
 			});
@@ -352,12 +197,6 @@ describe('session.prompt()', () => {
 						event.message === '[flue:model-retry] Retrying transient model error',
 				),
 			).toHaveLength(1);
-			const data = [...store.records.values()][0];
-			expect(
-				data?.entries.filter(
-					(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-				),
-			).toHaveLength(2);
 		} finally {
 			vi.useRealTimers();
 		}
@@ -462,21 +301,12 @@ describe('session.prompt()', () => {
 				return fauxAssistantMessage('Recovered after configuration update.');
 			},
 		]);
-		const store = new RecordingSessionStore();
-		const ctx = createContext(provider, { store });
+		const ctx = createContext(provider);
 		const harness = await ctx.initializeRootHarness(
 			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
 		);
 		const session = await harness.session();
 		await expect(session.prompt('First attempt.')).rejects.toThrow('invalid_api_key');
-		const data = [...store.records.values()][0];
-		expect(
-			data?.entries.filter(
-				(entry) => entry.type === 'message' && entry.message.role === 'assistant',
-			),
-		).toEqual([
-			expect.objectContaining({ message: expect.objectContaining({ stopReason: 'error' }) }),
-		]);
 
 		await expect(session.prompt('Try after configuration update.')).resolves.toMatchObject({
 			text: 'Recovered after configuration update.',
@@ -488,90 +318,6 @@ describe('session.prompt()', () => {
 		]);
 	});
 
-	it('omits an incomplete persisted tool-request group from later provider input while retaining canonical entries', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		let retryContext: unknown[] = [];
-		provider.setResponses([
-			(context) => {
-				retryContext = context.messages;
-				return fauxAssistantMessage('Recovered after interruption advisory.');
-			},
-		]);
-		const store = new RecordingSessionStore();
-		const timestamp = '2026-06-01T00:00:00.000Z';
-		await store.save('agent-session:["session-operations-instance","default","default"]', {
-			version: 8,
-			conversationId: 'conv_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			affinityKey: 'aff_01KT3P3GZGFBCKHKMQ11A7H2HW',
-			childSessions: [],
-			entries: [
-				{
-					type: 'message',
-					id: 'user-1',
-					parentId: null,
-					timestamp,
-					message: {
-						role: 'user',
-						content: [{ type: 'text', text: 'Use the tool.' }],
-						timestamp: 0,
-					},
-				},
-				{
-					type: 'message',
-					id: 'assistant-1',
-					parentId: 'user-1',
-					timestamp,
-					message: fauxAssistantMessage(fauxToolCall('lookup', { query: 'flue' }), {
-						stopReason: 'toolUse',
-					}),
-				},
-				{
-					type: 'message',
-					id: 'advisory-1',
-					parentId: 'assistant-1',
-					timestamp,
-					message: {
-						role: 'signal',
-						type: 'submission_interrupted',
-						content: 'Provider replay was not attempted.',
-						attributes: {
-							submissionId: 'sub-1',
-							kind: 'direct',
-							reason: 'interrupted_after_input_application',
-						},
-						timestamp: 0,
-					},
-				},
-			],
-			leafId: 'advisory-1',
-			metadata: {},
-			createdAt: timestamp,
-			updatedAt: timestamp,
-		});
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await expect(session.prompt('Try again.')).resolves.toMatchObject({
-			text: 'Recovered after interruption advisory.',
-		});
-
-		expect(retryContext).toEqual([
-			expect.objectContaining({ role: 'user', content: [{ type: 'text', text: 'Use the tool.' }] }),
-			expect.objectContaining({
-				role: 'user',
-				content: [
-					{
-						type: 'text',
-						text: expect.stringContaining('submission_interrupted'),
-					},
-				],
-			}),
-			expect.objectContaining({ role: 'user', content: [{ type: 'text', text: 'Try again.' }] }),
-		]);
-	});
 
 	it('uses a call-level model when a prompt overrides the agent model', async () => {
 		const provider = createProvider([{ id: 'default-model' }, { id: 'override-model' }]);
@@ -700,6 +446,151 @@ describe('session.task()', () => {
 		expect(taskRequests).toEqual([['Review only the delegated input.']]);
 	});
 
+	it('keeps distinct dispatch IDs distinct when sanitized forms would collide', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		provider.setResponses([
+			fauxAssistantMessage('First response.'),
+			fauxAssistantMessage('Second response.'),
+		]);
+		const ctx = createContext(provider);
+		const harness = await ctx.initializeRootHarness(
+			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
+		);
+		const session = await harness.session();
+		const internal = getInternalSession(session);
+		if (!internal) throw new Error('Expected internal session.');
+
+		const first = await internal.processSubmissionInput({
+			kind: 'dispatch',
+			submissionId: 'job/a',
+			dispatchId: 'job/a',
+			agent: 'assistant',
+			id: 'agent-1',
+			input: { value: 'first' },
+			acceptedAt: new Date().toISOString(),
+		});
+		const second = await internal.processSubmissionInput({
+			kind: 'dispatch',
+			submissionId: 'job?a',
+			dispatchId: 'job?a',
+			agent: 'assistant',
+			id: 'agent-1',
+			input: { value: 'second' },
+			acceptedAt: new Date().toISOString(),
+		});
+
+		expect(first.text).toBe('First response.');
+		expect(second.text).toBe('Second response.');
+	});
+
+	it('reuses an already committed interrupted-stream recovery after restart', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		const store = new InMemoryConversationStreamStore();
+		const writer = await ConversationRecordWriter.create({
+			store,
+			path: 'agents/assistant/recovery-instance',
+			identity: { agentName: 'assistant', instanceId: 'recovery-instance' },
+			producerId: 'producer-1',
+		});
+		const timestamp = new Date().toISOString();
+		await writer.append([
+			{
+				v: 1,
+				id: 'record-created',
+				type: 'conversation_created',
+				kind: 'root',
+				conversationId: 'conversation-recovery',
+				harness: 'default',
+				session: 'default',
+				timestamp,
+				affinityKey: 'affinity-recovery',
+				createdAt: timestamp,
+			},
+			{
+				v: 1,
+				id: 'record-user',
+				type: 'user_message',
+				conversationId: 'conversation-recovery',
+				harness: 'default',
+				session: 'default',
+				timestamp,
+				submissionId: 'submission-recovery',
+				attemptId: 'attempt-recovery',
+				messageId: 'entry_user',
+				parentId: null,
+				content: [{ type: 'text', text: 'Continue' }],
+			},
+			{
+				v: 1,
+				id: 'record-assistant-started',
+				type: 'assistant_message_started',
+				conversationId: 'conversation-recovery',
+				harness: 'default',
+				session: 'default',
+				timestamp,
+				submissionId: 'submission-recovery',
+				attemptId: 'attempt-recovery',
+				turnId: 'turn-recovery',
+				messageId: 'entry_partial',
+				parentId: 'entry_user',
+				modelInfo: { api: 'faux', provider: provider.getModel().provider, model: 'reviewer' },
+			},
+			{
+				v: 1,
+				id: 'record-text-started',
+				type: 'assistant_text_started',
+				conversationId: 'conversation-recovery',
+				harness: 'default',
+				session: 'default',
+				timestamp,
+				submissionId: 'submission-recovery',
+				attemptId: 'attempt-recovery',
+				messageId: 'entry_partial',
+				blockId: 'block_partial',
+				blockIndex: 0,
+			},
+			{
+				v: 1,
+				id: 'record-text-delta',
+				type: 'assistant_text_delta',
+				conversationId: 'conversation-recovery',
+				harness: 'default',
+				session: 'default',
+				timestamp,
+				submissionId: 'submission-recovery',
+				attemptId: 'attempt-recovery',
+				messageId: 'entry_partial',
+				blockId: 'block_partial',
+				sequence: 0,
+				delta: 'Partial',
+			},
+		], { submission: { submissionId: 'submission-recovery', attemptId: 'attempt-recovery' } });
+		const ctx = createFlueContext({
+			id: 'recovery-instance',
+			env: {},
+			agentConfig: { resolveModel: () => provider.getModel('reviewer') },
+			createDefaultEnv: async () => createNoopSessionEnv(),
+			conversationWriter: writer,
+			attachmentStore: new InMemoryAttachmentStore(),
+		});
+		const harness = await ctx.initializeRootHarness(
+			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
+		);
+		const internal = getInternalSession(await harness.session());
+		if (!internal) throw new Error('Expected internal session.');
+
+		expect(await internal.recoverInterruptedStream({
+			submissionId: 'submission-recovery',
+			attemptId: 'attempt-recovery',
+		}, 'turn-recovery')).toBe(true);
+		const offset = writer.offset;
+		expect(await internal.recoverInterruptedStream({
+			submissionId: 'submission-recovery',
+			attemptId: 'attempt-recovery',
+		}, 'turn-recovery')).toBe(true);
+		expect(writer.offset).toBe(offset);
+	});
+
 	it('correlates a model task tool call with its task start observation', async () => {
 		const provider = createProvider([{ id: 'reviewer' }]);
 		const toolCallId = `tool:${crypto.randomUUID()}`;
@@ -729,6 +620,156 @@ describe('session.task()', () => {
 		} finally {
 			stopObserving();
 		}
+	});
+
+	it('keeps ordinary prompt text canonical while projecting the attachment manifest to the model', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		const store = new InMemoryConversationStreamStore();
+		const attachments = new InMemoryAttachmentStore();
+		const writer = await ConversationRecordWriter.create({
+			store,
+			path: 'agents/assistant/canonical-prompt-instance',
+			identity: { agentName: 'assistant', instanceId: 'canonical-prompt-instance' },
+			producerId: 'producer-1',
+		});
+		let modelText = '';
+		provider.setResponses([(context) => {
+			const prompt = context.messages[0];
+			modelText = prompt && Array.isArray(prompt.content)
+				? prompt.content.find((block) => block.type === 'text')?.text ?? ''
+				: '';
+			return fauxAssistantMessage('Done.');
+		}]);
+		const ctx = createFlueContext({
+			id: 'canonical-prompt-instance',
+			env: {},
+			agentConfig: { resolveModel: () => provider.getModel('reviewer') },
+			createDefaultEnv: async () => createNoopSessionEnv(),
+			conversationWriter: writer,
+			attachmentStore: attachments,
+		});
+		const harness = await ctx.initializeRootHarness(
+			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
+		);
+		const session = await harness.session();
+
+		await session.prompt('Inspect this image.', {
+			images: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
+		});
+
+		const conversation = await writer.getConversation(session.conversationId);
+		if (!conversation) throw new Error('Expected conversation.');
+		expect(projectConversationUi(conversation, writer.offset).messages[0]?.parts).toEqual([
+			{ type: 'text', text: 'Inspect this image.', state: 'done' },
+			{ type: 'file', mediaType: 'image/png', id: expect.stringMatching(/^att_prompt_/), size: 5 },
+		]);
+		expect(modelText).toMatch(/^Inspect this image\.\n\n<attachments>\n<image id="att_prompt_[^"]+" mimeType="image\/png" \/>\n<\/attachments>$/);
+	});
+
+	it('projects structured tool output onto the canonical tool part instead of model-facing text', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		const store = new InMemoryConversationStreamStore();
+		const writer = await ConversationRecordWriter.create({
+			store,
+			path: 'agents/assistant/structured-tool-instance',
+			identity: { agentName: 'assistant', instanceId: 'structured-tool-instance' },
+			producerId: 'producer-1',
+		});
+		let modelContext = '';
+		provider.setResponses([
+			fauxAssistantMessage(fauxToolCall('weather', { city: 'NYC' }), { stopReason: 'toolUse' }),
+			(context) => {
+				modelContext = JSON.stringify(context.messages);
+				return fauxAssistantMessage('Reported the weather.');
+			},
+		]);
+		const weather = defineTool({
+			name: 'weather',
+			description: 'Look up the weather.',
+			input: v.object({ city: v.string() }),
+			output: v.object({ temperature: v.number() }),
+			run: async () => ({ temperature: 21 }),
+		});
+		const ctx = createFlueContext({
+			id: 'structured-tool-instance',
+			env: {},
+			agentConfig: { resolveModel: () => provider.getModel('reviewer') },
+			createDefaultEnv: async () => createNoopSessionEnv(),
+			conversationWriter: writer,
+		});
+		const harness = await ctx.initializeRootHarness(
+			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer`, tools: [weather] })),
+		);
+		const session = await harness.session();
+
+		await session.prompt('What is the weather?');
+
+		const conversation = await writer.getConversation(session.conversationId);
+		if (!conversation) throw new Error('Expected conversation.');
+		const toolPart = projectConversationUi(conversation, writer.offset)
+			.messages.flatMap((message) => message.parts)
+			.find((part) => part.type === 'dynamic-tool');
+		expect(toolPart).toMatchObject({
+			type: 'dynamic-tool',
+			toolName: 'weather',
+			state: 'output-available',
+			output: { temperature: 21 },
+		});
+		// The model still received the serialized JSON text, not the structured object.
+		expect(modelContext).toContain('temperature');
+	});
+
+	it('projects equivalent attachment context for direct input and restart replay', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		const store = new InMemoryConversationStreamStore();
+		const attachments = new InMemoryAttachmentStore();
+		const writer = await ConversationRecordWriter.create({
+			store,
+			path: 'agents/assistant/direct-replay-instance',
+			identity: { agentName: 'assistant', instanceId: 'direct-replay-instance' },
+			producerId: 'producer-1',
+		});
+		const contexts: unknown[] = [];
+		provider.setResponses([
+			(context) => {
+				contexts.push(context.messages[0]);
+				return fauxAssistantMessage('First response.');
+			},
+			(context) => {
+				contexts.push(context.messages[0]);
+				return fauxAssistantMessage('Second response.');
+			},
+		]);
+		const createContextForWriter = () => createFlueContext({
+			id: 'direct-replay-instance',
+			env: {},
+			agentConfig: { resolveModel: () => provider.getModel('reviewer') },
+			createDefaultEnv: async () => createNoopSessionEnv(),
+			conversationWriter: writer,
+			attachmentStore: attachments,
+		});
+		const firstHarness = await createContextForWriter().initializeRootHarness(
+			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
+		);
+		const firstInternal = getInternalSession(await firstHarness.session());
+		if (!firstInternal) throw new Error('Expected internal session.');
+		await firstInternal.processSubmissionInput({
+			kind: 'direct',
+			submissionId: 'direct-image',
+			agent: 'assistant',
+			id: 'direct-replay-instance',
+			payload: {
+				message: 'Inspect direct image.',
+				images: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
+			},
+			acceptedAt: new Date().toISOString(),
+		});
+		const secondHarness = await createContextForWriter().initializeRootHarness(
+			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
+		);
+		await (await secondHarness.session()).prompt('Continue after restart.');
+
+		expect(contexts[1]).toEqual(contexts[0]);
 	});
 
 	it('passes a visible parent image to the child when the task tool receives its attachment ID', async () => {
@@ -817,6 +858,47 @@ describe('session.task()', () => {
 		await session.prompt('Delegate this image.', {
 			images: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
 		});
+	})
+
+	it('deduplicates repeated attachment IDs before passing images to the child', async () => {
+		const provider = createProvider([{ id: 'reviewer' }]);
+		let attachmentId = '';
+		provider.setResponses([
+			(context) => {
+				const prompt = context.messages[0];
+				const text =
+					prompt && Array.isArray(prompt.content)
+						? prompt.content.find((block) => block.type === 'text')?.text
+						: undefined;
+				attachmentId = text?.match(/id="(att_[^"]+)"/)?.[1] ?? '';
+				return fauxAssistantMessage(
+					fauxToolCall('task', {
+						prompt: 'Analyze the delegated image.',
+						attachments: [{ id: attachmentId }, { id: attachmentId }],
+					}),
+					{ stopReason: 'toolUse' },
+				);
+			},
+			(context) => {
+				const prompt = context.messages[0];
+				const images =
+					prompt && Array.isArray(prompt.content)
+						? prompt.content.filter((block) => block.type === 'image')
+						: [];
+				expect(images).toEqual([{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }]);
+				return fauxAssistantMessage('Image analyzed once.');
+			},
+			fauxAssistantMessage('Delegation complete.'),
+		]);
+		const ctx = createContext(provider);
+		const harness = await ctx.initializeRootHarness(
+			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
+		);
+		const session = await harness.session();
+
+		await session.prompt('Delegate this image.', {
+			images: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
+		});
 	});
 
 	it('returns a structured error without creating a child when the task tool receives an unavailable attachment ID', async () => {
@@ -835,8 +917,7 @@ describe('session.task()', () => {
 				return fauxAssistantMessage('Handled missing attachment.');
 			},
 		]);
-		const store = new RecordingSessionStore();
-		const ctx = createContext(provider, { store });
+		const ctx = createContext(provider);
 		const harness = await ctx.initializeRootHarness(
 			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
 		);
@@ -855,7 +936,6 @@ describe('session.task()', () => {
 				},
 			],
 		});
-		expect([...store.records.keys()].some((key) => key.includes('task:default:'))).toBe(false);
 	});
 
 	it('rejects an attachment ID after compaction removes its image from model context', async () => {
@@ -888,8 +968,7 @@ describe('session.task()', () => {
 				return fauxAssistantMessage('Handled compacted attachment.');
 			},
 		]);
-		const store = new RecordingSessionStore();
-		const ctx = createContext(provider, { store });
+		const ctx = createContext(provider);
 		const harness = await ctx.initializeRootHarness(
 			defineAgent(() => ({
 				model: `${provider.getModel().provider}/reviewer`,
@@ -916,329 +995,6 @@ describe('session.task()', () => {
 				},
 			],
 		});
-		expect([...store.records.keys()].some((key) => key.includes('task:default:'))).toBe(false);
-	});
-
-	it('preserves attachment identity after session state is reloaded', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		let attachmentId = '';
-		provider.setResponses([
-			(context) => {
-				const prompt = context.messages[0];
-				const text =
-					prompt && Array.isArray(prompt.content)
-						? prompt.content.find((block) => block.type === 'text')?.text
-						: undefined;
-				attachmentId = text?.match(/id="(att_[^"]+)"/)?.[1] ?? '';
-				return fauxAssistantMessage('Stored image.');
-			},
-			() =>
-				fauxAssistantMessage(
-					fauxToolCall('task', {
-						prompt: 'Analyze the stored image.',
-						attachments: [{ id: attachmentId }],
-					}),
-					{ stopReason: 'toolUse' },
-				),
-			(context) => {
-				expect(context.messages[0]).toMatchObject({
-					role: 'user',
-					content: expect.arrayContaining([
-						{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' },
-					]),
-				});
-				return fauxAssistantMessage('Reloaded image analyzed.');
-			},
-			fauxAssistantMessage('Delegation complete.'),
-		]);
-		const store = new RecordingSessionStore();
-		const agent = defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` }));
-		const firstContext = createContext(provider, { store });
-		const firstHarness = await firstContext.initializeRootHarness(agent);
-		const firstSession = await firstHarness.session();
-		await firstSession.prompt('Store this image.', {
-			images: [{ type: 'image', data: 'aGVsbG8=', mimeType: 'image/png' }],
-		});
-		const secondContext = createContext(provider, { store });
-		const secondHarness = await secondContext.initializeRootHarness(agent);
-		const secondSession = await secondHarness.session();
-
-		const response = await secondSession.prompt('Delegate the stored image.');
-
-		expect(response.text).toBe('Delegation complete.');
-	});
-
-	it('selects a declared subagent profile when task() receives an agent name', async () => {
-		const provider = createProvider([{ id: 'parent-model' }, { id: 'delegate-model' }]);
-		const selectedModels: string[] = [];
-		provider.setResponses([
-			(_context, _options, _state, model) => {
-				selectedModels.push(model.id);
-				return fauxAssistantMessage('Delegated profile response.');
-			},
-		]);
-		const ctx = createContext(provider);
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({
-				model: `${provider.getModel().provider}/parent-model`,
-				subagents: [
-					defineAgentProfile({
-						name: 'code-reviewer',
-						model: `${provider.getModel().provider}/delegate-model`,
-						instructions: 'Review code changes only.',
-					}),
-				],
-			})),
-		);
-		const session = await harness.session();
-
-		const response = await session.task('Review the patch.', { agent: 'code-reviewer' });
-
-		expect(selectedModels).toEqual(['delegate-model']);
-		expect(response).toMatchObject({
-			text: 'Delegated profile response.',
-			model: { provider: provider.getModel().provider, id: 'delegate-model' },
-		});
-	});
-
-	it('gives a subagent no parent tools or skills when its profile declares only name and instructions', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const delegatedToolNames: string[][] = [];
-		provider.setResponses([
-			(context) => {
-				delegatedToolNames.push((context.tools ?? []).map((tool) => tool.name));
-				return fauxAssistantMessage('Summarized.');
-			},
-		]);
-		const ctx = createContext(provider);
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({
-				model: `${provider.getModel().provider}/reviewer`,
-				tools: [
-					defineTool({
-						name: 'deploy_service',
-						description: 'Deploys the production service.',
-						input: v.object({}),
-						run: async () => 'deployed',
-					}),
-				],
-				skills: [{ name: 'release-runbook', description: 'Release process guidance.' }],
-				subagents: [
-					defineAgentProfile({
-						name: 'summarizer',
-						instructions: 'Summarize the supplied text in one line.',
-					}),
-				],
-			})),
-		);
-		const session = await harness.session();
-
-		const response = await session.task('Summarize this report.', { agent: 'summarizer' });
-
-		expect(response.text).toBe('Summarized.');
-		expect(delegatedToolNames).toHaveLength(1);
-		expect(delegatedToolNames[0]).not.toContain('deploy_service');
-		expect(delegatedToolNames[0]).not.toContain('activate_skill');
-	});
-
-	it('rejects an undeclared subagent when task() receives an unknown agent name', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const ctx = createContext(provider);
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({
-				model: `${provider.getModel().provider}/reviewer`,
-				subagents: [defineAgentProfile({ name: 'declared-reviewer', model: false })],
-			})),
-		);
-		const session = await harness.session();
-
-		await expect(session.task('Review the patch.', { agent: 'missing-reviewer' })).rejects.toThrow(
-			SubagentNotDeclaredError,
-		);
-		expect(provider.state.callCount).toBe(0);
-	});
-
-	it('scopes child work to a requested directory when task() receives a cwd', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const taskSystemPrompts: Array<string | undefined> = [];
-		provider.setResponses([
-			(context) => {
-				taskSystemPrompts.push(context.systemPrompt);
-				return fauxAssistantMessage('Scoped review complete.');
-			},
-		]);
-		const ctx = createContext(provider, { env: createNoopSessionEnv({ cwd: '/repo' }) });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		const response = await session.task('Review the runtime package.', { cwd: 'packages/runtime' });
-
-		expect(response.text).toBe('Scoped review complete.');
-		expect(taskSystemPrompts).toHaveLength(1);
-		expect(taskSystemPrompts[0]).toContain('Working directory: /repo/packages/runtime');
-	});
-
-	it('persists distinct opaque affinity keys for delegated task sessions', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		const providerSessionIds: Array<string | undefined> = [];
-		provider.setResponses([
-			(_context, options) => {
-				providerSessionIds.push(options?.sessionId);
-				return fauxAssistantMessage('Delegated response.');
-			},
-		]);
-		const store = new RecordingSessionStore();
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await session.task('Review the persisted child state.');
-
-		expect([...store.records.keys()]).toHaveLength(2);
-		const parentRecord = store.records.get(
-			'agent-session:["session-operations-instance","default","default"]',
-		);
-		const childEntry = [...store.records.entries()].find(([key]) => key.includes('task:default:'));
-		expect(childEntry?.[0]).toMatch(
-			/^agent-session:\["session-operations-instance","default","task:default:[^"]+"\]$/,
-		);
-		expect(parentRecord?.affinityKey).toMatch(/^aff_[0-9A-HJKMNP-TV-Z]{26}$/);
-		expect(childEntry?.[1].affinityKey).toMatch(/^aff_[0-9A-HJKMNP-TV-Z]{26}$/);
-		expect(childEntry?.[1].affinityKey).not.toBe(parentRecord?.affinityKey);
-		expect(providerSessionIds).toEqual([childEntry?.[1].affinityKey]);
-	});
-
-	it('records retained delegated-task relationships before persisting child state', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		provider.setResponses([fauxAssistantMessage('Delegated response.')]);
-		const store = new RecordingSessionStore();
-		const save = store.save.bind(store);
-		store.save = async (id, data) => {
-			if (id.includes('task:default:')) {
-				const parent = store.records.get(
-					'agent-session:["session-operations-instance","default","default"]',
-				);
-				expect(parent?.childSessions).toContainEqual({
-					type: 'task',
-					session: expect.stringMatching(/^task:default:/),
-					taskId: expect.any(String),
-				});
-			}
-			await save(id, data);
-		};
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await session.task('Review the persisted child state.');
-
-		expect([...store.records.keys()]).toHaveLength(2);
-	});
-
-	it('retains every delegated-task relationship when parallel model tasks persist', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		provider.setResponses([
-			fauxAssistantMessage(
-				[
-					fauxToolCall('task', { prompt: 'Review the runtime package.' }),
-					fauxToolCall('task', { prompt: 'Review the SDK package.' }),
-				],
-				{ stopReason: 'toolUse' },
-			),
-			fauxAssistantMessage('Runtime review complete.'),
-			fauxAssistantMessage('SDK review complete.'),
-			fauxAssistantMessage('Both reviews complete.'),
-		]);
-		const store = new RecordingSessionStore();
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await session.prompt('Review both packages.');
-
-		const parent = store.records.get(
-			'agent-session:["session-operations-instance","default","default"]',
-		);
-		expect(parent?.childSessions).toHaveLength(2);
-		expect(parent?.childSessions).toEqual([
-			{
-				type: 'task',
-				session: expect.stringMatching(/^task:default:/),
-				taskId: expect.any(String),
-			},
-			{
-				type: 'task',
-				session: expect.stringMatching(/^task:default:/),
-				taskId: expect.any(String),
-			},
-		]);
-	});
-
-	it('removes persisted delegated-task state when the parent session is deleted', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		provider.setResponses([fauxAssistantMessage('Delegated response.')]);
-		const store = new RecordingSessionStore();
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await session.task('Review the persisted child state.');
-
-		expect([...store.records.keys()]).toHaveLength(2);
-		expect([...store.records.keys()].some((key) => key.includes('task:default:'))).toBe(true);
-		await session.delete();
-		expect([...store.records.keys()]).toEqual([]);
-	});
-
-	it('derives recursive deletion keys from validated task relationships', async () => {
-		const provider = createProvider([{ id: 'reviewer' }]);
-		provider.setResponses([fauxAssistantMessage('Delegated response.')]);
-		const store = new RecordingSessionStore();
-		const ctx = createContext(provider, { store });
-		const harness = await ctx.initializeRootHarness(
-			defineAgent(() => ({ model: `${provider.getModel().provider}/reviewer` })),
-		);
-		const session = await harness.session();
-
-		await session.task('Review the persisted child state.');
-		const parentKey = 'agent-session:["session-operations-instance","default","default"]';
-		const unrelatedKey = 'agent-session:["session-operations-instance","default","unrelated"]';
-		const parent = store.records.get(parentKey);
-		const task = parent?.childSessions[0] as {
-			type: 'task';
-			session: string;
-			taskId: string;
-		};
-		await store.save(unrelatedKey, {
-			version: 8,
-			conversationId: 'conv_01J00000000000000000000000',
-			affinityKey: 'aff_01J00000000000000000000000',
-			entries: [],
-			leafId: null,
-			childSessions: [],
-			metadata: {},
-			createdAt: '2026-06-02T00:00:00.000Z',
-			updatedAt: '2026-06-02T00:00:00.000Z',
-		});
-		task.session = 'unrelated';
-		await store.save(parentKey, parent as SessionData);
-
-		await session.delete();
-
-		// The tampered relationship fails the task-session name validation, so
-		// the cascade does not follow it into the unrelated session.
-		expect(store.records.has(unrelatedKey)).toBe(true);
-		expect(store.records.has(parentKey)).toBe(false);
 	});
 
 	it('rejects recursive delegation when delegation depth exceeds the supported limit', async () => {

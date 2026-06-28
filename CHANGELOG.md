@@ -1,5 +1,25 @@
 # Changelog
 
+## Unreleased
+
+### Breaking Changes
+
+- **Persisted storage is reset-only schema v7.** Pre-1.0 persisted stores from any other schema version are rejected and must be cleared; there is no migration from the beta session-store formats. Custom `PersistenceAdapter` implementations must provide `conversationStreamStore` and `attachmentStore` alongside execution, run, and event-stream stores. `SessionStore` and session-transcript adapter contracts are removed.
+- **Agent conversations use one append-only canonical stream per agent instance.** Session history, compaction, child topology, tool outcomes, settlement, and recovery are canonical records in that stream; operational submission rows and observable event streams are not transcripts. Sessions append for the instance lifetime, per-session deletion is removed, and retained Action or Task conversations are no longer recursively deleted. Workflow-local canonical conversation state is scoped to one workflow execution rather than shared across runs.
+- **Agent conversation reads expose one materialized projection, not canonical records.** `client.agents.history()` returns a `FlueConversationSnapshot` and `client.agents.observe()` maintains a live `FlueConversationState`; both are built from a single, strictly-validated UI chunk protocol (`ConversationStreamChunk`) that the runtime projects from its private canonical log. The canonical record schema, the client-side reducer, `agents.updates()`, and replay/offset bookkeeping (`AgentConversationDeltaState`, `recordIds`) are no longer public. `@flue/react` consumes the SDK projection directly: its message types are renamed `FlueConversationMessage` / `FlueConversationPart` (no AI SDK compatibility is claimed), tool parts are `dynamic-tool`, and attachments and optimistic uploads share one `file` part.
+- **Conversation reads address the agent instance's default conversation only.** The `conversationId`, `harness`, and `session` selectors are removed from the SDK, the HTTP conversation route, and `useFlueAgent`; the vestigial React `history: 'all'` option is removed.
+- **Attachments are separate immutable payloads with an opt-in byte route.** Canonical records carry opaque references resolved through the required `AttachmentStore`. The public conversation projects them as `file` parts carrying `{ mediaType, id?, size?, filename?, url? }`. Bytes are served from a new `GET /agents/:name/:id/attachments/:attachmentId` route that is **opt-in per agent**: it returns 404 unless the agent module exports an `attachments` Hono middleware (which authorizes and scopes access). `@flue/sdk` resolves a ready-to-use `url` onto durably-recorded `file` parts (and exposes `client.agents.attachmentUrl(name, id, attachmentId)`); a local optimistic echo instead carries a `data:` URL preview of the bytes being uploaded.
+- **Free-floating conversation data events are removed.** `emitData()` and standalone `data-*` message parts are removed from runtime, tool, Action, SDK, and React APIs. Structured tool output remains available on the owning tool part; workflow Actions continue to return validated structured output.
+
+### Fixes & Other Changes
+
+- Canonical tool outcomes are now durably recorded before one atomic commit publishes a complete tool-result batch. Recovery reuses known outcomes and materializes unknown interrupted outcomes without exposing partial tool-result prefixes.
+- Direct agent admission receipts continue to return `{ streamUrl, offset, submissionId }`; workflow receipts remain `{ runId }` or `{ runId, result }` when waiting.
+- Direct agent prompts now record the user message in the canonical conversation (with its submission id) on both the Node and Cloudflare runtimes, so a page refresh reconstructs the full transcript — including the user's prompt — from `client.agents.history()` / `observe()` instead of dropping it.
+- `@flue/react` keeps a stable message id across the optimistic→confirmed transition (the canonical user message is re-keyed to the optimistic id), so keyed/virtualized transcripts no longer see a remove+add that breaks auto-scroll. Failed sends are retained in the transcript and surfaced via a new `failedSends` snapshot field for retry affordances instead of silently disappearing. Optimistic image sends render an instant local preview.
+- `flue dev` now serves permissive, credential-safe CORS (reflecting the request `Origin`, answering preflight with 204) so a separate-origin SPA can call the dev server without configuration. Deployed Node servers are unchanged; CORS there remains an application concern.
+- `@flue/sdk` binds its default `fetch` to `globalThis`, fixing a `TypeError: Illegal invocation` when calling the client from a browser without a pre-bound `fetch`.
+
 ## @flue/runtime, @flue/cli, @flue/sdk, and @flue/react 1.0.0-beta.7 - 2026-06-25
 
 ### New Features

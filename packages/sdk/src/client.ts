@@ -3,6 +3,20 @@ import { HttpClient, type HttpClientOptions, type RequestHeaders } from './http.
 
 export type { HttpClientOptions } from './http.ts';
 
+import type {
+	FlueConversationHistoryOptions,
+	FlueConversationMessage,
+	FlueConversationSnapshot,
+} from './public/conversation.ts';
+import {
+	type ConversationStreamChunk,
+	assertConversationStreamChunk,
+} from './public/conversation-stream.ts';
+import {
+	createAgentConversationObservation,
+	type AgentConversationObservation,
+	type AgentConversationObserveOptions,
+} from './public/observe.ts';
 import {
 	type AgentPromptOptions,
 	type AgentPromptResult,
@@ -24,7 +38,6 @@ import {
 } from './public/stream.ts';
 import type {
 	AgentPromptResponse,
-	AttachedAgentEvent,
 	FlueEvent,
 	RunRecord,
 } from './types.ts';
@@ -73,12 +86,25 @@ export interface FlueClient {
 			admission: AgentSendResult,
 			options?: AgentWaitOptions,
 		): Promise<TResult>;
-		/** Stream events from an agent instance via the Durable Streams protocol. */
-		stream(
+		/** Reads one materialized conversation snapshot for the agent instance. */
+		history(
 			name: string,
 			id: string,
-			options?: FlueStreamOptions,
-		): FlueEventStream<AttachedAgentEvent>;
+			options?: FlueConversationHistoryOptions,
+		): Promise<FlueConversationSnapshot>;
+		/** Observes one materialized conversation across history catch-up and live updates. */
+		observe(
+			name: string,
+			id: string,
+			options?: AgentConversationObserveOptions,
+		): AgentConversationObservation;
+		/**
+		 * Absolute URL for one `file` part's attachment bytes, suitable as an
+		 * `<img>`/`<a>` source. The download endpoint is opt-in per agent (via the
+		 * agent module's `attachments` middleware export); without it the URL
+		 * returns 404.
+		 */
+		attachmentUrl(name: string, id: string, attachmentId: string): string;
 	};
 	/** Workflow-run inspection and streaming APIs. */
 	runs: {
@@ -105,6 +131,57 @@ export interface FlueClient {
 	};
 }
 
+// The runtime can't know the HTTP mount/baseUrl, so the SDK resolves a ready-to-
+// use `url` onto each durably-recorded `file` part (those with an `id`). This
+// lets consumers read `part.url` directly instead of constructing it via
+// `attachmentUrl`. Optimistic parts (no `id`) carry their own `data:` preview and
+// are left untouched.
+function withAttachmentUrls(
+	message: FlueConversationMessage,
+	http: HttpClient,
+	name: string,
+	id: string,
+): FlueConversationMessage {
+	let changed = false;
+	const parts = message.parts.map((part) => {
+		if (part.type === 'file' && part.id !== undefined && part.url === undefined) {
+			changed = true;
+			return {
+				...part,
+				url: http.url(
+					`/agents/${encodeURIComponent(name)}/${encodeURIComponent(id)}/attachments/${encodeURIComponent(part.id)}`,
+				),
+			};
+		}
+		return part;
+	});
+	return changed ? { ...message, parts } : message;
+}
+
+function rewriteSnapshotAttachmentUrls(
+	snapshot: FlueConversationSnapshot,
+	http: HttpClient,
+	name: string,
+	id: string,
+): FlueConversationSnapshot {
+	return { ...snapshot, messages: snapshot.messages.map((message) => withAttachmentUrls(message, http, name, id)) };
+}
+
+function rewriteChunkAttachmentUrls(
+	chunk: ConversationStreamChunk,
+	http: HttpClient,
+	name: string,
+	id: string,
+): ConversationStreamChunk {
+	if (chunk.type === 'conversation-reset') {
+		return { ...chunk, snapshot: rewriteSnapshotAttachmentUrls(chunk.snapshot, http, name, id) };
+	}
+	if (chunk.type === 'message-appended') {
+		return { ...chunk, message: withAttachmentUrls(chunk.message, http, name, id) };
+	}
+	return chunk;
+}
+
 /** Creates a client for the public routes of a deployed Flue application. */
 export function createFlueClient(options: CreateFlueClientOptions): FlueClient {
 	const http = new HttpClient(options);
@@ -113,11 +190,50 @@ export function createFlueClient(options: CreateFlueClientOptions): FlueClient {
 			prompt: (name, id, opts) => promptAgent(http, name, id, opts),
 			send: (name, id, opts) => sendAgent(http, name, id, opts),
 			wait: (admission, opts) => waitForAgentSubmission(http, admission, opts),
-			stream: (name, id, opts = {}) =>
-				createFlueEventStream<AttachedAgentEvent>(opts, {
-					url: http.url(`/agents/${encodeURIComponent(name)}/${encodeURIComponent(id)}`),
-					fetch: http.fetchWithHeaders.bind(http),
-				}),
+			history: async (name, id, opts = {}) =>
+				rewriteSnapshotAttachmentUrls(
+					await http.json<FlueConversationSnapshot>({
+						path: `/agents/${encodeURIComponent(name)}/${encodeURIComponent(id)}`,
+						query: { view: 'history' },
+						signal: opts.signal,
+					}),
+					http,
+					name,
+					id,
+				),
+			observe: (name, id, opts = {}) =>
+				createAgentConversationObservation(
+					{
+						history: async (historyOptions) =>
+							rewriteSnapshotAttachmentUrls(
+								await http.json<FlueConversationSnapshot>({
+									path: `/agents/${encodeURIComponent(name)}/${encodeURIComponent(id)}`,
+									query: { view: 'history' },
+									signal: historyOptions.signal,
+								}),
+								http,
+								name,
+								id,
+							),
+						updates: (updateOptions) =>
+							createFlueEventStream<ConversationStreamChunk>(
+								updateOptions,
+								{
+									url: http.url(`/agents/${encodeURIComponent(name)}/${encodeURIComponent(id)}`, {
+										view: 'updates',
+									}),
+									fetch: http.fetchWithHeaders.bind(http),
+								},
+								(chunk) =>
+									rewriteChunkAttachmentUrls(assertConversationStreamChunk(chunk), http, name, id),
+							),
+					},
+					opts,
+				),
+			attachmentUrl: (name, id, attachmentId) =>
+				http.url(
+					`/agents/${encodeURIComponent(name)}/${encodeURIComponent(id)}/attachments/${encodeURIComponent(attachmentId)}`,
+				),
 		},
 		runs: {
 			get: (runId) => http.json<RunRecord>({ path: `/runs/${encodeURIComponent(runId)}?meta` }),

@@ -39,9 +39,7 @@ export default mongodb(runner);
 
 The blueprint does not modify the MongoDB deployment, which must support
 transactions. Flue discovers the adapter during a Node build
-and persists agent sessions, accepted submissions, workflow runs, event
-streams, and image chunks so that state survives process restarts and can be
-shared across replicas. Application business data remains application-owned.
+and persists canonical agent conversations, immutable attachments, accepted submissions, workflow runs, and event streams so that state survives process replacement. Replicas may share durable state and workflow history, but each agent instance still requires one live Node owner. Application business data remains application-owned.
 
 ## Configure
 
@@ -131,11 +129,7 @@ that bypasses the adapter's BSON-limit handling.
 
 ## What gets stored
 
-MongoDB stores session generations and messages, permanent session guards,
-accepted direct and dispatched submissions, recovery journals, leases and
-deletion receipts, workflow runs and indexes, persisted event streams, and image
-chunks. Session-tree cleanup is fenced and may retry its idempotent external
-callback after an expired lease.
+MongoDB stores append-only canonical conversation records, immutable attachment payloads, accepted direct and dispatched submissions, recovery claims and leases, workflow runs and indexes, and persisted event streams. Sessions append for the agent-instance lifetime; there are no session generations, transcript snapshots, per-session deletion, or recursive session-tree cleanup.
 
 The adapter does not store sandbox files, external API side effects, credentials,
 or application-owned business records.
