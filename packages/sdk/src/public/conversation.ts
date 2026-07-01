@@ -47,7 +47,7 @@ export type FlueConversationPart =
  * following the standard chat convention so a generic renderer can lay out a
  * transcript without understanding the finer {@link FlueConversationMessagePurpose}.
  */
-export type FlueConversationMessageRole = 'user' | 'assistant' | 'system';
+type FlueConversationMessageRole = 'user' | 'assistant' | 'system';
 
 /**
  * Stable semantic classification of a message, independent of its rendered
@@ -56,21 +56,21 @@ export type FlueConversationMessageRole = 'user' | 'assistant' | 'system';
  * advisories (`advisory`) without parsing content, ordering, or timestamps.
  * The union may widen as the runtime grows typed agent-activity signals.
  */
-export type FlueConversationMessagePurpose = 'user' | 'assistant' | 'dispatch' | 'advisory';
+type FlueConversationMessagePurpose = 'user' | 'assistant' | 'dispatch' | 'advisory';
 
 /**
  * How a transcript UI should treat a message: `visible` for primary chat,
  * `diagnostic` for content suited to an activity/diagnostics panel, `hidden`
  * for runtime plumbing that should not normally be shown.
  */
-export type FlueConversationMessageDisplay = 'visible' | 'hidden' | 'diagnostic';
+type FlueConversationMessageDisplay = 'visible' | 'hidden' | 'diagnostic';
 
 /**
  * Typed detail for a message projected from an internal runtime signal. Present
  * only on `system`-role messages. Carries across history snapshots and live
  * updates so clients can subtype or correlate signals without parsing text.
  */
-export interface FlueConversationSignalDescriptor {
+interface FlueConversationSignalDescriptor {
 	tagName?: string;
 	attributes?: Record<string, string>;
 }

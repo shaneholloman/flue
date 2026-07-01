@@ -44,7 +44,7 @@ type ConversationUiPart =
  * mirroring the standard chat convention so a generic renderer can lay a
  * transcript out without understanding Flue's finer {@link ConversationMessagePurpose}.
  */
-export type ConversationMessageRole = 'user' | 'assistant' | 'system';
+type ConversationMessageRole = 'user' | 'assistant' | 'system';
 
 /**
  * Stable semantic classification of a message, independent of its rendered
@@ -71,7 +71,7 @@ export type ConversationMessageDisplay = 'visible' | 'hidden' | 'diagnostic';
  * `attributes` its structured metadata; both carry across history snapshots and
  * live updates so clients can subtype or correlate signals without parsing text.
  */
-export interface ConversationSignalDescriptor {
+interface ConversationSignalDescriptor {
 	tagName?: string;
 	attributes?: Record<string, string>;
 }
