@@ -1,5 +1,20 @@
 # Changelog
 
+## Unreleased
+
+### New Features
+
+- Public conversation messages now expose typed `purpose` (`user`, `assistant`, `dispatch`, or `advisory`) and `display` (`visible`, `hidden`, or `diagnostic`), plus optional `turnId` grouping and a `signal` descriptor, so clients can distinguish public chat from internal, control, and advisory activity without parsing message text, timestamps, or ordering. The classification is applied identically across `client.agents.history()` snapshots and live updates, and `@flue/sdk` / `@flue/react` shapes are updated in lockstep (#404).
+- `@flue/react`'s `useFlueAgent()` now exposes `refresh()`, so apps observing an agent conversation that may be created out-of-band (a server-side wakeup, queue worker, or webhook) can re-check on their own schedule instead of faking an empty history snapshot. Retry policy stays in userland (#403).
+
+### Fixes & Other Changes
+
+- MCP tool connections no longer crash on Cloudflare Workers when a connected server advertises a tool `outputSchema`. JSON Schema validation now uses a codegen-free strategy compatible with the workerd runtime instead of runtime code generation (#400).
+- Completed assistant messages now preserve their `submissionId` in `client.agents.history()` snapshots, so clients that group a user turn with its assistant answer by submission id keep that grouping after reload (#402).
+- Tool-call duration is now durably recorded and surfaced as `durationMs` on the resolved `dynamic-tool` part in both history snapshots and live updates, instead of being available only on the ephemeral live event (#407).
+- The Cloudflare agent extension's `wrap` callback now preserves the generated Durable Object constructor type, so platform instrumentation can wrap it without runtime constructability assertions or unsafe casts (#410).
+- Documented the supported pattern for reaching a private Flue agent over a Cloudflare service binding: point the `@flue/sdk` client's `fetch` option at the binding, since the `baseUrl` host is never dialed and only the pathname and query drive routing (#408).
+
 ## 1.0.0-beta.9 - 2026-06-29
 
 ### Fixes & Other Changes
