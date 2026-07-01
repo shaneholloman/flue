@@ -82,4 +82,4 @@ A complete runnable version of the agent, harness, and eval is available in [`ex
 
 ## Bring your own evals
 
-You do not need `vitest-evals` to evaluate a Flue application. An eval can call an agent with `client.agents.prompt(...)` or a workflow with `client.workflows.invoke(...)`, compare the returned result with the behavior you expect, and send the result to any test runner or hosted platform. The harness in this guide packages that work for `vitest-evals`; use the same SDK boundary to integrate another eval library or your own scoring pipeline.
+You do not need `vitest-evals` to evaluate a Flue application. An eval can drive an agent with `client.agents.send(...)` plus `client.agents.wait(...)` and read its reply from `client.agents.history(...)`, or run a workflow with `client.workflows.invoke(...)` and use its returned result — then compare against the behavior you expect and send the score to any test runner or hosted platform. The harness in this guide packages that work for `vitest-evals`; use the same SDK boundary to integrate another eval library or your own scoring pipeline.

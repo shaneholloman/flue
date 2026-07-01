@@ -9,8 +9,13 @@ export interface FlueAgentHarnessOptions {
 	headers?: Record<string, string>;
 }
 
-function lastAssistantText(messages: FlueConversationMessage[]): string {
-	const message = messages.findLast((entry) => entry.role === 'assistant');
+function lastAssistantMessage(
+	messages: FlueConversationMessage[],
+): FlueConversationMessage | undefined {
+	return messages.findLast((entry) => entry.role === 'assistant');
+}
+
+function messageText(message: FlueConversationMessage | undefined): string {
 	if (!message) return '';
 	return message.parts
 		.filter((part) => part.type === 'text')
@@ -55,10 +60,30 @@ export function createFlueAgentHarness(options: FlueAgentHarnessOptions) {
 			});
 			await client.agents.wait(admission, { signal });
 			const history = await client.agents.history(options.agentName, instanceId, { signal });
+			const reply = lastAssistantMessage(history.messages);
+			const usage = reply?.metadata?.usage;
+			const model = reply?.metadata?.model;
 
 			return {
-				output: lastAssistantText(history.messages),
+				output: messageText(reply),
 				toolCalls: collectToolCalls(history.messages),
+				// The reply's own message metadata carries usage/model — the same
+				// data the removed prompt-result surface used to return.
+				...((usage ?? model)
+					? {
+							usage: {
+								...(model ? { provider: model.provider, model: model.id } : {}),
+								...(usage
+									? {
+											inputTokens: usage.input,
+											outputTokens: usage.output,
+											totalTokens: usage.totalTokens,
+											metadata: { cost: usage.cost.total },
+										}
+									: {}),
+							},
+						}
+					: {}),
 			};
 		},
 	});

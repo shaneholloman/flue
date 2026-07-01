@@ -64,19 +64,11 @@ curl -X POST http://localhost:3583/agents/assistant/main \
   -H 'Content-Type: application/json' \
   -d '{ "message": "Summarize the open issues." }'
 # → 202 { "streamUrl": "...", "offset": "...", "submissionId": "..." }
-
-# Block until the agent settles and return the terminal result inline.
-curl -X POST 'http://localhost:3583/agents/assistant/main?wait=result' \
-  -H 'Content-Type: application/json' \
-  -d '{ "message": "Summarize the open issues." }'
-# → 200 { "result": ..., "streamUrl": "...", "offset": "...", "submissionId": "..." }
 ```
 
-`POST /agents/:name/:id` returns `202 { streamUrl, offset, submissionId }` after admission, or `200 { result, streamUrl, offset, submissionId }` with `?wait=result`; agent response headers and stream-coordinate behavior are unchanged. `POST /workflows/:name` returns `202 { runId }`, or `200 { runId, result }` with `?wait=result`. Workflow invocation responses do not include `Location` or `Stream-Next-Offset` headers. Any `?wait` value other than `result` is rejected with `400 invalid_request` on both routes.
+`POST /agents/:name/:id` is fire-and-forget: it returns `202 { streamUrl, offset, submissionId }` after admission and never blocks on the agent's response. A prompt is delivered into the instance's living conversation and has no single terminal "result" value, so `?wait=result` is not supported on agents and is rejected with `400 invalid_request`; read the reply by observing the conversation from the returned stream coordinates. `POST /workflows/:name` returns `202 { runId }`, or `200 { runId, result }` with `?wait=result` (a workflow run does have a terminal result). Workflow invocation responses do not include `Location` or `Stream-Next-Offset` headers. Any `?wait` value other than `result` is rejected with `400 invalid_request` on the workflow route.
 
-`POST /agents/:name/:id/abort` stops all in-flight and queued durable work for the instance and returns `200 { aborted }` — `aborted` is `true` when there was unsettled work, `false` when the instance was idle. Abort records a durable intent and returns before settlement; the aborted work settles to a distinct **aborted** outcome (a `submission_aborted` conversation entry, and a `submission_settled` record with `outcome: 'aborted'` for direct prompts), and a pending `?wait=result` caller's connection fails with `submission_aborted`. Work that already completed is unaffected.
-
-For agent prompts, waiting with `?wait=result` is best-effort and scoped to the process that admitted the prompt. The prompt itself is a durable submission either way: if the admitting process is interrupted before settlement, the waiting connection is lost while recovery settles the submission in the background — the outcome then appears in canonical conversation history and as a `submission_settled` record on the agent's stream instead of answering the original request. A caller that must observe the outcome across interruptions should read the agent stream from the returned coordinates rather than relying on the synchronous response.
+`POST /agents/:name/:id/abort` stops all in-flight and queued durable work for the instance and returns `200 { aborted }` — `aborted` is `true` when there was unsettled work, `false` when the instance was idle. Abort records a durable intent and returns before settlement; the aborted work settles to a distinct **aborted** outcome (a `submission_aborted` conversation entry, and a `submission_settled` record with `outcome: 'aborted'`). Work that already completed is unaffected. The outcome appears in canonical conversation history and on the agent's stream; observe from the returned coordinates to react to it.
 
 `GET /runs/:runId?meta` selects the persisted run-record view (`runId`, `workflowName`, `status`, timestamps, `input`, `result`, `error`) as plain JSON. The `?meta` response carries no Durable Streams headers, and stream parameters (`offset`, `live`) are ignored.
 

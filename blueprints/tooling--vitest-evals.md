@@ -55,7 +55,7 @@ Create `src/evals/harness.ts`:
 
 ```ts title="src/evals/harness.ts"
 // flue-blueprint: tooling/vitest-evals@1
-import { createFlueClient, type AgentConversationMessage } from '@flue/sdk';
+import { createFlueClient, type FlueConversationMessage } from '@flue/sdk';
 import { createHarness, type SimpleToolCallRecord } from 'vitest-evals';
 
 export interface FlueAgentHarnessOptions {
@@ -65,10 +65,24 @@ export interface FlueAgentHarnessOptions {
   headers?: Record<string, string>;
 }
 
-function collectToolCalls(messages: AgentConversationMessage[]): SimpleToolCallRecord[] {
+function lastAssistantMessage(
+  messages: FlueConversationMessage[],
+): FlueConversationMessage | undefined {
+  return messages.findLast((entry) => entry.role === 'assistant');
+}
+
+function messageText(message: FlueConversationMessage | undefined): string {
+  if (!message) return '';
+  return message.parts
+    .filter((part) => part.type === 'text')
+    .map((part) => part.text)
+    .join('');
+}
+
+function collectToolCalls(messages: FlueConversationMessage[]): SimpleToolCallRecord[] {
   return messages.flatMap((message) =>
     message.parts.flatMap((part) => {
-      if (part.type !== 'tool') return [];
+      if (part.type !== 'dynamic-tool') return [];
       return [
         {
           id: part.toolCallId,
@@ -96,31 +110,43 @@ export function createFlueAgentHarness(options: FlueAgentHarnessOptions) {
     name: `flue-${options.agentName}-agent`,
     run: async ({ input, signal }) => {
       const instanceId = `eval-${crypto.randomUUID()}`;
-      const invocation = await client.agents.prompt(options.agentName, instanceId, {
+      const admission = await client.agents.send(options.agentName, instanceId, {
         message: input,
         signal,
       });
+      await client.agents.wait(admission, { signal });
       const history = await client.agents.history(options.agentName, instanceId, { signal });
-      const toolCalls = collectToolCalls(history.messages);
+      const reply = lastAssistantMessage(history.messages);
+      const usage = reply?.metadata?.usage;
+      const model = reply?.metadata?.model;
 
       return {
-        output: invocation.result.text,
-        toolCalls,
-        usage: {
-          provider: invocation.result.model.provider,
-          model: invocation.result.model.id,
-          inputTokens: invocation.result.usage.input,
-          outputTokens: invocation.result.usage.output,
-          totalTokens: invocation.result.usage.totalTokens,
-          cost: invocation.result.usage.cost.total,
-        },
+        output: messageText(reply),
+        toolCalls: collectToolCalls(history.messages),
+        // The reply's own message metadata carries usage/model — agent prompts
+        // are fire-and-forget and have no separate "result" to read this from.
+        ...((usage ?? model)
+          ? {
+              usage: {
+                ...(model ? { provider: model.provider, model: model.id } : {}),
+                ...(usage
+                  ? {
+                      inputTokens: usage.input,
+                      outputTokens: usage.output,
+                      totalTokens: usage.totalTokens,
+                      metadata: { cost: usage.cost.total },
+                    }
+                  : {}),
+              },
+            }
+          : {}),
       };
     },
   });
 }
 ```
 
-The awaited prompt settles only after its canonical conversation records are persisted, so the following `history()` snapshot contains the completed messages and tool activity for that fresh instance. The harness creates a new agent instance for every `run(...)`; reuse an instance only inside an application-specific harness for a case that intentionally evaluates conversation memory.
+Agent prompts are fire-and-forget: `send()` admits the prompt and `wait()` only awaits completion, so the following `history()` snapshot — read after `wait()` resolves — contains the completed messages and tool activity for that fresh instance. The harness creates a new agent instance for every `run(...)`; reuse an instance only inside an application-specific harness for a case that intentionally evaluates conversation memory.
 
 Do not remove the abort signal or derive tool calls from runtime-internal events. Preserve output, token usage, cost, and tool activity unless project-specific data policy requires omitting them.
 

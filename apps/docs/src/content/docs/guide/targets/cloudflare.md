@@ -129,16 +129,16 @@ export default {
       fetch: (input, init) => env.AGENT_APP.fetch(new Request(input, init)),
     });
 
-    const result = await client.agents.prompt('support', 'ticket-42', {
+    const admission = await client.agents.send('support', 'ticket-42', {
       message: 'Summarize this ticket.',
     });
 
-    return Response.json(result);
+    return Response.json(admission);
   },
 };
 ```
 
-The binding carries the same HTTP requests the public routes use, so every client operation works over it — `prompt`, `send`, `wait`, `abort`, `history`, and `observe` in both `long-poll` and `sse` modes. Streaming reads travel through the same `fetch`, so live conversation updates cross the binding and the owning Durable Object with no extra wiring.
+The binding carries the same HTTP requests the public routes use, so every client operation works over it — `send`, `wait`, `abort`, `history`, and `observe` in both `long-poll` and `sse` modes. Streaming reads travel through the same `fetch`, so live conversation updates cross the binding and the owning Durable Object with no extra wiring.
 
 Attachments are the one exception. `client.agents.attachmentUrl(...)` returns a URL on the placeholder host and the client never fetches it for you; the same URL also appears on `file` parts in `observe()` and `history()` snapshots. To download attachment bytes over a binding, forward that URL through the same fetcher:
 

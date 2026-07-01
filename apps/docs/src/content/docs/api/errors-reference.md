@@ -105,7 +105,7 @@ Harness and session operations, and runtime provider registration, reject with t
 | `SubmissionTimeoutError`    | `submission_timeout`            | A durable submission exceeded its configured processing timeout.                                                                                                                                                                     |
 | `ProviderRegistrationError` | `invalid_provider_registration` | `registerProvider()` targets a non-catalog provider id without `api` and `baseUrl`.                                                                                                                                                  |
 
-When one of these errors escapes to an HTTP transport (for example, a synchronous `?wait=result` invocation), the response body carries the error's typed envelope with status `500` instead of the generic `internal_error` payload.
+When one of these errors escapes to an HTTP transport (for example, a synchronous workflow `?wait=result` invocation), the response body carries the error's typed envelope with status `500` instead of the generic `internal_error` payload.
 
 ### `ResultUnavailableError`
 
